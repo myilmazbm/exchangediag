@@ -168,6 +168,54 @@ function Get-EDMetaList {
     return @($property.Value | Where-Object { "$_" -ne '' } | Sort-Object)
 }
 
+function Get-EDMetaFieldState {
+    <#
+        run-meta.json'dan tek bir KAPSAM alanini okur ve alanin VAR OLUP
+        OLMADIGINI da bildirir.
+
+        Neden ayri bir "Present" bayragi gerekli: Get-EDProperty eksik alanda
+        varsayilani dondurur ve varsayilan, kiyas kodunda "fark yok" gibi
+        okunur. Oysa eksik alan farkin YOKLUGU degil, farkin
+        DENETLENEMEDIGIDIR. Ikisini ayirt edemeyen kod, farkli pencereyle
+        alinmis iki kosuyu "pencere ayni" diye yan yana koyar - bu motorun
+        engellemek icin var oldugu ilk hatanin ta kendisi.
+
+        Alanin kendisi de KORUMASIZ okunamaz: eski surumle uretilmis meta
+        dosyalarinda alan hic yoktur ve StrictMode altinda dogrudan erisim
+        delta raporunun tamamini cokertir.
+    #>
+    param($Meta, [string]$Name, $Default = $null)
+
+    $present = $false
+    if ($null -ne $Meta) {
+        $property = $Meta.PSObject.Properties[$Name]
+        $present = ($null -ne $property -and $null -ne $property.Value)
+    }
+    return [pscustomobject]@{
+        Present = $present
+        Value   = (Get-EDProperty -InputObject $Meta -Name $Name -Default $Default)
+    }
+}
+
+function Get-EDMetaGapNote {
+    <#
+        Iki taraftan biri alani tasimiyorsa okunabilir bir "denetlenemedi"
+        cumlesi uretir; ikisi de tasiyorsa $null doner (kiyas kurulabilir).
+
+        Cumlede alan ADI acikca gecer: operator hangi boyutun dogrulanmadigini
+        bilmeden raporun ne kadarina guvenecegine karar veremez.
+    #>
+    param([string]$Name, [string]$Dimension, $PreviousState, $CurrentState)
+
+    $missingIn = @()
+    if (-not $PreviousState.Present) { $missingIn += 'onceki' }
+    if (-not $CurrentState.Present) { $missingIn += 'simdiki' }
+    if ($missingIn.Count -eq 0) { return $null }
+
+    return ("Kapsam alani '{0}' {1} run-meta'da YOK: {2} DENETLENEMEDI. Eksik alan 'fark yok' demek DEGILDIR; bu boyutta kiyas dogrulanmamistir." -f `
+        $Name, ($missingIn -join ' ve '), $Dimension)
+}
+
 function Test-EDRunComparable {
 <#
     .SYNOPSIS
@@ -176,6 +224,25 @@ function Test-EDRunComparable {
     .OUTPUTS
         Blocking : kiyasi anlamsiz kilan farklar (pencere, heavy, log erisimi)
         Advisory : dikkat edilmesi gereken ama kiyasi gecersiz kilmayan farklar
+
+    .NOTES
+        EKSIK ALAN NEDEN "FARK YOK" DEGILDIR
+        ------------------------------------
+        Onceki kosumun run-meta.json'i eski bir surumle uretilmis olabilir;
+        fonksiyonun ilk dali bu ihtimali zaten kabul ediyor. O halde alanlar
+        da korumasiz okunamaz. Ama yalnizca varsayilan koyup gecmek daha
+        beterdir: eksik windowHours'u simdiki degerle esitlemek "pencere
+        ayni" demektir ve operator, 1 saatlik pencereyle 24 saatlik pencereyi
+        kiyaslayan bir raporu sahici bir delta sanir.
+
+        Bu yuzden her eksik alan icin acik bir "DENETLENEMEDI" bilgisi
+        uretilir ve kovasi, o alandaki FARKIN kovasiyla ayni olur:
+        kiyasi anlamsiz kilan bir boyut (pencere, -Heavy, log erisim yolu)
+        DENETLENEMIYORSA sonuc Advisory degil Blocking'dir - "dikkat et ama
+        guvenebilirsin" demek, guvenilmez bir kiyasi onaylamaktir.
+        Kiyasi gecersiz kilmayan boyutlarda (sunucu kumesi, profil, saat)
+        eksiklik Advisory kalir: bu boyutlarin FARKI da zaten kiyasi
+        gecersiz kilmiyordu.
 #>
     [CmdletBinding()]
     param($Previous, $Current)
@@ -189,29 +256,72 @@ function Test-EDRunComparable {
     }
 
     # --- Kiyasi gecersiz kilan farklar ---
-    if ([double]$Previous.windowHours -ne [double]$Current.windowHours) {
+    # Bu uc boyutta EKSIK ALAN da Blocking'dir; gerekcesi .NOTES'ta.
+    $previousWindow = Get-EDMetaFieldState -Meta $Previous -Name 'windowHours'
+    $currentWindow = Get-EDMetaFieldState -Meta $Current -Name 'windowHours'
+    $gap = Get-EDMetaGapNote -Name 'windowHours' -Dimension 'log penceresinin ayni olup olmadigi' `
+        -PreviousState $previousWindow -CurrentState $currentWindow
+    if ($gap) {
+        $blocking += ($gap + ' Farkli pencerelerde alinmis persentiller zaten farkli cikar; bu fark bir DEGISIM sanilmamalidir.')
+    }
+    elseif ([double]$previousWindow.Value -ne [double]$currentWindow.Value) {
         $blocking += ("Log penceresi farkli: onceki {0} saat, simdiki {1} saat. Persentiller zaten farkli cikar; bu bir DEGISIM degil OLCUM FARKIDIR." -f `
-            $Previous.windowHours, $Current.windowHours)
+            $previousWindow.Value, $currentWindow.Value)
     }
-    if ([bool]$Previous.heavy -ne [bool]$Current.heavy) {
+
+    $previousHeavy = Get-EDMetaFieldState -Meta $Previous -Name 'heavy'
+    $currentHeavy = Get-EDMetaFieldState -Meta $Current -Name 'heavy'
+    $gap = Get-EDMetaGapNote -Name 'heavy' -Dimension 'agir modullerin iki kosuda da kosup kosmadigi' `
+        -PreviousState $previousHeavy -CurrentState $currentHeavy
+    if ($gap) {
+        $blocking += ($gap + " Agir moduller yalnizca birinde kosmus olabilir; eksik satirlar 'kayboldu' sanilmamalidir.")
+    }
+    elseif ([bool]$previousHeavy.Value -ne [bool]$currentHeavy.Value) {
         $blocking += ("-Heavy farkli (onceki {0}, simdiki {1}): agir moduller yalnizca birinde kosmus; eksik satirlar 'kayboldu' sanilmamalidir." -f `
-            $Previous.heavy, $Current.heavy)
+            $previousHeavy.Value, $currentHeavy.Value)
     }
-    if ([string]$Previous.logAccess -ne [string]$Current.logAccess) {
+
+    $previousLogAccess = Get-EDMetaFieldState -Meta $Previous -Name 'logAccess'
+    $currentLogAccess = Get-EDMetaFieldState -Meta $Current -Name 'logAccess'
+    $gap = Get-EDMetaGapNote -Name 'logAccess' -Dimension 'log erisim yolunun ayni olup olmadigi' `
+        -PreviousState $previousLogAccess -CurrentState $currentLogAccess
+    if ($gap) {
+        $blocking += ($gap + ' Ham ayristirici ile cmdlet ayni pencerede farkli sayida kayit gorebilir.')
+    }
+    elseif ([string]$previousLogAccess.Value -ne [string]$currentLogAccess.Value) {
         $blocking += ("Log erisim yolu farkli (onceki '{0}', simdiki '{1}'): ham ayristirici ile cmdlet ayni pencerede farkli sayida kayit gorebilir." -f `
-            $Previous.logAccess, $Current.logAccess)
+            $previousLogAccess.Value, $currentLogAccess.Value)
     }
 
     # --- Dikkat gerektiren ama kiyasi gecersiz kilmayan farklar ---
-    $previousServers = @($Previous.servers)
-    $currentServers = @($Current.servers)
-    $gone = @($previousServers | Where-Object { $_ -notin $currentServers })
-    $added = @($currentServers | Where-Object { $_ -notin $previousServers })
-    if ($gone.Count -gt 0) { $advisory += ("Onceki calistirmada olup simdi olmayan sunucu: {0}" -f ($gone -join ', ')) }
-    if ($added.Count -gt 0) { $advisory += ("Simdi eklenen sunucu: {0}" -f ($added -join ', ')) }
+    # Buradaki alanlarin FARKI kiyasi gecersiz kilmadigi icin, denetlenememesi
+    # de kilmaz: sonuc Advisory'dir. Yine de susulmaz - "sunucu kumesi ayni"
+    # iddiasinda bulunulmamis olur.
+    $previousServersState = Get-EDMetaFieldState -Meta $Previous -Name 'servers'
+    $currentServersState = Get-EDMetaFieldState -Meta $Current -Name 'servers'
+    $gap = Get-EDMetaGapNote -Name 'servers' -Dimension 'sunucu kumesinin ayni olup olmadigi' `
+        -PreviousState $previousServersState -CurrentState $currentServersState
+    if ($gap) {
+        $advisory += ($gap + " Kapsam disi kalmis bir sunucunun degerleri 'kayboldu' gibi gorunebilir.")
+    }
+    else {
+        $previousServers = @($previousServersState.Value)
+        $currentServers = @($currentServersState.Value)
+        $gone = @($previousServers | Where-Object { $_ -notin $currentServers })
+        $added = @($currentServers | Where-Object { $_ -notin $previousServers })
+        if ($gone.Count -gt 0) { $advisory += ("Onceki calistirmada olup simdi olmayan sunucu: {0}" -f ($gone -join ', ')) }
+        if ($added.Count -gt 0) { $advisory += ("Simdi eklenen sunucu: {0}" -f ($added -join ', ')) }
+    }
 
-    if ([string]$Previous.profile -ne [string]$Current.profile) {
-        $advisory += ("Profil farkli (onceki '{0}', simdiki '{1}'): esikler ve bastirilan bulgular degismis olabilir." -f $Previous.profile, $Current.profile)
+    $previousProfile = Get-EDMetaFieldState -Meta $Previous -Name 'profile'
+    $currentProfile = Get-EDMetaFieldState -Meta $Current -Name 'profile'
+    $gap = Get-EDMetaGapNote -Name 'profile' -Dimension 'profilin ayni olup olmadigi' `
+        -PreviousState $previousProfile -CurrentState $currentProfile
+    if ($gap) {
+        $advisory += ($gap + ' Esikler ve bastirilan bulgular farkli olabilir.')
+    }
+    elseif ([string]$previousProfile.Value -ne [string]$currentProfile.Value) {
+        $advisory += ("Profil farkli (onceki '{0}', simdiki '{1}'): esikler ve bastirilan bulgular degismis olabilir." -f $previousProfile.Value, $currentProfile.Value)
     }
 
     # --- Kapsam: modul kumesi ---
@@ -238,18 +348,43 @@ function Test-EDRunComparable {
     # --- Kapsam: sunucu filtresi ---
     # Bos filtre GERCEK bir degerdir ("suzme yok"), bilinmezlik degil; bu
     # yuzden modul listesinin aksine bos taraf da kiyasa girer.
+    #
+    # DIKKAT: "bos" ile "alan yok" yine de ayrilmak zorundadir. Alan hic
+    # yoksa Get-EDMetaList bos liste dondurur ve iki bos liste esit cikar -
+    # yani kod, denetlemedigi bir boyut icin "filtre ayni" IDDIASINDA
+    # bulunur. Modul listesinde boyle bir iddia hic kurulmuyor (esitlik
+    # aranmiyor), burada kuruluyor; o yuzden eksiklik bildirilir.
     $previousFilter = @(Get-EDMetaList -Meta $Previous -Name 'serverFilter')
     $currentFilter = @(Get-EDMetaList -Meta $Current -Name 'serverFilter')
-    if (($previousFilter -join '|') -ne ($currentFilter -join '|')) {
+    $gap = Get-EDMetaGapNote -Name 'serverFilter' -Dimension 'sunucu filtresinin ayni olup olmadigi' `
+        -PreviousState (Get-EDMetaFieldState -Meta $Previous -Name 'serverFilter') `
+        -CurrentState (Get-EDMetaFieldState -Meta $Current -Name 'serverFilter')
+    if ($gap) {
+        $advisory += ($gap + " Dar bir kosuda olculmeyen sunucular 'kayboldu' gibi gorunur.")
+    }
+    elseif (($previousFilter -join '|') -ne ($currentFilter -join '|')) {
         $advisory += ("Sunucu filtresi farkli (onceki: {0}, simdiki: {1}): dar kosuda olculmeyen sunucular 'kayboldu' gibi gorunur, sorunun gectigi anlamina gelmez." -f `
             $(if ($previousFilter.Count -gt 0) { $previousFilter -join ', ' } else { '(yok)' }),
             $(if ($currentFilter.Count -gt 0) { $currentFilter -join ', ' } else { '(yok)' }))
     }
 
     # Saat farki: kiyasin AMACI budur, ama yorumlanirken bilinmelidir.
-    $previousHour = [int]$Previous.startedHour
-    $currentHour = [int]$Current.startedHour
-    if ($previousHour -ne $currentHour) {
+    # Saat bilinmiyorsa UYDURULMAZ: eksik startedHour'u 0 saymak, gece
+    # yarisinda kosulmus gibi bir kiyas notu uretirdi.
+    $previousHourState = Get-EDMetaFieldState -Meta $Previous -Name 'startedHour'
+    $currentHourState = Get-EDMetaFieldState -Meta $Current -Name 'startedHour'
+    $gap = Get-EDMetaGapNote -Name 'startedHour' -Dimension 'iki kosumun ayni saatte alinip alinmadigi' `
+        -PreviousState $previousHourState -CurrentState $currentHourState
+    if ($gap) {
+        $advisory += ($gap + ' Farkin sebebi gerileme degil YUK olabilir ve bu ayrim yapilamadi.')
+        $previousHour = $null
+        $currentHour = $null
+    }
+    else {
+        $previousHour = [int]$previousHourState.Value
+        $currentHour = [int]$currentHourState.Value
+    }
+    if ($null -ne $previousHour -and $previousHour -ne $currentHour) {
         $advisory += ("Calistirma saatleri farkli ({0:d2}:00 -> {1:d2}:00). Bu kiyasin AMACIDIR (sakin vs yogun saat); ancak farkin sebebi gerileme degil YUK olabilir." -f `
             $previousHour, $currentHour)
     }
@@ -531,7 +666,9 @@ function Compare-EDRuns {
         Scope           = $scope
         PreviousFolder  = $PreviousFolder
         PreviousMeta    = $previousMeta
-        PreviousRunId   = $(if ($previousMeta) { $previousMeta.runId } else { Split-Path -Leaf $PreviousFolder })
+        # runId da eski meta'da olmayabilir; klasor adi zaten zaman
+        # damgasidir ve tanimlayici olarak yeterlidir.
+        PreviousRunId   = [string](Get-EDProperty -InputObject $previousMeta -Name 'runId' -Default (Split-Path -Leaf $PreviousFolder))
     }
 }
 
@@ -647,8 +784,13 @@ function Export-EDDeltaHtml {
     [void]$builder.AppendLine('</head><body>')
     [void]$builder.AppendLine('<h1>Exchange Teshis &mdash; Delta</h1>')
 
+    # Meta VAR OLSA BILE startedHour alani olmayabilir (eski surum). Alan
+    # yoksa '?' kalir: bilinmeyen bir saati '00:00' yazmak, raporun kendi
+    # basliginda uydurma bir bilgi olurdu.
     $previousHour = '?'
-    if ($Comparison.PreviousMeta) { $previousHour = '{0:d2}:00' -f [int]$Comparison.PreviousMeta.startedHour }
+    $previousMetaObject = Get-EDProperty -InputObject $Comparison -Name 'PreviousMeta'
+    $previousHourValue = Get-EDProperty -InputObject $previousMetaObject -Name 'startedHour'
+    if ($null -ne $previousHourValue) { $previousHour = '{0:d2}:00' -f [int]$previousHourValue }
     [void]$builder.AppendLine('<div class="meta">')
     [void]$builder.AppendLine("Onceki: <code>$(ConvertTo-EDHtmlEncoded $Comparison.PreviousRunId)</code> ($previousHour) &rarr; Simdiki: <code>$(ConvertTo-EDHtmlEncoded $Context.RunId)</code> ($('{0:d2}:00' -f $Context.StartTime.Hour))<br>")
     # DIKKAT: TAM YOL YAZILMAZ. Yol kullanici adini icerir (C:\Users\<ad>\...)
