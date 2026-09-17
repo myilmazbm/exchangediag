@@ -141,9 +141,15 @@ $rows += New-EDRow -Module 'M13' -Check 'Yogun saat (p95)' -Unit 'sn' -Status 'W
     -CellStatus @{ MBX01 = 'OK'; MBX02 = 'WARN'; MBX03 = 'OK'; DR01 = 'N/A' } `
     -Patterns @('P7') `
     -Note 'ORGU P7: yogun saatte belirgin tepe var - MBX02: 09:00 -> p95 305.0 sn, 07:00 -> p95 14.4 sn (21.2x). Kapasite/eszamanlilik siniri suphesi: M16 (MaxConcurrentMailboxDeliveries) ve M14 (kuyruk derinligi) ile surdurun.'
-$rows += New-EDRow -Module 'M14' -Check 'Kuyruk derinligi (golge haric)' -Unit 'mesaj' -Status 'OK' `
+# M14 artik kuyrugu HEDEFE gore ikiye ayirir: olu bir uzak alanin 5000
+# mesaji ile yerel teslim birikmesi ayni sey degildir - farkli sahip,
+# farkli sonraki adim. Ornek cikti bu ayrimi yansitmali.
+$rows += New-EDRow -Module 'M14' -Check 'Kuyruk derinligi (yerel teslim)' -Unit 'mesaj' -Status 'OK' `
     -Values @{ MBX01 = 12; MBX02 = 31; MBX03 = 9; DR01 = 0 } `
     -Note 'Kuyruk bir ANLIK GORUNTUDUR; tek olcum yaniltir. M13 ve -CompareWith ile birlikte okuyun.'
+$rows += New-EDRow -Module 'M14' -Check 'Kuyruk derinligi (uzak hedef)' -Unit 'mesaj' -Status 'OK' `
+    -Values @{ MBX01 = 3; MBX02 = 4; MBX03 = 2; DR01 = 0 } `
+    -Note 'Dis hedeflere giden kuyruk. Yuksek olmasi BU SUNUCUNUN yavas oldugu anlamina gelmez; hedef alanin MX/baglanti durumuna bakin.'
 $rows += New-EDRow -Module 'M16' -Check 'MaxConcurrentMailboxDeliveries' -Status 'WARN' `
     -Values @{ MBX01 = 20; MBX02 = 20; MBX03 = 20; DR01 = 20 } `
     -Note 'Referans varsayilan 20, bu ortamda 20. Farkli olmasi tek basina hata degildir. M13 yogun saatte tepe gordugu icin bu ayar incelenmeye deger.'

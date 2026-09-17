@@ -16,9 +16,9 @@
  .advisory { background:#fff4d6; border:1px solid #e6c97a; padding:10px 14px; border-radius:4px; margin:12px 0; }
  .blocking h3, .advisory h3 { margin:0 0 6px; font-size:13px; }
  .blocking ul, .advisory ul { margin:4px 0 0 18px; padding:0; font-size:12px; line-height:1.6; }
- .ARTTI   { color:#a51414; font-weight:700; }
- .AZALDI  { color:#1c6b1c; font-weight:700; }
- .OLCUM, .YENI, .KAYBOLDU, .DEGISTI, .DURUM { color:#63278f; font-weight:700; }
+ .kotu { color:#a51414; font-weight:700; }
+ .iyi  { color:#1c6b1c; font-weight:700; }
+ .notr { color:#63278f; font-weight:700; }
  .note { color:#666; font-size:12px; white-space:normal; max-width:460px; }
  .empty { color:#888; font-style:italic; }
 </style>
@@ -33,50 +33,50 @@ Kaynak klasor: <code>onceki-sakin-saat</code>
 </ul></div>
 <h2>Gerilemeler (8)</h2>
 <table><tr><th>Modul</th><th>Kontrol</th><th>Gecis</th></tr>
-<tr><td>M05</td><td>CPU (p95)</td><td class="ARTTI">OK -&gt; WARN</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p95</td><td class="ARTTI">OK -&gt; FAIL</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p99</td><td class="ARTTI">OK -&gt; FAIL</td></tr>
-<tr><td>M11</td><td>Baskin faz</td><td class="ARTTI">OK -&gt; WARN</td></tr>
-<tr><td>M11</td><td>Store fazi p95</td><td class="ARTTI">OK -&gt; FAIL</td></tr>
-<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td class="ARTTI">OK -&gt; WARN</td></tr>
-<tr><td>M20</td><td>Store RPC latency (p95)</td><td class="ARTTI">OK -&gt; FAIL</td></tr>
-<tr><td>M41</td><td>Hata olayi</td><td class="ARTTI">OK -&gt; WARN</td></tr>
+<tr><td>M05</td><td>CPU (p95)</td><td class="kotu">OK -&gt; WARN</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p95</td><td class="kotu">OK -&gt; FAIL</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p99</td><td class="kotu">OK -&gt; FAIL</td></tr>
+<tr><td>M11</td><td>Baskin faz</td><td class="kotu">OK -&gt; WARN</td></tr>
+<tr><td>M11</td><td>Store fazi p95</td><td class="kotu">OK -&gt; FAIL</td></tr>
+<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td class="kotu">OK -&gt; WARN</td></tr>
+<tr><td>M20</td><td>Store RPC latency (p95)</td><td class="kotu">OK -&gt; FAIL</td></tr>
+<tr><td>M41</td><td>Hata olayi</td><td class="kotu">OK -&gt; WARN</td></tr>
 </table>
 <h2>Iyilesmeler (0)</h2>
 <p class="empty">Durum iyilesmesi yok.</p>
 <h2>Tum farklar (31)</h2>
 <table><tr><th>Modul</th><th>Kontrol</th><th>Sunucu</th><th>Onceki</th><th>Simdiki</th><th>Fark</th><th>Yon</th><th>Durum</th><th>Aciklama</th></tr>
-<tr><td>M05</td><td>CPU (p95)</td><td>MBX02</td><td class="num">16.8</td><td class="num">82.6</td><td class="num">+65.8 (%+391.7)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M05</td><td>CPU (p95)</td><td>MBX01</td><td class="num">11.4</td><td class="num">38.2</td><td class="num">+26.8 (%+235.1)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M05</td><td>CPU (p95)</td><td>MBX03</td><td class="num">12.2</td><td class="num">41</td><td class="num">+28.8 (%+236.1)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M05</td><td>CPU (p95)</td><td>DR01</td><td class="num">5.9</td><td class="num">6.4</td><td class="num">+0.5 (%+8.5)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p95</td><td>MBX02</td><td class="num">11.2</td><td class="num">186.5</td><td class="num">+175.3 (%+1565.2)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p95</td><td>MBX01</td><td class="num">8.1</td><td class="num">22.4</td><td class="num">+14.3 (%+176.5)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p95</td><td>MBX03</td><td class="num">8.6</td><td class="num">24.1</td><td class="num">+15.5 (%+180.2)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p99</td><td>MBX02</td><td class="num">19.8</td><td class="num">240.3</td><td class="num">+220.5 (%+1113.6)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p99</td><td>MBX01</td><td class="num">14</td><td class="num">48</td><td class="num">+34 (%+242.9)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M10</td><td>Teslim gecikmesi p99</td><td>MBX03</td><td class="num">15.1</td><td class="num">51.7</td><td class="num">+36.6 (%+242.4)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M11</td><td>Baskin faz</td><td>MBX02</td><td class="num">Transport</td><td class="num">Store</td><td class="num">-</td><td class="DEGISTI">DEGISTI</td><td>OK -&gt; WARN</td><td class="note">Metin deger degisti; yuzde hesaplanmaz.</td></tr>
-<tr><td>M11</td><td>Baskin faz</td><td>MBX01</td><td class="num">Transport</td><td class="num">Transport</td><td class="num">0</td><td class="DURUM">DURUM</td><td>OK -&gt; WARN</td><td class="note">Deger ayni, DURUM degisti; esik veya kiyas tabani degismis olabilir.</td></tr>
-<tr><td>M11</td><td>Baskin faz</td><td>MBX03</td><td class="num">Transport</td><td class="num">Transport</td><td class="num">0</td><td class="DURUM">DURUM</td><td>OK -&gt; WARN</td><td class="note">Deger ayni, DURUM degisti; esik veya kiyas tabani degismis olabilir.</td></tr>
-<tr><td>M11</td><td>Store fazi p95</td><td>MBX02</td><td class="num">3.4</td><td class="num">171.8</td><td class="num">+168.4 (%+4952.9)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M11</td><td>Store fazi p95</td><td>MBX01</td><td class="num">2.9</td><td class="num">6.2</td><td class="num">+3.3 (%+113.8)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M11</td><td>Store fazi p95</td><td>MBX03</td><td class="num">3.1</td><td class="num">7</td><td class="num">+3.9 (%+125.8)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB03</td><td class="num">3</td><td class="num">1174</td><td class="num">+1171 (%+39033.3)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB01</td><td class="num">1</td><td class="num">42</td><td class="num">+41 (%+4100)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB04</td><td class="num">0</td><td class="num">31</td><td class="num">+31</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
-<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB02</td><td class="num">0</td><td class="num">88</td><td class="num">+88</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
-<tr><td>M14</td><td>Kuyruk derinligi (golge haric)</td><td>MBX02</td><td class="num">2</td><td class="num">31</td><td class="num">+29 (%+1450)</td><td class="ARTTI">ARTTI</td><td></td><td class="note"></td></tr>
-<tr><td>M14</td><td>Kuyruk derinligi (golge haric)</td><td>MBX01</td><td class="num">1</td><td class="num">12</td><td class="num">+11 (%+1100)</td><td class="ARTTI">ARTTI</td><td></td><td class="note"></td></tr>
-<tr><td>M14</td><td>Kuyruk derinligi (golge haric)</td><td>MBX03</td><td class="num">0</td><td class="num">9</td><td class="num">+9</td><td class="ARTTI">ARTTI</td><td></td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
-<tr><td>M20</td><td>Store RPC latency (p95)</td><td>MBX02</td><td class="num">19</td><td class="num">162</td><td class="num">+143 (%+752.6)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M20</td><td>Store RPC latency (p95)</td><td>MBX01</td><td class="num">14</td><td class="num">21</td><td class="num">+7 (%+50)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M20</td><td>Store RPC latency (p95)</td><td>MBX03</td><td class="num">16</td><td class="num">24</td><td class="num">+8 (%+50)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M20</td><td>Store RPC latency (p95)</td><td>DR01</td><td class="num">4</td><td class="num">4</td><td class="num">0</td><td class="DURUM">DURUM</td><td>OK -&gt; FAIL</td><td class="note">Deger ayni, DURUM degisti; esik veya kiyas tabani degismis olabilir.</td></tr>
-<tr><td>M41</td><td>Hata olayi</td><td>MBX02</td><td class="num">2</td><td class="num">11</td><td class="num">+9 (%+450)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M41</td><td>Hata olayi</td><td>MBX01</td><td class="num">1</td><td class="num">4</td><td class="num">+3 (%+300)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M41</td><td>Hata olayi</td><td>MBX03</td><td class="num">9</td><td class="num">62</td><td class="num">+53 (%+588.9)</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
-<tr><td>M41</td><td>Hata olayi</td><td>DR01</td><td class="num">0</td><td class="num">2</td><td class="num">+2</td><td class="ARTTI">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
+<tr><td>M05</td><td>CPU (p95)</td><td>MBX02</td><td class="num">16.8</td><td class="num">82.6</td><td class="num">+65.8 (%+391.7)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M05</td><td>CPU (p95)</td><td>MBX01</td><td class="num">11.4</td><td class="num">38.2</td><td class="num">+26.8 (%+235.1)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M05</td><td>CPU (p95)</td><td>MBX03</td><td class="num">12.2</td><td class="num">41</td><td class="num">+28.8 (%+236.1)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M05</td><td>CPU (p95)</td><td>DR01</td><td class="num">5.9</td><td class="num">6.4</td><td class="num">+0.5 (%+8.5)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p95</td><td>MBX02</td><td class="num">11.2</td><td class="num">186.5</td><td class="num">+175.3 (%+1565.2)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p95</td><td>MBX01</td><td class="num">8.1</td><td class="num">22.4</td><td class="num">+14.3 (%+176.5)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p95</td><td>MBX03</td><td class="num">8.6</td><td class="num">24.1</td><td class="num">+15.5 (%+180.2)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p99</td><td>MBX02</td><td class="num">19.8</td><td class="num">240.3</td><td class="num">+220.5 (%+1113.6)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p99</td><td>MBX01</td><td class="num">14</td><td class="num">48</td><td class="num">+34 (%+242.9)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M10</td><td>Teslim gecikmesi p99</td><td>MBX03</td><td class="num">15.1</td><td class="num">51.7</td><td class="num">+36.6 (%+242.4)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M11</td><td>Baskin faz</td><td>MBX02</td><td class="num">Transport</td><td class="num">Store</td><td class="num">-</td><td class="kotu">DEGISTI</td><td>OK -&gt; WARN</td><td class="note">Metin deger degisti; yuzde hesaplanmaz.</td></tr>
+<tr><td>M11</td><td>Baskin faz</td><td>MBX01</td><td class="num">Transport</td><td class="num">Transport</td><td class="num">0</td><td class="kotu">DURUM</td><td>OK -&gt; WARN</td><td class="note">Deger ayni, DURUM degisti; esik veya kiyas tabani degismis olabilir.</td></tr>
+<tr><td>M11</td><td>Baskin faz</td><td>MBX03</td><td class="num">Transport</td><td class="num">Transport</td><td class="num">0</td><td class="kotu">DURUM</td><td>OK -&gt; WARN</td><td class="note">Deger ayni, DURUM degisti; esik veya kiyas tabani degismis olabilir.</td></tr>
+<tr><td>M11</td><td>Store fazi p95</td><td>MBX02</td><td class="num">3.4</td><td class="num">171.8</td><td class="num">+168.4 (%+4952.9)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M11</td><td>Store fazi p95</td><td>MBX01</td><td class="num">2.9</td><td class="num">6.2</td><td class="num">+3.3 (%+113.8)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M11</td><td>Store fazi p95</td><td>MBX03</td><td class="num">3.1</td><td class="num">7</td><td class="num">+3.9 (%+125.8)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB03</td><td class="num">3</td><td class="num">1174</td><td class="num">+1171 (%+39033.3)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB01</td><td class="num">1</td><td class="num">42</td><td class="num">+41 (%+4100)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB04</td><td class="num">0</td><td class="num">31</td><td class="num">+31</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
+<tr><td>M12</td><td>Yavas teslimlerin DB dagilimi</td><td>DB02</td><td class="num">0</td><td class="num">88</td><td class="num">+88</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
+<tr><td>M14</td><td>Kuyruk derinligi (yerel teslim)</td><td>MBX02</td><td class="num">2</td><td class="num">31</td><td class="num">+29 (%+1450)</td><td class="notr">ARTTI</td><td></td><td class="note"></td></tr>
+<tr><td>M14</td><td>Kuyruk derinligi (yerel teslim)</td><td>MBX01</td><td class="num">1</td><td class="num">12</td><td class="num">+11 (%+1100)</td><td class="notr">ARTTI</td><td></td><td class="note"></td></tr>
+<tr><td>M14</td><td>Kuyruk derinligi (yerel teslim)</td><td>MBX03</td><td class="num">0</td><td class="num">9</td><td class="num">+9</td><td class="notr">ARTTI</td><td></td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
+<tr><td>M20</td><td>Store RPC latency (p95)</td><td>MBX02</td><td class="num">19</td><td class="num">162</td><td class="num">+143 (%+752.6)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M20</td><td>Store RPC latency (p95)</td><td>MBX01</td><td class="num">14</td><td class="num">21</td><td class="num">+7 (%+50)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M20</td><td>Store RPC latency (p95)</td><td>MBX03</td><td class="num">16</td><td class="num">24</td><td class="num">+8 (%+50)</td><td class="kotu">ARTTI</td><td>OK -&gt; FAIL</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M20</td><td>Store RPC latency (p95)</td><td>DR01</td><td class="num">4</td><td class="num">4</td><td class="num">0</td><td class="kotu">DURUM</td><td>OK -&gt; FAIL</td><td class="note">Deger ayni, DURUM degisti; esik veya kiyas tabani degismis olabilir.</td></tr>
+<tr><td>M41</td><td>Hata olayi</td><td>MBX02</td><td class="num">2</td><td class="num">11</td><td class="num">+9 (%+450)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M41</td><td>Hata olayi</td><td>MBX01</td><td class="num">1</td><td class="num">4</td><td class="num">+3 (%+300)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M41</td><td>Hata olayi</td><td>MBX03</td><td class="num">9</td><td class="num">62</td><td class="num">+53 (%+588.9)</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Durum degisti; bulguyu ozet raporun Not sutunuyla birlikte okuyun.</td></tr>
+<tr><td>M41</td><td>Hata olayi</td><td>DR01</td><td class="num">0</td><td class="num">2</td><td class="num">+2</td><td class="kotu">ARTTI</td><td>OK -&gt; WARN</td><td class="note">Onceki deger cok kucuk (0); yuzde YANILTIR, yalnizca mutlak fark verildi.</td></tr>
 </table>
 <h2>Uyari</h2>
 <p class="meta">Delta bir YON gosterir, sebep gostermez. N/A ile deger arasindaki gecisler iyilesme/gerileme sayilmaz. Kucuk mutlak degerlerde yuzde bilerek gizlenmistir.</p>

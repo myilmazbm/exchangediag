@@ -38,8 +38,22 @@ function Assert-True {
 }
 
 function Get-EDTestRow {
+<#
+    Adiyla bir rapor satiri bulur.
+
+    ARANAN SATIR YOKSA COKMEZ. Eskiden bos diziye [0] ile erisiliyordu ve
+    StrictMode altinda bu IndexOutOfRangeException firlatiyordu: paketin
+    TAMAMI o noktada oluyor, bilgilendirici bir [KALDI] listesi yerine
+    ciplak bir "COKTU" kaliyordu. Oysa "beklenen satir uretilmedi" tam da
+    bir testin gormesi gereken sey - ve duzeltme oncesi kirmizi kosumlar
+    (fail-first) bu yuzden okunamiyordu.
+
+    Satir yoksa $null doner; cagiran taraf iddiasinda bunu gorur.
+#>
     param($Rows, [string]$Check)
-    return @($Rows | Where-Object { $_.Check -like "$Check*" })[0]
+    $matched = @($Rows | Where-Object { $_.Check -like "$Check*" })
+    if ($matched.Count -eq 0) { return $null }
+    return $matched[0]
 }
 
 function New-EDMockTimeout {
