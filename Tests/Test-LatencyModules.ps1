@@ -318,8 +318,35 @@ try {
     Assert-True 'Yogun/sakin orani 3x uzerinde' ([double]$ratioRow.Values[$serverName] -ge 3) `
         ("{0}x" -f $ratioRow.Values[$serverName])
     Assert-Equal 'P7 orgusu WARN uretti' 'WARN' $ratioRow.Status
-    Assert-True 'P7 notta aciklanmis' ($ratioRow.Note -like '*ORGU P7*')
-    Assert-True 'Sonraki adim M16/M14 olarak gosterilmis' ($ratioRow.Note -like '*M16*')
+
+    # KAPASITE IDDIASI SARTLIDIR, bu yuzden iddia da sartli sinanir.
+    #
+    # Fixture teslimleri pencereye esit dagitir ve tepe saati yalnizca
+    # YAVASLATIR - hacmini artirmaz. Tepe saatin teslim sayisi bu yuzden
+    # saatlik ortancanin bir tik altina da ustune de dusebilir (pencere
+    # kenarindaki kismi saatler ortancayi kaydirir) ve M13 kapasite
+    # iddiasini SADECE ustundeyken kurar. Iddiayi kosulsuz beklemek testi
+    # calistigi SAATE bagimli kiliyordu: ayni kod ayni gun bir kosumda
+    # yesil, digerinde kirmizi. Yanlis sebepten KALAN bir test, yanlis
+    # sebepten GECEN kadar zararlidir - dogru iddia sartli olandir.
+    $hourStats = (Get-EDDeliveryAnalysis -Context $context)[$serverName].ByHourLocal
+    $qualifiedHours = @($hourStats.Keys | Where-Object { $hourStats[$_].Count -ge 20 })
+    $hourVolumes = @($qualifiedHours | ForEach-Object { [double]$hourStats[$_].Count } | Sort-Object)
+    $medianVolume = $hourVolumes[[int][math]::Floor($hourVolumes.Count / 2)]
+    $peakIsBusy = ([double]$hourStats[[int]$peakHour].Count -ge $medianVolume)
+    Write-Host ("  Tepe saat hacmi {0:N0}, saatlik ortanca {1:N0} -> kapasite iddiasi {2}" -f `
+        $hourStats[[int]$peakHour].Count, $medianVolume, $(if ($peakIsBusy) { 'BEKLENIYOR' } else { 'BEKLENMIYOR' })) -ForegroundColor Gray
+
+    if ($peakIsBusy) {
+        Assert-True 'P7 notta aciklanmis' ($ratioRow.Note -like '*ORGU P7*')
+        Assert-True 'Sonraki adim M16/M14 olarak gosterilmis' ($ratioRow.Note -like '*M16*')
+    }
+    else {
+        Assert-True 'Dusuk hacimli tepede kapasite iddiasi KURULMUYOR' `
+            ($ratioRow.Note -notlike '*kapasite/eszamanlilik siniri suphesi*') $ratioRow.Note
+        Assert-True 'Tepenin dusuk hacimli oldugu soyleniyor' `
+            ($ratioRow.Note -like '*DUSUK hacimli*') $ratioRow.Note
+    }
     Assert-True 'M13 kanit dosyasi yazildi' (Test-Path -LiteralPath (Join-Path $outputDir 'M13-hourly.csv'))
 
     # -----------------------------------------------------------------------

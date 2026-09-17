@@ -55,9 +55,53 @@ Register-EDModule @{
         # Gecikme tepesi DUSUK hacimli bir saatte olan sunucular: tepe
         # gercektir ama sebebi kapasite DEGILDIR.
         $peakNotBusy = @()
+        # "YETERSIZ ORNEK" ile "OKUMA BASARISIZ" AYRI SEYLERDIR.
+        #
+        # M13, M10 ile AYNI onbellegi tuketir ama ReadFailed / Truncated
+        # alanlarina hic bakmiyordu. Log okumasi zaman asimina ugradiginda
+        # ayni raporda ayni veriden iki ZIT talimat cikiyordu: M10 "pencereyi
+        # GENISLETMEYIN, DARALTIN" derken M13 "pencere yetersiz, -WindowHours
+        # 8 gibi GENIS bir pencereyle calistirin" diyordu. Operator M13'u
+        # uygularsa zaman asimini KOTULESTIRIR. Genisletme tavsiyesi yalnizca
+        # okumanin BASARILI oldugu sunucular icin gecerlidir.
+        $readFailedServers = @()
+        $readFailedDetails = @()
+        $partialServers = @()
+        $partialDetails = @()
+        $deadlineServers = @()
+        $fileFailServers = @()
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
             $analysis = $analyses[$server]
+
+            # Kismilik TEK bayraktan okunur (IsPartial), SEBEP ayri tasinir.
+            # ReadFailed'a tek basina bakmak yetmez: ham yolda dosyalarin biri
+            # okunamadiginda da kurulur ve o sunucuda SAAT KIRILIMI OLABILIR.
+            # Ayirt edici olcut "hic saat kovasi var mi" sorusudur.
+            $isPartial = [bool](Get-EDProperty $analysis 'IsPartial' $analysis.Truncated)
+            $partialReason = [string](Get-EDProperty $analysis 'PartialReason' '')
+            if ($isPartial -and $analysis.ByHourLocal.Count -eq 0) {
+                $peakHourValues[$server] = 'N/A'; $peakP95Values[$server] = 'N/A'
+                $quietHourValues[$server] = 'N/A'; $quietP95Values[$server] = 'N/A'
+                $ratioValues[$server] = 'N/A'
+                # Olcum basarisizligi hucrede de gorunur: N/A tek basina
+                # "kavram gecerli degil" gibi okunabilir.
+                $cellStatus[$server] = 'WARN'
+                $readFailedServers += $server
+                $readFailedDetails += $(if ($partialReason) { "$server ($partialReason)" } else { $server })
+                continue
+            }
+            if ($isPartial) {
+                # Okuma kismi: saatlerin bir kismi hic okunmamis olabilir,
+                # yani "yeterli saat yok" hukmu de ornekten degil EKSIK
+                # OKUMADAN geliyor olabilir. Sunucu kirilimdan cikarilmaz
+                # ama hukum ve tavsiye bunu soylemek zorunda.
+                $partialServers += $server
+                $partialDetails += $(if ($partialReason) { "$server ($partialReason)" } else { $server })
+                if ([bool](Get-EDProperty $analysis 'TruncatedByDeadline' $false)) { $deadlineServers += $server }
+                if ([long](Get-EDProperty $analysis 'FilesFailed' 0) -gt 0 -or
+                    [bool](Get-EDProperty $analysis 'TruncatedByReadFailure' $false)) { $fileFailServers += $server }
+            }
 
             # Yeterli orneklemi olan saatler.
             $hours = @()
@@ -81,8 +125,16 @@ Register-EDModule @{
             if ($hours.Count -lt $minimumHours) {
                 $peakHourValues[$server] = 'N/A'; $peakP95Values[$server] = 'N/A'
                 $quietHourValues[$server] = 'N/A'; $quietP95Values[$server] = 'N/A'
-                $ratioValues[$server] = 'N/A'; $cellStatus[$server] = 'N/A'
-                $shortWindow += $server
+                $ratioValues[$server] = 'N/A'
+                if ($server -in $partialServers) {
+                    # Saatler eksik OLABILIR cunku okuma yarida kesildi;
+                    # burada "ornek yetersiz" demek sebebi uydurmaktir.
+                    $cellStatus[$server] = 'WARN'
+                }
+                else {
+                    $cellStatus[$server] = 'N/A'
+                    $shortWindow += $server
+                }
                 continue
             }
 
@@ -129,19 +181,72 @@ Register-EDModule @{
             else {
                 $cellStatus[$server] = 'OK'
             }
+
+            if ($server -in $partialServers) {
+                # Kismi okumadan cikan bir hukum yesil kalamaz: saatlerin bir
+                # kismi hic okunmamis olabilir, yani tepe de sakin de kayabilir.
+                $cellStatus[$server] = Get-EDWorstStatus @($cellStatus[$server], 'WARN')
+            }
         }
 
         if ($evidence.Count -gt 0) {
             Save-EDEvidence -Context $Context -Name 'M13-hourly' -Data @($evidence | Sort-Object Server, SaatYerel) | Out-Null
         }
 
+        # --- OLCUM BASARISIZLIKLARI: tavsiyenin YONUNU bunlar belirler -------
+        #
+        # Okuma basarisiz ya da kismiyse cozum pencereyi DARALTMAKTIR; ornek
+        # gercekten yetersizse GENISLETMEKTIR. Ikisini ayni cumlede vermek,
+        # operatoru M10'un yasakladigi eyleme yollar.
+        $failureNotes = @()
+        $failureStatus = 'OK'
+        if ($readFailedServers.Count -gt 0) {
+            $part = "OLCULEMEDI - tracking log OKUNAMADI ($($readFailedDetails -join ', ')): saat kirilimi bu sunucular icin HIC hesaplanmadi. "
+            $part += 'Bu bir "ornek yetersiz" durumu DEGILDIR; pencereyi GENISLETMEYIN. '
+            $part += 'Sebep zaman siniri ise pencereyi -WindowHours ile DARALTIN; dosya okunamadiysa daraltmak COZMEZ - '
+            $part += 'dosya kilidi, NTFS/share izni, antivirus ya da kopmus SMB baglantisi arayin (M10 ayni sunucular icin ayni seyi soyler).'
+            $failureNotes += $part
+            $failureStatus = 'WARN'
+        }
+        if ($partialServers.Count -gt 0) {
+            $part = "PENCERE KISMI ($($partialDetails -join ', ')): okuma yarida kaldi, saatlerin bir kismi hic okunmamis olabilir. "
+            $part += 'Tepe ve sakin saat secimi eksik veriden yapilmis olabilir. '
+            if ($deadlineServers.Count -gt 0) {
+                $part += "Zaman siniri kesenlerde ($($deadlineServers -join ', ')) pencereyi -WindowHours ile DARALTIN. "
+            }
+            if ($fileFailServers.Count -gt 0) {
+                $part += "Dosyasi okunamayanlarda ($($fileFailServers -join ', ')) pencereyi daraltmak COZMEZ - kilit/izin/antivirus/SMB arayin. "
+            }
+            $failureNotes += $part.TrimEnd()
+            $failureStatus = 'WARN'
+        }
+
         if (-not $anyData) {
-            $note = "Saat bazli dagilim icin en az $minimumHours farkli saatte $minimumSamples+ teslim gerekir; pencere ($($Context.WindowHours) saat) yetersiz. "
-            $note += '-WindowHours 8 gibi genis bir pencereyle, tercihen is saatlerini kapsayacak sekilde calistirin. '
-            $note += 'Yetersiz orneklemden tepe saat uydurulmaz.'
-            if ($shortWindow.Count -gt 0) { $log.Info("M13: yetersiz ornek - $($shortWindow -join ', ')") }
+            $noteParts = @()
+            $noDataStatus = 'N/A'
+            if ($failureNotes.Count -gt 0) {
+                $noteParts += $failureNotes
+                $noDataStatus = 'WARN'
+            }
+            if ($shortWindow.Count -gt 0) {
+                # GENISLETME TAVSIYESI YALNIZCA OKUMASI BASARILI SUNUCULAR
+                # ICIN VERILIR ve adlari yazilir; aksi halde ayni raporda
+                # M10'un "DARALTIN" talimatiyla celisir.
+                $part = "Saat bazli dagilim icin en az $minimumHours farkli saatte $minimumSamples+ teslim gerekir; "
+                $part += "$($shortWindow -join ', ') sunucusunda pencere ($($Context.WindowHours) saat) yetersiz. "
+                $part += '-WindowHours 8 gibi genis bir pencereyle, tercihen is saatlerini kapsayacak sekilde calistirin. '
+                if ($failureNotes.Count -gt 0) {
+                    $part += 'DIKKAT: bu genisletme tavsiyesi YALNIZCA adi gecen sunucular icindir - okumasi basarisiz/kismi kalan sunucularda once pencere DARALTILMALIDIR. '
+                }
+                $part += 'Yetersiz orneklemden tepe saat uydurulmaz.'
+                $noteParts += $part
+                $log.Info("M13: yetersiz ornek - $($shortWindow -join ', ')")
+            }
+            if ($noteParts.Count -eq 0) {
+                $noteParts += 'Saat bazli dagilim icin yeterli veri cikmadi; sebep belirlenemedi.'
+            }
             return @(New-EDRow -Module 'M13' -Check 'Yogun saat p95' -Values $peakP95Values -CellStatus $cellStatus `
-                -Unit 'sn' -Status 'N/A' -Patterns @('P7') -Note $note)
+                -Unit 'sn' -Status $noDataStatus -Patterns @('P7') -Note ($noteParts -join ' '))
         }
 
         $note = ''
@@ -169,19 +274,33 @@ Register-EDModule @{
         $note += " (Pencere $($Context.WindowHours) saat, saat basina en az $minimumSamples ornek arandi. "
         $note += 'Tepe saat GECIKMEYE (p95) gore secilir; kapasite iddiasi ise ancak o saatin teslim hacmi '
         $note += 'saatlik ortancanin uzerindeyse kurulur - dusuk hacimli bir tepe yuk kaynakli DEGILDIR.)'
+        if ($shortWindow.Count -gt 0) {
+            $note += (" Yetersiz ornek ({0}): bu sunucular kirilima girmedi; onlar icin -WindowHours genisletilebilir." -f ($shortWindow -join ', '))
+        }
+        # Olcum basarisizliklari EN ONE alinir: tavsiyenin yonunu onlar
+        # belirler ve bir sunucunun okunamadigi, digerinin tepe saati
+        # anlatilirken gozden kacamaz.
+        $note = ((@($failureNotes) + @($note)) | Where-Object { $_ }) -join ' '
 
         $rows = @()
         $rows += New-EDRow -Module 'M13' -Check 'Yogun/sakin p95 orani' -Values $ratioValues -CellStatus $cellStatus `
-            -Unit 'x' -Status (Get-EDWorstStatus @($cellStatus.Values)) -Patterns @('P7') -Note $note
+            -Unit 'x' -Status (Get-EDWorstStatus (@($cellStatus.Values) + @($failureStatus))) -Patterns @('P7') -Note $note
         $rows += New-EDRow -Module 'M13' -Check 'Yogun saat (yerel)' -Values $peakHourValues -Status 'OK'
         # Oran satirinin PAYI ve PAYDASI: brief P7'yi "tepe ve sakin saat
         # p95'e gore secilir" diye tanimlar, yani iddia dogrudan bu iki
         # olcume dayanir. Saat etiketi (kacinci saat) bir olcum degildir,
         # o yuzden etiketsiz birakilir.
-        $rows += New-EDRow -Module 'M13' -Check 'Yogun saat p95' -Values $peakP95Values -Unit 'sn' -Status 'OK' -Patterns @('P7')
-        $rows += New-EDRow -Module 'M13' -Check 'Sakin saat (yerel)' -Values $quietHourValues -Status 'OK'
+        # Okunamayan sunucunun hucresi bu satirlarda da N/A yazar; SEBEBI
+        # yazilmazsa N/A "bu sunucuda sorun yok" diye gecistirilebilir.
+        # Hukum burada yukseltilmez, iddiayi oran satiri tasir.
+        $unreadTag = $(if ($readFailedServers.Count + $partialServers.Count -gt 0) {
+            "OLCULEMEYEN/KISMI SUNUCU ($(@(@($readFailedServers) + @($partialServers)) -join ', ')): ayrinti oran satirinda. "
+        } else { '' })
+        $rows += New-EDRow -Module 'M13' -Check 'Yogun saat p95' -Values $peakP95Values -Unit 'sn' -Status 'OK' -Patterns @('P7') `
+            -Note $unreadTag
+        $rows += New-EDRow -Module 'M13' -Check 'Sakin saat (yerel)' -Values $quietHourValues -Status 'OK' -Note $unreadTag
         $rows += New-EDRow -Module 'M13' -Check 'Sakin saat p95' -Values $quietP95Values -Unit 'sn' -Status 'OK' -Patterns @('P7') `
-            -Note 'Saat kirilimi: M13-hourly.csv. Sakin saatte alinan olcum yaniltir - karsilastirma icin yogun saatte tekrar calistirin.'
+            -Note ($unreadTag + 'Saat kirilimi: M13-hourly.csv. Sakin saatte alinan olcum yaniltir - karsilastirma icin yogun saatte tekrar calistirin.')
 
         return $rows
     }
