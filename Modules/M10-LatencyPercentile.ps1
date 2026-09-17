@@ -36,6 +36,10 @@ Register-EDModule @{
         $p50 = @{}; $p95 = @{}; $p99 = @{}; $maxValues = @{}
         $counts = @{}; $meanValues = @{}; $viaValues = @{}
         $cellStatus = @{}
+        # 'Olculen teslim sayisi' satirinin HUCRE hukumleri. Bu satir uzun
+        # sure sabit 'OK' idi: okunamayan sunucu icin "0 teslim / OK" yaziyor,
+        # yani olcum basarisizligi bir SAGLIK BEYANINA donusuyordu.
+        $countStatus = @{}
         $evidence = @()
         $slowEvidence = @()
         $noDataServers = @()
@@ -76,13 +80,36 @@ Register-EDModule @{
 
             if ($stats.Count -eq 0) {
                 $p50[$server] = 'N/A'; $p95[$server] = 'N/A'; $p99[$server] = 'N/A'
-                $maxValues[$server] = 'N/A'; $counts[$server] = 0; $meanValues[$server] = 'N/A'
-                $cellStatus[$server] = 'N/A'
+                $maxValues[$server] = 'N/A'; $meanValues[$server] = 'N/A'
                 # OKUMA BASARISIZ: "olay yok" ile ayni sey degil ve tavsiyesi
                 # de TERSTIR (pencereyi genisletmek, timeout'u kotulestirir).
-                if ([bool](Get-EDProperty $analysis 'ReadFailed' $false)) { $readFailedServers += $server }
-                elseif ($analysis.DeliverEvents -gt 0) { $eventsNoLatency += $server }
-                else { $noDataServers += $server }
+                if ([bool](Get-EDProperty $analysis 'ReadFailed' $false)) {
+                    $readFailedServers += $server
+                    # OKUNAMAYAN SAYI 0 DEGILDIR. Ayni satirda hem 'N/A' hem
+                    # 0 yazmak, sunucuyu "teslim yapmadi ama saglikli" diye
+                    # okutuyordu; oysa hicbir sey OLCULMEDI.
+                    $counts[$server] = 'N/A'
+                    # Olcum basarisizligi en az WARN'dir: hucre 'N/A' yazsa da
+                    # yesil kalirsa operator o sunucuyu taranmis sayar.
+                    $cellStatus[$server] = 'WARN'
+                    $countStatus[$server] = 'WARN'
+                }
+                elseif ($analysis.DeliverEvents -gt 0) {
+                    # Olaylar okundu ama gecikme turetilemedi: olculen teslim
+                    # sayisi 0 degil BILINMIYOR - sayi da hukum de gecersiz.
+                    $eventsNoLatency += $server
+                    $counts[$server] = 'N/A'
+                    $cellStatus[$server] = 'WARN'
+                    $countStatus[$server] = 'WARN'
+                }
+                else {
+                    # Okuma BASARILI ve pencerede teslim YOK. Buradaki 0
+                    # gercekten olculmus bir sayidir; kavram gecerli ama
+                    # persentil hesaplanacak veri yoktur (gercek N/A).
+                    $noDataServers += $server
+                    $counts[$server] = 0
+                    $cellStatus[$server] = 'N/A'
+                }
                 continue
             }
 
@@ -153,6 +180,39 @@ Register-EDModule @{
             Save-EDEvidence -Context $Context -Name 'M10-slowest-deliveries' -Data @($slowEvidence | Sort-Object -Property Saniye -Descending) | Out-Null
         }
 
+        # --- OLCUM BASARISIZLIKLARI: her iki yolda da ayni metin ------------
+        #
+        # Bu listeler dogru dolduruluyordu ama YALNIZCA "hic veri yok"
+        # dalinda kullaniliyordu. Yani TEK bir sunucu veri verdigi anda
+        # okunamayan sunucularin adi rapora HIC girmiyor, gecikme avinin
+        # merkez modulunde bir sunucu sessizce kayboluyordu. Metnin kendisi
+        # zaten dogruydu; yeri yanlisti. Artik tek yerde uretilir ve her iki
+        # yol da ayni cumleyi kullanir.
+        $failureNotes = @()
+        $failureStatus = 'OK'
+        if ($readFailedServers.Count -gt 0) {
+            $note = "OLCULEMEDI - tracking log OKUNAMADI ($($readFailedServers -join ', ')): sorgu hata verdi veya zaman asimina ugradi. "
+            $note += 'Bu bir bulgu YOKLUGU degil, olcum eksikligidir: bu sunucularin hucreleri N/A, teslim sayilari BILINMIYOR '
+            $note += 've kiyasa (ORGU P1) girmezler. Pencereyi GENISLETMEYIN - '
+            $note += 'once -WindowHours ile DARALTIP tekrar deneyin, ham log erisimi (-LogAccess Smb) acilabiliyorsa cok daha hizlidir.'
+            $failureNotes += $note
+            $failureStatus = 'WARN'
+        }
+        if ($eventsNoLatency.Count -gt 0) {
+            $note = "OLCULEMEDI - DELIVER olaylari okundu ama hicbirinden gecikme turetilemedi ($($eventsNoLatency -join ', ')). "
+            $note += 'Saat kaymasi veya ayristirici regresyonu olabilir; -VerifyParser satirina ve log kayitlarina bakin.'
+            $failureNotes += $note
+            $failureStatus = 'WARN'
+        }
+        # Bu SONUNCUSU bir olcum basarisizligi DEGILDIR: okuma calisti, teslim
+        # yoktu. Hucrede 0 yazar ve satirin hukmunu yukseltmez - ama yine de
+        # adlandirilir, cunku "veri yok" ile "sifir teslim" arasindaki farki
+        # ancak sunucu adini goren operator dogrulayabilir.
+        $noEventNote = ''
+        if ($noDataServers.Count -gt 0) {
+            $noEventNote = "Pencerede DELIVER olayi bulunamadi ($($noDataServers -join ', ')); bu sunucularda okuma BASARILI, teslim sayisi gercekten 0."
+        }
+
         # Kapsam ve parser dogrulama satirlari VERI CIKMASA DA uretilmelidir:
         # "veri yok"un sebebi tam da bu satirlarda yaziyor. Erken return
         # bunlari dusurursek operator hicbir bulgu gormeden "temiz" rapor alir.
@@ -184,15 +244,10 @@ Register-EDModule @{
                 $detail += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
                 $noDataStatus = 'WARN'
             }
-            elseif ($readFailedServers.Count -gt 0) {
-                $detail = "Tracking log OKUNAMADI ($($readFailedServers -join ', ')): sorgu hata verdi veya zaman asimina ugradi. "
-                $detail += 'Bu bir bulgu YOKLUGU degil, olcum eksikligidir. Pencereyi GENISLETMEYIN - '
-                $detail += 'once -WindowHours ile DARALTIP tekrar deneyin, ham log erisimi (-LogAccess Smb) acilabiliyorsa cok daha hizlidir.'
-                $noDataStatus = 'WARN'
-            }
-            elseif ($eventsNoLatency.Count -gt 0) {
-                $detail = "DELIVER olaylari okundu ama hicbirinden gecikme turetilemedi ($($eventsNoLatency -join ', ')). "
-                $detail += 'Saat kaymasi veya ayristirici regresyonu olabilir; -VerifyParser satirina ve log kayitlarina bakin.'
+            elseif ($failureNotes.Count -gt 0) {
+                # Ayni metin, veri cikan yolda da kullanilan metindir.
+                $detail = ($failureNotes -join ' ')
+                if ($noEventNote) { $detail += " $noEventNote" }
                 $noDataStatus = 'WARN'
             }
             else {
@@ -301,7 +356,10 @@ Register-EDModule @{
             $windowNote += ' Cmdlet yolu kullanildi - ham log erisimi acilirsa cok daha hizli olur.'
         }
 
-        $overallStatus = Get-EDWorstStatus @($cellStatus.Values)
+        # Okunamayan sunucunun hucresi zaten WARN; yine de hukum ACIKCA
+        # yukseltilir: hucre etiketlemesi ileride degisirse satir sessizce
+        # OK'e donmemeli.
+        $overallStatus = Get-EDWorstStatus (@($cellStatus.Values) + @($failureStatus))
         if ($partialServers.Count -gt 0) {
             # Kismi pencere hukmu gecersiz kilmaz ama en az WARN olmalidir:
             # aksi halde OK satiri raporun bulgu tablosuna hic girmez.
@@ -315,7 +373,9 @@ Register-EDModule @{
             $partialNote += 'bu sunucularin persentilleri pencerenin TAMAMINI temsil etmez ve sunucular arasi '
             $partialNote += 'kiyas (ORGU P1) yaniltici olabilir. Pencereyi daraltin (-WindowHours) ve tekrar calistirin.'
         }
-        $p95Note = (@($partialNote, $outlierNote, $windowNote) | Where-Object { $_ }) -join ' '
+        # OLCULEMEYEN SUNUCU EN ONDE yazilir: bir kiyas notu, kiyasa hic
+        # giremeyen sunucularin adini gormeden okunamaz.
+        $p95Note = (@(@($failureNotes) + @($noEventNote, $partialNote, $outlierNote, $windowNote)) | Where-Object { $_ }) -join ' '
         $p99Note = ''
         if ($tailNotes.Count -gt 0) {
             $p99Note = 'ORGU P6 - ortalama tail gizliyor: ' + ($tailNotes -join ' | ')
@@ -326,6 +386,16 @@ Register-EDModule @{
         # p50/p99/max/ortalama da ayni eksik pencereden geliyor; notsuz
         # birakilirsa "yetkili sayi" gibi okunurlar.
         $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
+        # Olculemeyen sunucular bu satirlarda da N/A yazar; SEBEBI yazmazsak
+        # okuyucu N/A'i "bu sunucuda sorun yok" diye gecistirebilir. Hukum
+        # burada yukseltilmez - bulgu tablosunu ayni olaydan turemis bes
+        # satirla doldurmak, olayin kendisini gorunmez yapardi; iddiayi p95
+        # ve teslim sayisi satirlari tasir.
+        $unreadTag = $(if ($readFailedServers.Count + $eventsNoLatency.Count -gt 0) {
+            "OLCULEMEYEN SUNUCU ($(@(@($readFailedServers) + @($eventsNoLatency)) -join ', ')): hucre N/A, sifir DEGIL - ayrinti p95 satirinda. "
+        } else { '' })
+        $partialOnlyTag = $partialTag
+        $partialTag = $unreadTag + $partialTag
         $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p50' -Values $p50 -Unit 'sn' -Status 'OK' -Note $partialTag
         # ORGU P6 metni bu satirdaydi ama satirin durumu sabit 'OK' idi ve
         # Report.ps1 bulgu tablosuna yalnizca WARN/FAIL/ERROR/TIMEOUT satirlarini
@@ -340,7 +410,13 @@ Register-EDModule @{
         # orguden kopuk birakirdi.
         $rows += New-EDRow -Module 'M10' -Check 'Ortalama (tek basina YANILTIR)' -Values $meanValues -Unit 'sn' -Status 'OK' `
             -Patterns @('P6') -Note ($partialTag + 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.')
-        $rows += New-EDRow -Module 'M10' -Check 'Olculen teslim sayisi' -Values $counts -Unit 'adet' -Status 'OK' -Note $partialTag
+        # Bu satirin hukmu SABIT 'OK' idi. Okunamayan sunucu icin hucrede 0
+        # yazip satiri OK birakmak, olcum basarisizligini "0 teslim, sorun
+        # yok" diye okutan tam da o kusurdu: hucre N/A oldu, hukum de artik
+        # okunamayan sunucu varken WARN.
+        $countNote = (@(@($failureNotes) + @($noEventNote, $partialOnlyTag)) | Where-Object { $_ }) -join ' '
+        $rows += New-EDRow -Module 'M10' -Check 'Olculen teslim sayisi' -Values $counts -CellStatus $countStatus `
+            -Unit 'adet' -Status (Get-EDWorstStatus @('OK', $failureStatus)) -Note $countNote
         $rows += New-EDRow -Module 'M10' -Check 'Okuma yolu' -Values $viaValues -Status 'OK'
         $rows += $contextRows
 

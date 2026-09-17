@@ -68,13 +68,20 @@ Register-EDModule @{
                 $Server, $UncPath, $StartUtc, $EndUtc, $MaxMessages, $InnerParallelism, $deadlineUtc)
         }
 
+        # ORNEKLEM TAVANI. Ayristirici bu sayida farkli network-message-id
+        # gordukten sonra YENI mesaj kabul etmez; okumaya devam eder ama
+        # sonuc artik pencerenin TAMAMI degil bir ORNEKTIR. Sayi burada
+        # degiskene alinir, cunku rapor "neyin siniri asildi" diye
+        # soruldugunda sabiti tekrar etmek yerine ayni degeri yazmalidir.
+        $maxMessages = 2000000
+
         $tasks = foreach ($location in $targets) {
             New-EDLocalTask -Key $location.Server -Script $analyze -TimeoutSeconds 900 -Parameters @{
                 Server           = $location.Server
                 UncPath          = $location.UncPath
                 StartUtc         = $startUtc
                 EndUtc           = $endUtc
-                MaxMessages      = 2000000
+                MaxMessages      = $maxMessages
                 InnerParallelism = 2
                 BudgetSeconds    = 840
             }
@@ -85,9 +92,20 @@ Register-EDModule @{
         $cellStatus = @{}
         $evidence = @()
         $storeDominant = @()
-        # Store baskin ama gecikme esik icinde olan sunucular: WARN degil bilgi.
-        $storeDominantHealthy = @()
+        # Ingress ile Transport AYRI SEYLERDIR ve ayri yon tarifi gerektirir:
+        # biri cogu zaman bizim disimizda (ag / yukari akis), digeri bizim
+        # kuyrugumuz. Tek kovaya atilirlarsa not ikisi icin de yanlis olur.
+        $transportDominant = @()
+        $ingressDominant = @()
+        # Baskin faz ne olursa olsun uctan uca gecikme buyukluk tabaninin
+        # altinda kalan sunucular: WARN degil bilgi.
+        $belowFloorServers = @()
         $partialServers = @()
+        # Mesaj sayisi tavani asildigi icin ORNEKLEM uzerinden hukum verilen
+        # sunucular. Zaman siniriyle (Truncated) ayni sey DEGILDIR: orada
+        # dosyalarin bir kismi hic okunmaz, burada butun dosyalar okunur ama
+        # tavandan sonraki YENI mesajlar zincire hic girmez.
+        $sampledServers = @()
         # Faz hukmu eksik nufustan verilen sunucular.
         $incompleteServers = @()
         # Tek bir mesajin bile zinciri kurulamayan sunucular: bu, eksik
@@ -149,11 +167,26 @@ Register-EDModule @{
             if ([bool](Get-EDProperty $breakdown 'MalformedLines' 0) -gt 0) {
                 $malformed += ("{0}: {1} satir semaya uymadi" -f $server, (Get-EDProperty $breakdown 'MalformedLines' 0))
             }
+            # KAPSAM HUCRESI "TAM" DEMEDEN ONCE IKI SINIRI DA SORMALI.
+            #
+            # Modul yalnizca $breakdown.Truncated (zaman siniri) bakiyordu;
+            # ayristirici mesaj sayisi tavanini astiginda kuruyor olan
+            # TruncatedByLimit ise hicbir yerde okunmuyordu. Sonuc: saatte
+            # 1M mesajlik bir ortamda -WindowHours 8 ile pencerenin ~%25'ine
+            # bakilip hucreye "tam N dosya / OK" yaziliyor, "Baskin faz:
+            # Store" hukmu de o ORNEKTEN kuruluyordu. Dosyalarin hepsi
+            # okunmustu - ama mesajlarin hepsi degil.
             if ($breakdown.Truncated) {
                 $partialServers += $server
                 $coverageValues[$server] = "KISMI $($breakdown.FilesProcessed)/$($breakdown.FilesScanned) dosya"
                 $coverageStatus[$server] = 'WARN'
                 $log.Warn("M11/$server : zaman siniri kesti; faz kirilimi EKSIK pencereden hesaplandi.")
+            }
+            elseif ([bool](Get-EDProperty $breakdown 'TruncatedByLimit' $false)) {
+                $sampledServers += $server
+                $coverageValues[$server] = "ORNEKLEM $($breakdown.MessagesSeen) mesaj (tavan)"
+                $coverageStatus[$server] = 'WARN'
+                $log.Warn("M11/$server : mesaj sayisi tavani ($maxMessages) asildi; faz kirilimi ORNEKLEMDIR.")
             }
             else {
                 $coverageValues[$server] = "tam $($breakdown.FilesScanned) dosya"
@@ -189,22 +222,50 @@ Register-EDModule @{
             # fazlarin gorece dagilimi vardir.
             # Taban: WARN esiginin YARISI. Bunun altinda fazlar arasindaki
             # dagilim bir darbogaz degil, hizli bir teslimin ic oranidir.
+            # BUYUKLUK KAPISI FAZDAN BAGIMSIZDIR.
+            #
+            # Kapi yalnizca Store dalinda uygulaniyordu; Ingress veya
+            # Transport baskin oldugunda HIC kapi yoktu ve satir kosulsuz
+            # 'OK' kaliyordu. Gercek kosumda olculdu: uctan uca p95 128,5 sn
+            # (warn esiginin iki kati) iken satir OK, not ise kosulsuz
+            # "M14/M16'ya bakin" diyordu - oysa baskin faz Ingress'ti, yani
+            # transport ayari o gecikmeyi ACIKLAMIYORDU. Kapi ikisini birden
+            # tasir: esigin altinda HICBIR faz icin bulgu kurulmaz, ustunde
+            # hangi faz baskinsa o fazin YON TARIFI verilir.
             $latencyWarn = [double]$Context.Config.Thresholds['deliveryLatencyP95Sec']['warn']
             $meaningfulFloor = $latencyWarn / 2
             $hasMeaningfulLatency = ($breakdown.Total.Count -gt 0 -and $breakdown.Total.P95 -ge $meaningfulFloor)
+            $dominant = [string]$breakdown.DominantPhase
 
-            if ($breakdown.DominantPhase -eq 'Store' -and $hasMeaningfulLatency) {
+            if ($dominant -notin @('Ingress', 'Transport', 'Store')) {
+                # Baskin faz hesaplanamadi (hicbir fazin ornegi yok). Hukum
+                # yok: olculmemis bir sey hakkinda iddia kurulmaz.
+                $cellStatus[$server] = 'N/A'
+            }
+            elseif (-not $hasMeaningfulLatency) {
+                # Uctan uca gecikme buyukluk tabaninin altinda: fazlarin
+                # gorece dagilimi bir darbogaz degil, hizli bir teslimin ic
+                # oranidir. Hangi faz baskin olursa olsun bulgu KURULMAZ.
+                $cellStatus[$server] = 'OK'
+                $belowFloorServers += [pscustomobject]@{ Server = $server; Phase = $dominant }
+            }
+            elseif ($dominant -eq 'Store') {
                 $cellStatus[$server] = 'WARN'
                 $storeDominant += $server
             }
-            elseif ($breakdown.DominantPhase -eq 'Store') {
-                # Store baskin ama uctan uca gecikme esik icinde: bu bilgidir,
-                # bulgu degil.
-                $cellStatus[$server] = 'OK'
-                $storeDominantHealthy += $server
+            elseif ($dominant -eq 'Transport') {
+                # Kategorize + kuyruk: bu BIZIM tarafimizdir, yon tarifi de
+                # buna gore verilir.
+                $cellStatus[$server] = 'WARN'
+                $transportDominant += $server
             }
             else {
-                $cellStatus[$server] = 'OK'
+                # Ingress: ag / yukari akis. INGRESS ILE TRANSPORT AYNI KOVAYA
+                # ATILAMAZ - ayristirici ucunu ayirt edebiliyor ve bu ikisi
+                # ayri yon tarifi gerektirir. Transport ayarlari (M14/M16)
+                # Exchange'e mesaj GELMEDEN once gecen sureyi aciklamaz.
+                $cellStatus[$server] = 'WARN'
+                $ingressDominant += $server
             }
 
             $evidence += [pscustomobject]@{
@@ -243,15 +304,28 @@ Register-EDModule @{
         # Kapsam satiri veri cikmasa DA uretilmeli: "zincir bulunamadi"nin
         # sebebi zaman siniri olabilir ve tavsiye o zaman TERSINE doner.
         $coverageRow = @()
-        if ($partialServers.Count -gt 0) {
+        if ($partialServers.Count -gt 0 -or $sampledServers.Count -gt 0) {
+            $coverageNote = ''
+            if ($partialServers.Count -gt 0) {
+                $coverageNote += 'Zaman siniri okumayi kesti; KISMI isaretli sunucularda faz kirilimi eksik pencereden hesaplandi. '
+            }
+            if ($sampledServers.Count -gt 0) {
+                $coverageNote += ("Mesaj sayisi tavani ({0}) asildi; ORNEKLEM isaretli sunucularda butun dosyalar okundu ama butun MESAJLAR okunmadi. " -f $maxMessages)
+            }
+            $coverageNote += 'Her iki durumda da cozum ayni yondedir: pencereyi -WindowHours ile DARALTIN.'
             $coverageRow += New-EDRow -Module 'M11' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
-                -Status 'WARN' -Note 'Zaman siniri okumayi kesti; isaretli sunucularda faz kirilimi eksik pencereden hesaplandi.'
+                -Status 'WARN' -Note $coverageNote
         }
 
         if (-not $anyData) {
             if ($partialServers.Count -gt 0) {
                 $noDataNote = "Zaman siniri okumayi kesti ($($partialServers -join ', ')); mesaj zinciri birlestirilemedi. "
                 $noDataNote += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
+                $noDataStatus = 'WARN'
+            }
+            elseif ($sampledServers.Count -gt 0) {
+                $noDataNote = ("Mesaj sayisi tavani ({0}) asildi ($($sampledServers -join ', ')); orneklem icinde birlestirilebilir zincir cikmadi. " -f $maxMessages)
+                $noDataNote += 'Pencereyi -WindowHours ile DARALTIN; genisletmek orneklemi daha da kirpar.'
                 $noDataStatus = 'WARN'
             }
             else {
@@ -262,28 +336,44 @@ Register-EDModule @{
                 -Status $noDataStatus -Patterns @('P2') -Note $noDataNote) + $coverageRow
         }
 
-        $note = ''
+        # NOT SUNUCU BAZLI KURULUR.
+        #
+        # Buradaki if/elseif zinciri tek bir sunucunun durumunu TUM rapor
+        # icin konusuyordu: A sunucusunun zinciri kurulamadiginda, B
+        # sunucusunun OLCULMUS baskin faz teshisi ve yon tarifi rapordan
+        # tamamen dusuyordu - ustelik not "baskin faz hakkinda HICBIR IDDIA
+        # yok" derken satirin B hucresinde 'Transport' yaziyordu, yani rapor
+        # kendi verisini yalanliyordu. Cok sunuculu ortamda, yani aracin
+        # asil hedefinde tetikleniyordu. Artik her grup KENDI cumlesini
+        # kurar ve cumleler yan yana durur.
+        $noteParts = @()
         if ($storeDominant.Count -gt 0) {
-            $note = "ORGU P2: $($storeDominant -join ', ') sunucusunda gecikme STORE fazinda (DeliveryToMailbox) yogunlasiyor. "
-            $note += 'Darbogaz transport degil Store tarafi - arastirmayi M20 (RPC latency), M21 (disk latency) ve M22 (paylasilan volume) ile surdurun.'
-            $log.Warn("M11: $note")
+            $part = "ORGU P2: $($storeDominant -join ', ') sunucusunda gecikme STORE fazinda (DeliveryToMailbox) yogunlasiyor. "
+            $part += 'Darbogaz transport degil Store tarafi - arastirmayi M20 (RPC latency), M21 (disk latency) ve M22 (paylasilan volume) ile surdurun.'
+            $noteParts += $part
+            $log.Warn("M11: $part")
         }
-        elseif ($storeDominantHealthy.Count -gt 0) {
-            $note = ("{0} sunucusunda en buyuk pay Store fazinda, ANCAK uctan uca teslim gecikmesi esik icinde. " -f ($storeDominantHealthy -join ', '))
-            $note += 'Ic Exchange trafiginde Store payinin en buyuk olmasi NORMALDIR; bu tek basina darbogaz DEGILDIR '
-            $note +='ve bu yuzden P2 orgusu kurulmadi.'
+        if ($transportDominant.Count -gt 0) {
+            $part = ("{0} sunucusunda baskin faz TRANSPORT (kategorize + kuyruk) ve uctan uca gecikme buyukluk tabanini asiyor. " -f ($transportDominant -join ', '))
+            $part += 'Bu bizim tarafimizdir: M14 (kuyruk derinligi) ve M16 (teslim paralelligi) ile surdurun.'
+            $noteParts += $part
+            $log.Warn("M11: $part")
         }
-        elseif ($noChainServers.Count -gt 0) {
-            # OLCULMEMIS BIR SEY HAKKINDA HUKUM KURULMAZ.
-            # Burada eskiden "baskin faz Store disinda" yaziyordu. Zincir
-            # hic kurulamadiginda ortada baskin faz YOKTUR; bu cumle sifir
-            # ornekten hukum uretiyor ve operatoru bos yere M14/M16'ya
-            # yonlendiriyordu - yani okunmamis veriden yon tarifi.
-            $note = 'Faz kirilimi kurulamadi; baskin faz hakkinda HICBIR IDDIA yok.'
+        if ($ingressDominant.Count -gt 0) {
+            $part = ("{0} sunucusunda baskin faz INGRESS (gonderim ile Transport RECEIVE arasi) ve uctan uca gecikme buyukluk tabanini asiyor. " -f ($ingressDominant -join ', '))
+            $part += 'Bu faz ag ve yukari akistir, yani cogu zaman Exchange DISINDADIR: M14/M16 bu gecikmeyi ACIKLAMAZ. '
+            $part += 'Gonderen taraf, upstream gateway/smart host ve ag yolu incelenir; gonderen ile Exchange arasindaki saat kaymasi da ayni fazi sisirir (M11 kanit dosyasinda SaatKaymasi sutunu).'
+            $noteParts += $part
+            $log.Warn("M11: $part")
         }
-        else {
-            $note = 'Baskin faz Store disinda; transport tarafi icin M14 (kuyruklar) ve M16 (teslim paralelligi) bakilmali.'
+        if ($belowFloorServers.Count -gt 0) {
+            $detail = @($belowFloorServers | ForEach-Object { "$($_.Server) ($($_.Phase))" }) -join ', '
+            $part = ("{0}: en buyuk pay bu fazda, ANCAK uctan uca teslim gecikmesi buyukluk tabaninin altinda. " -f $detail)
+            $part += 'Fazlar arasindaki dagilim tek basina darbogaz DEGILDIR (ic Exchange trafiginde Store payinin en buyuk olmasi da normaldir); '
+            $part += 'bu yuzden hicbir faz icin bulgu kurulmadi.'
+            $noteParts += $part
         }
+        $note = ($noteParts -join ' ')
 
         $phaseStatus = Get-EDWorstStatus @($cellStatus.Values)
         if ($noChainServers.Count -gt 0) {
@@ -291,7 +381,8 @@ Register-EDModule @{
                     'Bu bir pencere sorunu DEGILDIR - pencere kenari mesajlarin bir kismini disarida birakir, hepsini birden degil. ' +
                     'Beklenen sebep: posta kutusu tarafi RECEIVE olayi uretilmiyor (MSGTRKMD yalnizca DELIVER tasiyor), ' +
                     'ki bu tek sunuculu / yerel teslimde normaldir. Pencereyi GENISLETMEK SONUCU DEGISTIRMEZ. ' +
-                    'Uctan uca gecikme icin M10 gecerlidir; faz ayrimi bu ortamda yapilamaz. ' + $note
+                    'Uctan uca gecikme icin M10 gecerlidir; faz ayrimi bu ortamda yapilamaz. ' +
+                    'BU SUNUCULAR icin baskin faz hakkinda HICBIR IDDIA yok - asagidaki teshisler yalnizca adi gecen diger sunuculara aittir. ' + $note
             $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
         }
         if ($incompleteServers.Count -gt 0) {
@@ -312,12 +403,29 @@ Register-EDModule @{
                     'baskin faz hukmu pencerenin tamamini temsil etmeyebilir. ' + $note
             $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
         }
+        if ($sampledServers.Count -gt 0) {
+            # ORNEKLEM "TAM" DIYE RAPORLANAMAZ. Tavan asildiginda ayristirici
+            # yeni mesaj kabul etmeyi birakir; hangi mesajlarin kumeye girdigi
+            # dosya okuma sirasina baglidir, yani ornek ne rastgeledir ne de
+            # pencereye esit dagilir. "Baskin faz" hukmu bu ornekten cikar.
+            $note = ("ORNEKLEM ({0}): mesaj sayisi tavani ({1}) asildi; faz kirilimi pencerenin TAMAMINDAN degil bir ORNEKTEN hesaplandi. " -f `
+                        ($sampledServers -join ', '), $maxMessages) +
+                    'Ornek rastgele DEGILDIR (tavana kadar goruleni alir), bu yuzden baskin faz hukmu pencerenin tamamini temsil etmeyebilir. ' +
+                    'Pencereyi -WindowHours ile DARALTIP tekrar calistirin: mesaj sayisi tavanin altina indiginde kirilim tam olur. ' + $note
+            $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
+        }
 
         $rows = @()
         $rows += New-EDRow -Module 'M11' -Check 'Baskin faz' -Values $dominantValues -CellStatus $cellStatus `
             -Status $phaseStatus -Patterns @('P2') -Note $note
-        # Faz p95 satirlari da ayni eksik pencereden geliyor.
+        # Faz p95 satirlari da ayni eksik pencereden - ya da ayni ORNEKTEN -
+        # geliyor. Ikisi ayri ayri etiketlenir: biri "dosyalarin bir kismi
+        # okunmadi", digeri "dosyalar okundu ama mesajlarin bir kismi kumeye
+        # hic girmedi" demektir ve okuyucunun ikisini ayirt etmesi gerekir.
         $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
+        if ($sampledServers.Count -gt 0) {
+            $partialTag += "ORNEKLEM ($($sampledServers -join ', ')): mesaj tavani ($maxMessages) asildi. "
+        }
         # Brief P2'yi iki sayiyla tanimlar: baskin fazin Store olmasi VE uctan
         # uca p95'in buyukluk tabanini asmasi. Iddiayi tasiyan iki satir da
         # etiketlenir, yoksa okuyucu hukmun neye dayandigini goremez.
