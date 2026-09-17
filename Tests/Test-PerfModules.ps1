@@ -10,6 +10,12 @@
     test de ayni kapiyi kullanir. GERCEK SUNUCUYA YUK BINDIRILMEZ, hicbir
     sayac veya disk degistirilmez.
 
+    ⚠️ ENJEKSIYONUN BEDELI: bu paket ORNEKLEYICIYI hic calistirmaz. Ham sayac
+    matematigi (PERF_AVERAGE_TIMER), isinma turunun atilmasi, sayac sarmasi ve
+    volume envanteri bu yuzden AYRI bir pakette test edilir:
+    Tests\Test-PerfSampler.ps1. Bolme yerine carpma yazan bir mutasyon (10^7
+    kat hata) bir sure YALNIZCA orada kirmizi oluyordu - burada degil.
+
     Test edilen kritik kararlar:
       - P4  : yuksek RPC + SAGLIKLI disk -> Store sucludur
       - P4  : yuksek RPC + YAVAS disk    -> P4 iddia EDILMEZ
