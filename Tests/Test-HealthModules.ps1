@@ -475,6 +475,44 @@ $rows = @(& $m45.Run (New-BackupContext -Rows @((New-BackupRow -Name 'DB1' -Last
 $ageRow = Get-EDTestRow $rows 'Son yedekten bu yana'
 Assert-Equal '10 gunluk yedek FAIL' 'FAIL' $ageRow.Status
 
+# 6f. GORUNMEYEN BASTIRMA = YANLIS NEGATIF.
+# known-issues.json bastirmasi FAIL'i dogrudan OK'e ceviriyor, hicbir
+# sayac/not/iz birakmiyordu. Ustelik "teslim durur" anlatimi bastirmadan
+# ONCE kuruldugu icin OK satirin notunda kaliyordu: tabloya bakan "yedek
+# tarafi temiz" okuyor, notu okuyan "neden yesil?" diyordu. M40 ayni isi
+# dogru yapiyor; M45 artik onunla ayni deyimi kullaniyor.
+$suppressedContext = New-BackupContext -Rows @((New-BackupRow -Name 'DB1' -LastFull $null -Circular $false))
+# DIKKAT - FIXTURE IZOLASYONU: Config nesnesi testler arasinda PAYLASILIR.
+# Burada KnownIssues'u geri almadan birakmak, sonraki butun M45 testlerinde
+# bulgulari sessizce bastirir ve onlari yalanci-yesil yapar. Bu paket bir
+# kere tam olarak boyle kirlenmisti.
+$previousKnownIssues = $suppressedContext.Config.KnownIssues
+$suppressedContext.Config.KnownIssues = @(@{ module = 'M45'; match = 'NoRecentBackup'; reason = 'test'; expires = '2099-01-01' })
+$rows = @(& $m45.Run $suppressedContext)
+$suppressedContext.Config.KnownIssues = $previousKnownIssues
+$ageRow = Get-EDTestRow $rows 'Son yedekten bu yana'
+Assert-Equal 'Bastirilan bulgu satiri OK yapar' 'OK' $ageRow.Status
+Assert-True 'Bastirma NOTTA gorunuyor' ($ageRow.Note -like '*BASTIRILDI*') $ageRow.Note
+Assert-True 'Hangi veritabani oldugu yazili' ($ageRow.Note -like '*DB1*') $ageRow.Note
+Assert-True 'Bulgunun GERCEKTEN var oldugu soyleniyor' ($ageRow.Note -like '*GERCEKTEN VAR*') $ageRow.Note
+# Bastirilan bulgunun FAIL anlatimi OK satira YAPISMAMALI.
+Assert-True 'Bastirilan DB icin zincir anlatimi yok' ($ageRow.Note -notlike '*ZINCIR TAMAM*') $ageRow.Note
+Assert-True 'Bastirilan DB icin teslim durur denmiyor' ($ageRow.Note -notlike '*teslim durur*') $ageRow.Note
+# En tehlikelisi: bastirma varken "hepsi guncel" OLUMLU IDDIASI kurulamaz.
+Assert-True 'Hepsi guncel iddiasi KURULMUYOR' ($ageRow.Note -notlike '*Tum veritabanlarinda guncel*') $ageRow.Note
+
+# 6g. DAIRESEL ACIK + YEDEK ESKI: eski kodda bu DB ne riskChain'e ne
+# neverBackedUp'a giriyordu; ikisi de bos kalinca WARN bir satirin notuna
+# "Tum veritabanlarinda guncel yedek kaydi var" yaziliyordu. Satir sari,
+# notu "hepsi guncel" - operator sariyi gorup notu okuyunca gecip gidiyor.
+$rows = @(& $m45.Run (New-BackupContext -Rows @((New-BackupRow -Name 'DB1' -LastFull (Get-Date).AddDays(-5) -Circular $true))))
+$ageRow = Get-EDTestRow $rows 'Son yedekten bu yana'
+Assert-True 'Eski yedek hukmu OK degil' ($ageRow.Status -ne 'OK') $ageRow.Status
+Assert-True 'Hepsi guncel iddiasi KURULMUYOR' ($ageRow.Note -notlike '*Tum veritabanlarinda guncel*') $ageRow.Note
+Assert-True 'Dairesel acik oldugu icin ayri anlatildi' ($ageRow.Note -like '*dairesel gunluklemesi ACIK*') $ageRow.Note
+Assert-True 'Point-in-time kaybi soylendi' ($ageRow.Note -like '*point-in-time*') $ageRow.Note
+Assert-True 'Gunluk birimi riski OLMADIGI soylendi' ($ageRow.Note -like '*dolma riski yok*') $ageRow.Note
+
 # 6e. Sunucu sutununda EN KOTU veritabani gosterilir, ortalama degil
 $rows = @(& $m45.Run (New-BackupContext -Rows @(
     (New-BackupRow -Name 'DB1' -LastFull (Get-Date).AddHours(-1) -Circular $false)

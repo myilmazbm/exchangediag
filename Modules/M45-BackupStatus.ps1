@@ -64,6 +64,16 @@ Register-EDModule @{
         $evidence = @()
         $neverBackedUp = @()
         $riskChain = @()
+        # BASTIRILAN BULGU GORUNUR OLMAK ZORUNDADIR.
+        # Brief: "Gorunmeyen bastirma, yanlis negatifle aynidir." M40 bunu
+        # dogru yapiyor (sayar ve nota yazar); M45 FAIL'i dogrudan OK'e
+        # ceviriyor ve hicbir iz birakmiyordu.
+        $suppressed = @()
+        # Dairesel gunlukleme ACIK + yedek yasi esigi asmis DB, eski kodda
+        # NE riskChain'e NE neverBackedUp'a giriyordu; ikisi de bos kalinca
+        # "Tum veritabanlarinda guncel yedek kaydi var" cumlesi WARN bir
+        # satirin notuna yaziliyordu. Satir sari, notu "hepsi guncel".
+        $staleCircular = @()
         $oldest = $null
 
         foreach ($row in $rows) {
@@ -89,27 +99,37 @@ Register-EDModule @{
             }
             if ($lastDate) { $ageDays = [math]::Round(($now - $lastDate).TotalDays, 1) }
 
+            # ONCE hukum, SONRA bastirma karari, EN SON anlatim listeleri.
+            # Eski sirada listeler hukumle birlikte doluyordu; bastirilan bir
+            # veritabani OK satiri uretiyor ama "teslim durur" cumlesi notta
+            # kaliyordu. Iki okuyucu da yanlis bilgileniyordu: tabloya bakan
+            # "yedek tarafi temiz", notu okuyan "neden yesil?" diyordu.
             $status = 'OK'
+            $finding = ''
             if ($null -eq $ageDays) {
-                $neverBackedUp += "$database ($serverName)"
                 # Zincir yalnizca dairesel gunlukleme KAPALIYKEN tamamlanir.
-                if (-not $circular) {
-                    $status = 'FAIL'
-                    $riskChain += $database
-                }
-                else {
-                    $status = 'WARN'
-                }
+                if (-not $circular) { $status = 'FAIL'; $finding = 'zincir' }
+                else { $status = 'WARN'; $finding = 'yedeksiz' }
             }
             else {
                 $status = Get-EDStatus -Value $ageDays -ThresholdName 'backupAgeDays' -Config $Context.Config
                 if ($null -eq $oldest -or $ageDays -gt $oldest) { $oldest = $ageDays }
-                if ($status -in @('WARN', 'FAIL') -and -not $circular) { $riskChain += $database }
+                if ($status -in @('WARN', 'FAIL')) {
+                    $finding = $(if (-not $circular) { 'zincir' } else { 'eski-dairesel' })
+                }
             }
 
             # Bulgu bastirilmis mi? (lab profillerinde NoRecentBackup tipik)
             $known = Test-EDKnownIssue -Config $Context.Config -Module 'M45' -Text "NoRecentBackup\$database"
-            if ($known -and $status -in @('WARN', 'FAIL')) { $status = 'OK' }
+            if ($known -and $status -in @('WARN', 'FAIL')) {
+                $status = 'OK'
+                $suppressed += $database
+            }
+            elseif ($finding) {
+                if ($null -eq $ageDays) { $neverBackedUp += "$database ($serverName)" }
+                if ($finding -eq 'zincir') { $riskChain += $database }
+                elseif ($finding -eq 'eski-dairesel') { $staleCircular += $database }
+            }
 
             $evidence += [pscustomobject]@{
                 Veritabani       = $database
@@ -145,7 +165,22 @@ Register-EDModule @{
             $note += ('Hic yedegi gorunmeyen veritabanlari: {0}. ' -f ($neverBackedUp -join ', '))
             $note += 'DIKKAT: VSS disi bir yedekleme cozumu (dosya seviyesi veya sanal makine anlik goruntusu) Exchange''e kendini BILDIRMEZ; bu alanin bos olmasi yedek alinmadigini KANITLAMAZ. '
         }
-        if ($riskChain.Count -eq 0 -and $neverBackedUp.Count -eq 0) {
+        if ($staleCircular.Count -gt 0) {
+            $note += ('Yedek yasi esigi asan ama dairesel gunluklemesi ACIK veritabanlari: {0}. ' -f ($staleCircular -join ', '))
+            $note += 'Gunluk birimi dolma riski yok, ama zamana gore geri donus (point-in-time) imkani da yok. '
+        }
+        if ($suppressed.Count -gt 0) {
+            # Bastirma SAYISI degil ADLARI yazilir: operator neyin
+            # susturuldugunu bilmeden raporun ne kadarina guvenecegine
+            # karar veremez.
+            $note += ('BASTIRILDI ({0} veritabani): {1} - known-issues.json ile susturuldu, bulgu GERCEKTEN VAR. Kanit dosyasinda Bastirildi=True. ' -f
+                $suppressed.Count, ($suppressed -join ', '))
+            $log.Warn("M45: $($suppressed.Count) bulgu known-issues.json ile bastirildi: $($suppressed -join ', ')")
+        }
+        # OLUMLU IDDIA ANCAK HICBIR BULGU YOKKEN KURULUR - bastirilmis
+        # bulgu da bir bulgudur ve "hepsi guncel" cumlesini yalanlar.
+        if ($riskChain.Count -eq 0 -and $neverBackedUp.Count -eq 0 -and
+            $staleCircular.Count -eq 0 -and $suppressed.Count -eq 0) {
             $note += 'Tum veritabanlarinda guncel yedek kaydi var. '
         }
         $note += 'Ayrinti: M45-backup-status.csv'
