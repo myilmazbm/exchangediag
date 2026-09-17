@@ -48,6 +48,7 @@ Register-EDModule @{
         # DELIVER okundu ama hicbirinden gecikme turetilemedi: "olay yok" ile
         # ayni sey DEGIL ve rapor ikisini karistirmamali.
         $eventsNoLatency = @()
+        $readFailedServers = @()
         $anyData = $false
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
@@ -77,7 +78,10 @@ Register-EDModule @{
                 $p50[$server] = 'N/A'; $p95[$server] = 'N/A'; $p99[$server] = 'N/A'
                 $maxValues[$server] = 'N/A'; $counts[$server] = 0; $meanValues[$server] = 'N/A'
                 $cellStatus[$server] = 'N/A'
-                if ($analysis.DeliverEvents -gt 0) { $eventsNoLatency += $server }
+                # OKUMA BASARISIZ: "olay yok" ile ayni sey degil ve tavsiyesi
+                # de TERSTIR (pencereyi genisletmek, timeout'u kotulestirir).
+                if ([bool](Get-EDProperty $analysis 'ReadFailed' $false)) { $readFailedServers += $server }
+                elseif ($analysis.DeliverEvents -gt 0) { $eventsNoLatency += $server }
                 else { $noDataServers += $server }
                 continue
             }
@@ -178,6 +182,12 @@ Register-EDModule @{
             if ($partialServers.Count -gt 0) {
                 $detail = "Zaman siniri okumayi kesti ($($partialServers -join ', ')); gecikme hesaplanamadi. "
                 $detail += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
+                $noDataStatus = 'WARN'
+            }
+            elseif ($readFailedServers.Count -gt 0) {
+                $detail = "Tracking log OKUNAMADI ($($readFailedServers -join ', ')): sorgu hata verdi veya zaman asimina ugradi. "
+                $detail += 'Bu bir bulgu YOKLUGU degil, olcum eksikligidir. Pencereyi GENISLETMEYIN - '
+                $detail += 'once -WindowHours ile DARALTIP tekrar deneyin, ham log erisimi (-LogAccess Smb) acilabiliyorsa cok daha hizlidir.'
                 $noDataStatus = 'WARN'
             }
             elseif ($eventsNoLatency.Count -gt 0) {

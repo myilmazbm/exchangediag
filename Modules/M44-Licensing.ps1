@@ -89,7 +89,11 @@ Register-EDModule @{
             $server = $result.Key
 
             if (-not $result.Succeeded -or @($result.Output).Count -eq 0) {
-                $editionValues[$server] = $result.State; $trialValues[$server] = $result.State
+                # DIKKAT: basarili ama BOS bir sonucta $result.State 'OK'
+                # dondurur ve bu deger dogrudan hucreye yaziliyordu: rapor
+                # "Exchange surumu = OK" diyordu. M40 ayni durumu N/A yapar.
+                $cellText = $(if ($result.Succeeded) { 'N/A' } else { $result.State })
+                $editionValues[$server] = $cellText; $trialValues[$server] = $cellText
                 $trialCellStatus[$server] = $result.State
                 if (-not $result.Succeeded) { $log.Warn("M44/$server : $($result.State) - $($result.Error)") }
                 continue

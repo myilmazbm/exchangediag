@@ -83,9 +83,28 @@ Register-EDModule @{
 
         $databaseByRecipient = @{}
         $notFound = 0
+        $lookupErrors = 0
         foreach ($result in $Context.Executor.RunExchange([ExchangeDiag.ExecTask[]]@($tasks))) {
-            if (-not $result.Succeeded -or $result.Output.Count -eq 0) {
-                # Dis alici, dagitim grubu veya silinmis posta kutusu olabilir.
+            if (-not $result.Succeeded) {
+                # IKI FARKLI BASARISIZLIK ayrilmalidir:
+                #
+                #   * Kimlik cozulemedi  -> alici gercekten dis adres veya
+                #     dagitim grubu olabilir; NORMAL bir durumdur.
+                #   * TIMEOUT / throttling -> altyapi sorunu. 300 ardisik
+                #     Get-Recipient cagrisinda cok olasidir ve eskiden
+                #     "dis adres olabilir" diye raporlanip normallestiriliyordu.
+                $errorText = [string]$result.Error
+                if ($result.State -eq 'TIMEOUT' -or $errorText -match 'throttl|budget|quota|too many|kota') {
+                    $lookupErrors++
+                }
+                else {
+                    $notFound++
+                }
+                continue
+            }
+            if ($result.Output.Count -eq 0) {
+                # Sorgu calisti ama karsilik yok: gercekten dis alici veya
+                # dagitim grubu olabilir.
                 $notFound++
                 continue
             }
@@ -121,7 +140,11 @@ Register-EDModule @{
 
         if ($byDatabase.Count -eq 0) {
             return @(New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Status 'N/A' `
-                -Note "Yavas teslimlerin alicilari veritabani ile eslestirilemedi ($notFound alici bulunamadi). Alicilar dis adres veya dagitim grubu olabilir.")
+                -Note $(if ($lookupErrors -gt 0) {
+                    "Alici -> veritabani eslemesi YAPILAMADI: $lookupErrors sorgu HATA/TIMEOUT dondu (Exchange throttling'i olasi), $notFound alici karsiliksiz. Bu bir bulgu yoklugu DEGIL, olcum eksikligidir; -Parallelism degerini dusurup tekrar deneyin."
+                } else {
+                    "Yavas teslimlerin alicilari veritabani ile eslestirilemedi ($notFound alici bulunamadi). Alicilar dis adres veya dagitim grubu olabilir."
+                }))
         }
 
         # --- Kanit ---
@@ -190,6 +213,7 @@ Register-EDModule @{
 
         $coverageNote = "Esik ${threshold} sn. $totalSlowDeliveries yavas teslim, $($ranked.Count) benzersiz alici; $($lookupTargets.Count) tanesi sorgulandi (%$coverage kapsam)."
         if ($notFound -gt 0) { $coverageNote += " $notFound alici posta kutusu ile eslesmedi (dis adres/dagitim grubu olabilir)." }
+        if ($lookupErrors -gt 0) { $coverageNote += " $lookupErrors sorgu HATA/TIMEOUT dondu (throttling olasi); bu aliciler kapsam disinda kaldi." }
 
         $rows = @()
         $rows += New-EDRow -Module 'M12' -Check 'Yavas teslim (aktif DB sunucusuna gore)' -Values $serverValues `

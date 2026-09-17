@@ -87,10 +87,16 @@ Register-EDModule @{
             }
         }
 
-        if (@($deliveries.Values | Where-Object { $_ -ne 'N/A' }).Count -eq 0) {
+        # Eskiden yalnizca $deliveries (Get-MailboxTransportService) kontrol
+        # ediliyordu: o cagri basarisiz olunca, BASARIYLA okunmus transport
+        # ayarlarindaki gercek surukleme bulgusu da cope gidiyordu.
+        $readableTables = @($deliveries, $submissions, $outbound, $perDomain, $expiration, $retryCount, $retryInterval) |
+            Where-Object { @($_.Values | Where-Object { $_ -ne 'N/A' }).Count -gt 0 }
+        if (@($readableTables).Count -eq 0) {
             return @(New-EDRow -Module 'M16' -Check 'Transport ayarlari' -Status 'ERROR' `
-                -Note 'Transport servisi ayarlari okunamadi.')
+                -Note 'Hicbir transport ayari okunamadi (ne Get-TransportService ne Get-MailboxTransportService).')
         }
+        $partialRead = @($deliveries.Values | Where-Object { $_ -ne 'N/A' }).Count -eq 0
 
         $evidence = foreach ($server in $servers) {
             [pscustomobject]@{
@@ -121,6 +127,12 @@ Register-EDModule @{
 
         $rows = @()
         $worst = 'OK'
+        if ($partialRead) {
+            # Okunabilenlerle devam edilir ama neyin okunamadigi SOYLENIR.
+            $rows += New-EDRow -Module 'M16' -Check 'Mailbox transport ayarlari' -Status 'WARN' `
+                -Note 'Get-MailboxTransportService okunamadi; MaxConcurrentMailboxDeliveries ve MaxConcurrentMailboxSubmissions bu calistirmada KONTROL EDILMEDI. Asagidaki transport ayarlari okunabildi.'
+            $worst = 'WARN'
+        }
 
         foreach ($setting in $settingRows) {
             $drift = Test-EDValueDrift -Values $setting.Values

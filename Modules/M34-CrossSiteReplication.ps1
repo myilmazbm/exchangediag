@@ -91,15 +91,30 @@ Register-EDModule @{
         # --- Asil ayrim: sorun WAN'da mi yoksa genel mi? ---
         $crossWorst = 0
         if ($crossSite.Count -gt 0) { $crossWorst = (@($crossSite | ForEach-Object { $_.KopyaKuyruk }) | Measure-Object -Maximum).Maximum }
-        $sameWorst = 0
+        # "Ayni site kopyasi YOK" ile "ayni site kopyalari sifir kuyrukta"
+        # AYNI DEGER DEGILDIR. Ikisini de 0 yapmak, kiyas tabani hic yokken
+        # WAN'i suclamaya yol aciyordu: her sitede tek kopyasi olan bir
+        # stretched DAG'de DR sunucusunun log diski dolsa bile rapor
+        # "Exchange tarafinda aranacak bir sey yok, ag ekibine gidin" diyordu.
+        $sameWorst = $null
         if ($sameSite.Count -gt 0) { $sameWorst = (@($sameSite | ForEach-Object { $_.KopyaKuyruk }) | Measure-Object -Maximum).Maximum }
 
         $status = Get-EDWorstStatus @($cellStatus.Values)
-        $note = ("$($crossSite.Count) kopya uzak sitede. En kotu siteler arasi kuyruk {0} log, ayni site icindeki en kotu kuyruk {1} log. " -f $crossWorst, $sameWorst)
+        $sameWorstText = $(if ($null -ne $sameWorst) { "$sameWorst log" } else { 'KIYAS YOK (ayni sitede pasif kopya bulunmuyor)' })
+        $note = ("$($crossSite.Count) kopya uzak sitede. En kotu siteler arasi kuyruk {0} log, ayni site icindeki en kotu kuyruk: {1}. " -f $crossWorst, $sameWorstText)
 
         if ($status -in @('WARN', 'FAIL')) {
-            if ($sameWorst -eq 0 -or $crossWorst -ge ($sameWorst * 5)) {
-                $note += 'YALNIZCA siteler arasi kopyalar geride kaliyor: bulgu WAN bant genisligi veya gecikmesi tarafindadir. Exchange tarafinda aranacak bir sey yok. '
+            if ($null -eq $sameWorst) {
+                # Kiyas tabani yok: WAN iddiasi KURULAMAZ. Hicbir sey
+                # soylememek, yanlis ekibe yollamaktan iyidir.
+                $note += 'Ayni sitede pasif kopya bulunmadigi icin "yalnizca siteler arasi geride" karsilastirmasi YAPILAMAZ; '
+                $note += 'bulgunun WAN kaynakli olup olmadigi bu veriyle SOYLENEMEZ. Once M31 (kuyruklar) ve M33 (replikasyon sagligi) ile hedef sunucuyu kontrol edin. '
+            }
+            elseif ($crossWorst -ge ($sameWorst * 5) -and (Get-EDStatus -Value $sameWorst -ThresholdName 'copyQueueLength' -Config $Context.Config) -eq 'OK') {
+                # 5 kat fark YETMEZ: ayni site kopyasi da kendi esigini
+                # asiyorsa ortada gercek bir Exchange sorunu vardir ve
+                # operatoru aga yollamak onu yanlis yere gonderir.
+                $note += 'YALNIZCA siteler arasi kopyalar geride kaliyor (ayni site kopyalari esik icinde): bulgu WAN bant genisligi veya gecikmesi tarafindadir. Exchange tarafinda aranacak bir sey yok. '
                 $log.Warn("M34: siteler arasi kuyruk $crossWorst log, ayni site $sameWorst log - WAN darbogazi suphesi.")
             }
             else {

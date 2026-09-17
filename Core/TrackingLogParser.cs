@@ -222,6 +222,7 @@ namespace ExchangeDiag
         public long FilesScanned;          // pencereyle kesisen dosya sayisi
         public long FilesProcessed;        // gercekten islenen dosya sayisi
         public bool Truncated;             // zaman siniri kesti: SONUC KISMI
+        public bool ReadFailed;            // okuma basarisiz: "veri yok" ile ayni sey DEGIL
         public long LinesScanned;
         public long DeliverEvents;
         public long LatencyComputed;

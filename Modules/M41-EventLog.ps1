@@ -54,8 +54,14 @@ Register-EDModule @{
                 param($Hours, $MaxEvents)
 
                 $startTime = (Get-Date).AddHours(-1 * $Hours)
-                $relevant = '^(MSExchange|ESE$|ExchangeStore|Microsoft-Exchange)'
-                $storage = '^(disk|Disk|Ntfs|volsnap|storahci|iScsiPrt|partmgr)$'
+                # Saglayici adlari surumden surume degisir; ankraj bu yuzden
+                # gevsek tutulur. Eski desen bu sunucuda GERCEKTEN bulunan
+                # ESENT, 'ESE BACKUP', 'Microsoft Exchange Server' ve
+                # 'Microsoft-Windows-ESE' saglayicilarini kaciriyordu.
+                $relevant = '(MSExchange|^ESE( |NT|$)|ExchangeStore|Microsoft.?Exchange)'
+                # StorPort 153 (I/O yeniden deneme) Exchange icin kanonik disk
+                # gecikme isaretidir ve eski ankrajli desende hic yoktu.
+                $storage = '(^|-)(disk|Disk|Ntfs|volsnap|storahci|iScsiPrt|partmgr|StorPort|Kernel-Disk|NvmeDisk|VIRTDISK|storvsc|vmbus)$'
 
                 $events = @()
                 foreach ($logName in @('Application', 'System')) {
@@ -70,7 +76,14 @@ Register-EDModule @{
                     }
                     catch [System.Exception] {
                         # "No events were found" bir HATA DEGILDIR - temiz gunluk demektir.
-                        if ($_.Exception.Message -notmatch 'No events were found|Belirtilen sorguyla eslesen') {
+                        # "Olay bulunamadi" bir HATA DEGILDIR. Turkce Windows'ta
+                        # mesaj "Belirtilen sorguyla eslesen olay bulunamadi."
+                        # seklindedir - 'eslesen' kelimesi 's' harfi tasir ve
+                        # duz ASCII desen TUTMAZ. Tutmayinca TEMIZ bir gunluk
+                        # "okuma hatasi" sayiliyordu. Desen hem ASCII hem
+                        # gercek Turkce yazimi kapsar.
+                        $noEvents = 'No events were found|Belirtilen sorguyla e.le.en|bulunamad'
+                        if ($_.Exception.Message -notmatch $noEvents) {
                             Write-Output ([pscustomobject]@{ Kind = 'error'; LogName = $logName; Message = $_.Exception.Message })
                         }
                     }
@@ -91,7 +104,10 @@ Register-EDModule @{
                             Kind      = 'group'
                             Provider  = $provider
                             EventId   = $event.Id
-                            Level     = [string]$event.LevelDisplayName
+                            # Metin YERELLESIR; sayi yerellesmez. Ikisi de
+                            # tasinir: sayi hukum icin, metin rapor icin.
+                            Level       = [string]$event.LevelDisplayName
+                            LevelNumber = [int]$event.Level
                             Count     = 0
                             FirstSeen = $event.TimeCreated
                             LastSeen  = $event.TimeCreated
@@ -117,6 +133,10 @@ Register-EDModule @{
         $results = $Context.Executor.RunLocal([ExchangeDiag.ExecTask[]]$tasks)
 
         $errorValues = @{}; $warnValues = @{}; $topValues = @{}
+        # Okunamayan gunlukler. Eskiden bu satirlar yalnizca run.log'a
+        # gidiyordu: erisimi reddedilen ya da TEMIZLENMIS bir olay gunlugu
+        # raporda "0 hata, OK" olarak gorunuyordu.
+        $unreadableLogs = @()
         $cellStatus = @{}
         $evidence = @()
         $problems = @()
@@ -139,14 +159,30 @@ Register-EDModule @{
 
             foreach ($readError in $readErrors) {
                 $log.Warn("M41/$server : $(Get-EDProperty $readError 'LogName') okunamadi - $(Get-EDProperty $readError 'Message')")
+                # Rapora da tasinir: okunamayan gunluk ile temiz gunluk ayni
+                # sey degildir ve "0 hata" ikincisi icin gecerlidir.
+                $unreadableLogs += ("{0}/{1}: {2}" -f $server, (Get-EDProperty $readError 'LogName'), (Get-EDProperty $readError 'Message'))
             }
 
             if ($summary.Count -gt 0 -and [bool](Get-EDProperty $summary[0] 'Truncated' $false)) {
                 $truncated += $server
             }
 
-            $errorGroups = @($groups | Where-Object { [string](Get-EDProperty $_ 'Level') -match 'Error|Critical|Hata' })
-            $warnGroups = @($groups | Where-Object { [string](Get-EDProperty $_ 'Level') -match 'Warning|Uyar' })
+            # Seviye eslestirmesi SAYISAL Level'a dayanir (1=Critical,
+            # 2=Error, 3=Warning). Eskiden yerellesmis LevelDisplayName
+            # metnine bakiliyordu ve Turkce "Kritik" hicbir kovaya
+            # girmiyordu: 900 kritik ESE olayi "0 hata / OK" oluyordu.
+            # Metin eslestirmesi yalnizca sayi yoksa yedek olarak kalir.
+            $errorGroups = @($groups | Where-Object {
+                $levelNumber = Get-EDProperty $_ 'LevelNumber'
+                if ($null -ne $levelNumber) { [int]$levelNumber -le 2 }
+                else { [string](Get-EDProperty $_ 'Level') -match 'Error|Critical|Hata|Kritik' }
+            })
+            $warnGroups = @($groups | Where-Object {
+                $levelNumber = Get-EDProperty $_ 'LevelNumber'
+                if ($null -ne $levelNumber) { [int]$levelNumber -eq 3 }
+                else { [string](Get-EDProperty $_ 'Level') -match 'Warning|Uyar' }
+            })
 
             $errorTotal = 0
             foreach ($group in $errorGroups) { $errorTotal += [int](Get-EDProperty $group 'Count' 0) }
@@ -209,7 +245,21 @@ Register-EDModule @{
         if ($truncated.Count -gt 0) {
             $note += ("TAVANA ULASILDI ({0}): sayilar eksik olabilir, pencereyi daraltin. " -f ($truncated -join ', '))
         }
+        if ($unreadableLogs.Count -gt 0) {
+            # Okunamayan gunluk ile TEMIZ gunluk ayni sey degildir: "0 hata"
+            # yalnizca ikincisi icin gecerlidir. Erisimi reddedilen ya da
+            # TEMIZLENMIS bir gunluk bu satir olmadan sessizce saglikli
+            # gorunuyordu.
+            $note += ("OKUNAMAYAN GUNLUKLER: {0}. Bu gunluklerdeki olaylar sayima GIRMEDI; 0 degeri 'hata yok' anlamina gelmez. " -f ($unreadableLogs -join ' | '))
+        }
         $note += 'Tamami: M41-event-groups.csv'
+        if ($unreadableLogs.Count -gt 0) {
+            foreach ($server in @($cellStatus.Keys)) {
+                if ($unreadableLogs -match [regex]::Escape($server + '/')) {
+                    $cellStatus[$server] = Get-EDWorstStatus @($cellStatus[$server], 'WARN')
+                }
+            }
+        }
 
         return @(
             New-EDRow -Module 'M41' -Check 'Hata olayi' -Values $errorValues -CellStatus $cellStatus `

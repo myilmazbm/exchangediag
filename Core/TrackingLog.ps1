@@ -194,6 +194,11 @@ function Get-EDCmdletDeliveryAnalysis {
     $result = $Context.Executor.RunExchange([ExchangeDiag.ExecTask[]]@($task))[0]
 
     if (-not $result.Succeeded) {
+        # OKUMA BASARISIZ. Bu, "pencerede DELIVER olayi yok" ile ayni sey
+        # DEGILDIR ve M10 eskiden ikisini ayirt edemedigi icin operatore
+        # "pencereyi -WindowHours ile GENISLETIN" diyordu - zaman asimina
+        # ugramis bir sorguda yapilabilecek en kotu tavsiye.
+        $analysis.ReadFailed = $true
         $analysis.Warnings.Add("Get-MessageTrackingLog basarisiz ($($result.State)): $($result.Error)")
         $watch.Stop(); $analysis.ElapsedMs = $watch.Elapsed.TotalMilliseconds
         return $analysis
