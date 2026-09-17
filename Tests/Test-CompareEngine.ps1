@@ -43,6 +43,9 @@ function New-PreviousRun {
         $Rows,
         [string[]]$Columns = @('MBX1'),
         [hashtable]$Meta = @{},
+        # Eski surumle uretilmis bir run-meta.json'i taklit etmek icin:
+        # adi verilen alanlar dosyaya HIC yazilmaz (bos yazilmaz - yok).
+        [string[]]$OmitMetaFields = @(),
         [switch]$NoMeta
     )
 
@@ -57,6 +60,7 @@ function New-PreviousRun {
             serverFilter = @(); servers = @('MBX1'); profile = 'production'; modules = @('M10')
         }
         foreach ($key in $Meta.Keys) { $defaults[$key] = $Meta[$key] }
+        foreach ($field in $OmitMetaFields) { $defaults.Remove($field) }
         $json = ([pscustomobject]$defaults) | ConvertTo-Json -Depth 4
         [System.IO.File]::WriteAllText((Join-Path $folder 'run-meta.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
     }
@@ -277,6 +281,134 @@ $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Conte
 $advisory = @($comparison.Scope.Advisory) -join ' '
 Assert-True 'Sunucu filtresi farki bildirildi' ($advisory -like '*Sunucu filtresi farkli*') $advisory
 Assert-True 'Filtre farki kiyasi gecersiz kilmaz' ($comparison.Scope.Comparable)
+
+# ===========================================================================
+Write-Host "`n=== 4B. Eksik meta alanlari (eski surumle uretilmis run-meta.json) ===" -ForegroundColor Cyan
+
+# Test-EDRunComparable, onceki kosumun meta alanlarini KORUMASIZ okuyordu
+# ($Previous.logAccess gibi). StrictMode altinda olmayan bir ozellik
+# PropertyNotFoundException firlatir; yani delta raporunun TAMAMI dusuyordu -
+# hem de tam olarak fonksiyonun ilk dalinin kabul ettigi senaryoda: "onceki
+# kosum eski surumle uretilmis olabilir".
+#
+# Duzeltme yalnizca "cokmesin" degil: eksik bir alani sessizce varsayilanla
+# doldurmak, pencere farkini gizleyip operatore SAHTE bir delta gostermek
+# olurdu. Bu yuzden asagidaki iddialar eksigin ADIYLA bildirildigini ve
+# DOGRU kovaya dustugunu de test eder.
+
+function Get-EDDetailSnippet {
+    <#
+        Kapsam uyarilari uzundur; test ciktisinda tam metin ekrani doldurup
+        hangi iddianin kaldigini gizler. Kisaltilmis metin yine de hangi
+        alanin adlandirildigini gosterir.
+    #>
+    param([AllowNull()][string]$Text, [int]$Max = 150)
+    if (-not $Text) { return '(bos)' }
+    if ($Text.Length -le $Max) { return $Text }
+    return ($Text.Substring(0, $Max) + '...')
+}
+
+function New-EDFullCurrentMeta {
+    <# Compare-EDRuns'in urettigi "simdiki" meta nesnesiyle ayni sekil. #>
+    param([double]$WindowHours = 1)
+    return [pscustomobject]@{
+        windowHours  = $WindowHours
+        heavy        = $true
+        logAccess    = 'smb'
+        profile      = 'production'
+        startedHour  = 3
+        servers      = @('MBX1')
+        serverFilter = @()
+        modules      = @('M10')
+    }
+}
+
+# 4B-a. YALNIZCA windowHours tasiyan meta. Duzeltme olmadan bu cagri
+# istisnayla cokuyordu; testin ilk iddiasi tam olarak budur.
+$partialScope = $null
+$partialThrew = $false
+$partialError = ''
+try { $partialScope = Test-EDRunComparable -Previous ([pscustomobject]@{ windowHours = 1 }) -Current (New-EDFullCurrentMeta) }
+catch { $partialThrew = $true; $partialError = "$_" }
+Assert-True 'Eksik alanli meta ISTISNA firlatmaz' (-not $partialThrew) $partialError
+
+if ($null -ne $partialScope) {
+    $blockingText = @($partialScope.Blocking) -join ' '
+    $advisoryText = @($partialScope.Advisory) -join ' '
+
+    # Eksiklik SESSIZCE yutulmaz: uyarinin metninde alanin ADI gecmeli,
+    # yoksa operator raporun hangi boyutunun dogrulanmadigini bilemez.
+    Assert-True 'Eksik logAccess alan ADIYLA bildirildi' ($blockingText -like "*'logAccess'*") (Get-EDDetailSnippet $blockingText)
+    Assert-True 'Eksik heavy alan ADIYLA bildirildi' ($blockingText -like "*'heavy'*") (Get-EDDetailSnippet $blockingText)
+    Assert-True 'Eksik alan icin DENETLENEMEDI yazildi' ($blockingText -like '*DENETLENEMEDI*') (Get-EDDetailSnippet $blockingText)
+    # Eksik alan "fark yok" DEGILDIR: kiyas guvenilir sayilmaz.
+    Assert-True 'Eksik alan kiyasi guvenilir BIRAKMAZ' (-not $partialScope.Comparable) 'blocking var'
+    # Var olan ve esit olan alan icin uyari cikmamali; gurultu gercek eksigi gizler.
+    Assert-True 'Var olan alan icin eksik uyarisi cikmaz' ($blockingText -notlike "*'windowHours'*") (Get-EDDetailSnippet $blockingText)
+    Assert-True 'Eksik servers advisory kovasinda bildirildi' ($advisoryText -like "*'servers'*") (Get-EDDetailSnippet $advisoryText)
+    # Olmayan sunucu listesinden fark UYDURULMAZ.
+    Assert-True 'Olmayan listeden sunucu farki uydurulmadi' ($advisoryText -notlike '*Simdi eklenen sunucu*') (Get-EDDetailSnippet $advisoryText)
+    Assert-True 'Bilinmeyen kosum saati 00:00 sayilmadi' ($advisoryText -notlike '*Calistirma saatleri farkli*') (Get-EDDetailSnippet $advisoryText)
+}
+else {
+    Assert-True 'Eksik alanli metadan kapsam sonucu uretildi' $false 'sonuc yok'
+}
+
+# 4B-b. logAccess EKSIKSE kova Blocking'dir, Advisory degil: kiyasi anlamsiz
+# kilan bir boyut denetlenemiyorsa "dikkat et ama guvenebilirsin" denemez.
+$noLogAccess = [pscustomobject]@{
+    windowHours = 1; heavy = $true; profile = 'production'; startedHour = 3
+    servers = @('MBX1'); serverFilter = @(); modules = @('M10')
+}
+$scope = Test-EDRunComparable -Previous $noLogAccess -Current (New-EDFullCurrentMeta)
+Assert-True 'Denetlenemeyen log erisimi BLOCKING' (-not $scope.Comparable) (@($scope.Blocking) -join ' ')
+Assert-True 'logAccess eksigi advisory kovasina DUSMEDI' ((@($scope.Advisory) -join ' ') -notlike '*logAccess*') (@($scope.Advisory) -join ' ')
+
+# 4B-c. profile EKSIKSE Advisory: profil FARKI da kiyasi gecersiz kilmiyordu.
+$noProfile = [pscustomobject]@{
+    windowHours = 1; heavy = $true; logAccess = 'smb'; startedHour = 3
+    servers = @('MBX1'); serverFilter = @(); modules = @('M10')
+}
+$scope = Test-EDRunComparable -Previous $noProfile -Current (New-EDFullCurrentMeta)
+Assert-True 'Denetlenemeyen profil kiyasi GECERSIZ KILMAZ' ($scope.Comparable) (@($scope.Blocking) -join ' ')
+Assert-True 'Profil eksigi yine de bildirildi' ((@($scope.Advisory) -join ' ') -like "*'profile'*") (@($scope.Advisory) -join ' ')
+
+# 4B-d. Eksik alan varsayilanla DOLDURULMAZ: pencere gercekten farkliysa
+# ve heavy alani yoksa iki ayri blocking cikmali - biri digerini yutmamali.
+$noHeavy = [pscustomobject]@{
+    windowHours = 1; logAccess = 'smb'; profile = 'production'; startedHour = 3
+    servers = @('MBX1'); serverFilter = @(); modules = @('M10')
+}
+$scope = Test-EDRunComparable -Previous $noHeavy -Current (New-EDFullCurrentMeta -WindowHours 24)
+$blockingText = @($scope.Blocking) -join ' '
+Assert-True 'Gercek pencere farki hala bildiriliyor' ($blockingText -like '*OLCUM FARKIDIR*') (Get-EDDetailSnippet $blockingText)
+Assert-True 'Eksik heavy ayrica bildiriliyor' ($blockingText -like "*'heavy'*") (Get-EDDetailSnippet $blockingText)
+
+# 4B-e. UCTAN UCA: diskteki run-meta.json alan eksigiyle okunuyor.
+$previous = New-PreviousRun -Rows $rows -OmitMetaFields @('logAccess', 'startedHour', 'profile')
+$partialComparison = $null
+$partialThrew = $false
+$partialError = ''
+try { $partialComparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext) }
+catch { $partialThrew = $true; $partialError = "$_" }
+Assert-True 'Eksik alanli run-meta.json delta motorunu COKERTMEZ' (-not $partialThrew) $partialError
+
+if ($null -ne $partialComparison) {
+    $partialPath = Join-Path $script:Root 'DELTA-eksik-meta.html'
+    Export-EDDeltaHtml -Comparison $partialComparison -Path $partialPath -Context (New-CompareContext) | Out-Null
+    $partialHtml = Get-Content $partialPath -Raw -Encoding UTF8
+    # Bilinmeyen kosum saati UYDURULMAZ: baslikta '?' kalir.
+    Assert-True 'Bilinmeyen kosum saati raporda ? olarak yazildi' ($partialHtml -match '\(\?\)') 'saat uydurulmadi'
+    Assert-True 'Kapsam denetlenemedigi raporun ustunde' ($partialHtml -like '*KIYAS GUVENILIR DEGIL*') 'blocking blogu basildi'
+}
+else {
+    Assert-True 'Eksik meta ile delta raporu uretilebildi' $false 'kiyas kurulamadi'
+}
+
+# 4B-f. runId eksikse klasor adina duselir (o da korumasiz okunuyordu).
+$previous = New-PreviousRun -Rows $rows -OmitMetaFields @('runId')
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext)
+Assert-Equal 'runId yoksa klasor adi kullanilir' (Split-Path -Leaf $previous) "$($comparison.PreviousRunId)"
 
 # ===========================================================================
 Write-Host "`n=== 5. Yeni / kaybolan kontroller ===" -ForegroundColor Cyan
