@@ -513,6 +513,81 @@ function Test-EDPreviousCsvShape {
     return [pscustomobject]@{ StatusReadable = $true; BlockingNote = $null }
 }
 
+function Get-EDPreviousColumnScan {
+<#
+    .SYNOPSIS
+        Onceki SUMMARY.csv'nin sutunlarini ust veri / sunucu / TANIMSIZ diye ayirir.
+
+    .DESCRIPTION
+        Sunucu sutunu artik TAHMIN EDILMEZ. Eskiden kural "sabit bir ust veri
+        listesinde olmayan her sutun sunucudur" idi; yani CSV'ye eklenen her
+        yeni ust veri sutunu sessizce bir sunucuya donusuyordu. Boyle bir
+        sutun onceki kosumda olup simdikinde olmayinca "bu sunucu simdiki
+        calistirmada olculmedi" diyen UYDURMA bir KAYBOLDU deltasi
+        uretiliyordu: hic var olmamis bir sunucu adina, hic yapilmamis bir
+        olcum hakkinda.
+
+        Iki yanlisin agirligi esit degildir. Bir sunucuyu ust veri sanmak
+        yalnizca bir olcumu gozden kacirir (ve bu, kapsam notuyla soylenir);
+        ust veriyi sunucu sanmak ise olmayan bir sey hakkinda hukum uretir -
+        aracin "okunamayan degeri uydurma" ilkesinin dogrudan ihlali. O yuzden
+        siniflandirma POZITIF tarafta yapilir: sutun, adi BILINEN bir
+        sunucuyla eslesiyorsa sunucudur.
+
+        Bilinen ad kaynaklarinin ikisi de tahmin degildir:
+          - simdiki kosumun topolojisi (Context'ten gelir, kesindir),
+          - onceki kosumun run-meta.json'indaki servers alani.
+
+        Hicbirine uymayan sutun TANIMSIZDIR: kiyasa sokulmaz ama SUSULMAZ.
+        run-meta'da servers alani eksikse tahmine GERI DONULMEZ; siniflamanin
+        dogrulanamadigi notta acikca yazar.
+
+    .OUTPUTS
+        ServerColumns  : kiyasa girecek sunucu sutunlari
+        UnknownColumns : tanimlanamayan sutunlar (kiyasa GIRMEZ)
+        AdvisoryNote   : tanimsiz sutun varsa kapsam notu, yoksa $null
+#>
+    [CmdletBinding()]
+    param($PreviousRows, $PreviousMeta, $CurrentServers)
+
+    $rows = @($PreviousRows)
+    if ($rows.Count -eq 0) {
+        return [pscustomobject]@{ ServerColumns = @(); UnknownColumns = @(); AdvisoryNote = $null }
+    }
+
+    # Ust veri listesi Framework'te, YAZAN tarafla ortak tanimlanir.
+    $columns = @($rows[0].PSObject.Properties.Name | Where-Object { $_ -notin $script:EDSummaryMetaColumns })
+
+    $metaServers = Get-EDMetaFieldState -Meta $PreviousMeta -Name 'servers'
+    $knownServers = @(@($CurrentServers) | Where-Object { "$_" -ne '' })
+    if ($metaServers.Present) {
+        $knownServers += @(@($metaServers.Value) | Where-Object { "$_" -ne '' })
+    }
+    $knownServers = @($knownServers | Select-Object -Unique)
+
+    $serverColumns = @($columns | Where-Object { $_ -in $knownServers })
+    $unknownColumns = @($columns | Where-Object { $_ -notin $knownServers })
+
+    $note = $null
+    if ($unknownColumns.Count -gt 0) {
+        # Eksik servers alani "sunucu degil" demek degildir; sadece
+        # dogrulayamadigimiz anlamina gelir ve bu ayrim yazilir.
+        $verification = $(if ($metaServers.Present) {
+            ''
+        } else {
+            " Onceki meta'da 'servers' alani YOK, bu yuzden siniflandirma DOGRULANAMADI."
+        })
+        $note = ("Onceki SUMMARY.csv'de TANIMSIZ sutun var: {0}. Bu sutunlar ne ust veri listesinde ne de bilinen sunucu adlari arasinda; kiyasa GIRMEDILER. Sunucu iseler o sunucularin degerleri karsilastirilmamistir; yeni bir ust veri sutunu iseler dislanmalari dogrudur. Sunucu OLDUKLARI VARSAYILMADI: olmayan bir sunucu adina 'olculmedi' kaydi uretmek uydurma olurdu.{1}" -f `
+            ($unknownColumns -join ', '), $verification)
+    }
+
+    return [pscustomobject]@{
+        ServerColumns  = $serverColumns
+        UnknownColumns = $unknownColumns
+        AdvisoryNote   = $note
+    }
+}
+
 function Compare-EDRuns {
 <#
     .SYNOPSIS
@@ -556,25 +631,35 @@ function Compare-EDRuns {
     }
     $scope = Test-EDRunComparable -Previous $previousMeta -Current $currentMeta
 
-    # CSV bicim uyarisi kapsam denetiminin sonucuna EKLENIR, ayri bir kanaldan
-    # verilmez: operator "kiyas guvenilir mi?" sorusunun cevabini tek yerde
-    # okumalidir. Durum kolonu okunamiyorsa kiyas kiyaslanabilir SAYILMAZ -
-    # hukum gecisleri raporun ilk okunan kismidir.
-    if ($csvShape.BlockingNote) {
+    # Sutunlarin siniflandirmasi: hangisi sunucu, hangisi ust veri, hangisi
+    # TANIMSIZ. Tahmin yok - gerekcesi Get-EDPreviousColumnScan'ta.
+    $columnScan = Get-EDPreviousColumnScan -PreviousRows $previousRows -PreviousMeta $previousMeta `
+        -CurrentServers $currentMeta.servers
+
+    # CSV'den gelen notlar kapsam denetiminin sonucuna EKLENIR, ayri bir
+    # kanaldan verilmez: operator "kiyas guvenilir mi?" sorusunun cevabini
+    # tek listede okumalidir.
+    #
+    # Kova ayrimi: Durum kolonu yoksa BLOCKING - hukum gecisleri raporun ilk
+    # okunan kismidir ve hepsi kaybolmustur. Tanimsiz sutun ise ADVISORY:
+    # raporlanan hicbir sey yanlis olmaz, yalnizca o sutun kiyasa girmez;
+    # satirin kendi DURUMU hala kiyaslandigi icin gercek bir gerileme yine
+    # de yuzeye cikar.
+    $extraBlocking = @()
+    $extraAdvisory = @()
+    if ($csvShape.BlockingNote) { $extraBlocking += $csvShape.BlockingNote }
+    if ($columnScan.AdvisoryNote) { $extraAdvisory += $columnScan.AdvisoryNote }
+    if ($extraBlocking.Count -gt 0 -or $extraAdvisory.Count -gt 0) {
         $scope = [pscustomobject]@{
-            Blocking   = @(@($scope.Blocking) + $csvShape.BlockingNote)
-            Advisory   = @($scope.Advisory)
-            Comparable = $false
+            Blocking   = @(@($scope.Blocking) + $extraBlocking)
+            Advisory   = @(@($scope.Advisory) + $extraAdvisory)
+            Comparable = ([bool]$scope.Comparable -and $extraBlocking.Count -eq 0)
         }
     }
 
     # --- Onceki satirlari (Modul, Kontrol) ile indeksle ---
     $previousIndex = @{}
-    $previousColumns = @()
-    if ($previousRows.Count -gt 0) {
-        $previousColumns = @($previousRows[0].PSObject.Properties.Name |
-            Where-Object { $_ -notin @('Modul', 'Kontrol', 'Birim', 'Durum', 'Not') })
-    }
+    $previousColumns = @($columnScan.ServerColumns)
     # Modul/Kontrol burada korumasiz okunabilir: Test-EDPreviousCsvShape
     # bu iki kolon yoksa YUKARIDA istisna firlatti. Anahtari olmayan bir
     # dosyadan indeks kurmak zaten anlamsizdi.

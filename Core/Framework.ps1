@@ -21,6 +21,32 @@
 
 $script:EDModules = [ordered]@{}
 
+# ---------------------------------------------------------------------------
+# SUMMARY.csv sutun sozlesmesi
+# ---------------------------------------------------------------------------
+# SUMMARY.csv'nin SUNUCU OLMAYAN (ust veri) sutunlari. Dosyayi YAZAN
+# (Core\Report.ps1) ve -CompareWith ile geri OKUYAN (Core\Compare.ps1)
+# taraflar icin TEK KAYNAK.
+#
+# NEDEN burada: liste iki dosyada ayri ayri dururken okuyan taraf yazan
+# tarafi tahmin etmek zorunda kaliyordu - "bu listede olmayan her sutun bir
+# sunucudur". Bu varsayim yanlis yonde guvenli DEGILDIR: CSV'ye eklenen her
+# yeni ust veri sutunu (orn. 'Orgu') hic var olmamis bir sunucuya donusur ve
+# o "sunucu" simdiki kosumda bulunmadigi icin delta motoru "bu sunucu
+# simdiki calistirmada olculmedi" diyen UYDURMA bir satir uretir. Nitekim
+# gercek bir sutun eklemek tam da bu kurala carpip vazgecilmisti.
+#
+# Bir sunucuyu ust veri sanmak yalnizca bir olcumu gozden kacirir; ust
+# veriyi sunucu sanmak ise OLMAYAN bir sunucu hakkinda hukum uretir -
+# aracin "okunamayan degeri uydurma" ilkesinin dogrudan ihlali. Bu yuzden
+# okuyan taraf sunucuyu artik POZITIF olarak tanir ve bu liste yalnizca
+# "kesinlikle sunucu degil" demeye yarar.
+#
+# Yeni bir ust veri sutunu eklenecekse once BURAYA yazilir; Tests\
+# Test-CompareEngine.ps1 yazicinin urettigi basliklarin hepsinin ya bu
+# listede ya da sunucu adi oldugunu dogrular.
+$script:EDSummaryMetaColumns = @('Modul', 'Kontrol', 'Birim', 'Orgu', 'Durum', 'Not')
+
 function Reset-EDModuleRegistry {
     $script:EDModules = [ordered]@{}
 }

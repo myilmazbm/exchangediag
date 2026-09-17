@@ -50,6 +50,10 @@ function New-PreviousRun {
         # Import-Csv boyle bir kolonu satir nesnesine hic eklemez (olculdu),
         # yani erisim StrictMode altinda istisna firlatir.
         [string[]]$DropCsvColumns = @(),
+        # SUMMARY.csv'ye fazladan sutun ekler (ad -> her satirdaki deger).
+        # Yeni bir ust veri sutununu ya da tanimadigimiz bir cikti bicimini
+        # taklit etmek icin.
+        [hashtable]$ExtraCsvColumns = @{},
         [switch]$NoMeta
     )
 
@@ -67,11 +71,27 @@ function New-PreviousRun {
         }
     }
 
+    if ($ExtraCsvColumns.Count -gt 0) {
+        $written = @(Import-Csv -LiteralPath $csvPath -Encoding UTF8)
+        foreach ($item in $written) {
+            foreach ($name in $ExtraCsvColumns.Keys) {
+                $item | Add-Member -NotePropertyName $name -NotePropertyValue $ExtraCsvColumns[$name] -Force
+            }
+        }
+        if ($written.Count -gt 0) {
+            $written | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        }
+    }
+
     if (-not $NoMeta) {
+        # servers VARSAYILANI sutunlarla ayni: gercek kosumda da ikisi ayni
+        # topolojiden uretilir (Save-EDRunMeta topolojiyi, Export-EDSummaryCsv
+        # ayni sunucu listesini yazar). Fixture'in bunlari ayirmasi, gercekte
+        # olmayan bir durumu test etmek olurdu.
         $defaults = [ordered]@{
             runId = 'onceki'; startedLocal = '2026-09-17 03:00:00'; startedHour = 3
             utcOffsetHours = 3; windowHours = 1; heavy = $true; logAccess = 'smb'
-            serverFilter = @(); servers = @('MBX1'); profile = 'production'; modules = @('M10')
+            serverFilter = @(); servers = @($Columns); profile = 'production'; modules = @('M10')
         }
         foreach ($key in $Meta.Keys) { $defaults[$key] = $Meta[$key] }
         foreach ($field in $OmitMetaFields) { $defaults.Remove($field) }
@@ -533,6 +553,77 @@ Assert-True 'Bos onceki CSV bicim hatasi sayilmadi' (-not $emptyThrew) $emptyErr
 if ($null -ne $emptyComparison) {
     Assert-Equal 'Bos onceki kosumda kontrol YENI gorunur' 'YENI' (Get-EDFirstField @($emptyComparison.Deltas) 'Yon')
 }
+
+# ===========================================================================
+Write-Host "`n=== 4D. Sunucu sutunu TAHMIN EDILMEZ ===" -ForegroundColor Cyan
+
+# Kiyas motoru sunucu sutununu "sabit listede olmamak" ile tanimliyordu:
+# CSV'ye eklenen her yeni ust veri sutunu sessizce bir SUNUCU sayiliyordu ve
+# onceki kosumda olup simdikinde olmadiginda "bu sunucu simdiki calistirmada
+# olculmedi" diyen UYDURMA bir KAYBOLDU deltasi uretiliyordu. Bu teorik
+# degildi: rapor katmani gercek bir 'Orgu' sutunu acmaktan bu yuzden
+# vazgecmisti.
+
+$columnRow = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+$columnCurrent = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+
+# 4D-a. Paylasilan ust veri listesindeki bir sutun ('Orgu') SUNUCU SAYILMAZ.
+$previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Orgu = 'P1' }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
+$fabricated = @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Orgu' })
+Assert-Equal "Ust veri sutunundan uydurma sunucu deltasi uretilmedi" 0 $fabricated.Count
+Assert-Equal 'Ust veri sutunu hic delta uretmedi' 0 @($comparison.Deltas).Count
+Assert-True 'Taninan ust veri sutunu icin uyari da cikmaz' `
+    ((@($comparison.Scope.Advisory) -join ' ') -notlike '*TANIMSIZ*') (Get-EDDetailSnippet (@($comparison.Scope.Advisory) -join ' '))
+
+# 4D-b. TANIMADIGI bir sutun: ne ust veridir ne de bilinen bir sunucu adi.
+# Sunucu SAYILMAZ (uydurma delta yok) ama SUSULMAZ da.
+$previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Tuhaf = 'deger' }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
+Assert-Equal 'Tanimsiz sutundan uydurma sunucu deltasi uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
+$columnAdvisory = @($comparison.Scope.Advisory) -join ' '
+Assert-True 'Tanimsiz sutun ADIYLA bildirildi' ($columnAdvisory -like '*Tuhaf*') (Get-EDDetailSnippet $columnAdvisory)
+Assert-True 'Sunucu oldugu VARSAYILMADI denildi' ($columnAdvisory -like '*VARSAYILMADI*') (Get-EDDetailSnippet $columnAdvisory)
+# Tanimsiz sutun raporlanan hicbir seyi yanlislamaz; kiyas gecerli kalir.
+Assert-True 'Tanimsiz sutun kiyasi gecersiz KILMAZ' ($comparison.Scope.Comparable) 'blocking yok'
+
+# 4D-c. run-meta'da servers alani yoksa TAHMINE geri donulmez; siniflamanin
+# dogrulanamadigi acikca yazilir.
+$previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Tuhaf = 'deger' } -OmitMetaFields @('servers')
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
+# Iddia SUTUN notunun kendisine yapilir: meta'nin ayri "servers alani yok"
+# uyarisiyla karisirsa test, olcmedigi bir seyi gecmis sayar.
+$columnNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
+Assert-True 'Servers yoksa siniflamanin dogrulanamadigi yazildi' ($columnNote -like '*DOGRULANAMADI*') (Get-EDDetailSnippet $columnNote)
+Assert-Equal 'Servers yoksa da uydurma sunucu deltasi yok' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
+
+# 4D-d. GERCEK bir sunucunun kaybolmasi hala raporlanir - tahmin kaldirilirken
+# olculmus bir degerin kaybi da susturulmus olmamali.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10; MBX2 = 999 } -Status 'FAIL')
+) -Columns @('MBX1', 'MBX2')
+$comparison = Compare-EDRuns -PreviousFolder $previous `
+    -CurrentRows @((New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10 } -Status 'OK')) `
+    -Context (New-CompareContext)
+Assert-Equal 'Kaybolan GERCEK sunucu hala raporlaniyor' 1 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'MBX2' }).Count
+
+# 4D-e. YAZAN ile OKUYAN ayni kaynaga bakiyor mu? Export-EDSummaryCsv'nin
+# urettigi her baslik ya bir sunucu adi ya da paylasilan ust veri
+# listesindedir. Bu iddia, rapor katmani yeni bir sutun ekleyip listeyi
+# guncellemedigi gun KALIR - kusur sessizce delta motoruna sizmadan once.
+$contractPath = Join-Path $script:Root 'SUMMARY-sozlesme.csv'
+Export-EDSummaryCsv -Rows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')) `
+    -Columns @('MBX1') -Path $contractPath | Out-Null
+$contractHeaders = @(@(Import-Csv -LiteralPath $contractPath -Encoding UTF8)[0].PSObject.Properties.Name)
+$unlisted = @($contractHeaders | Where-Object { $_ -ne 'MBX1' -and $_ -notin $script:EDSummaryMetaColumns })
+Assert-Equal 'CSV yazicisinin ust veri sutunlari paylasilan listede' 0 $unlisted.Count
+Assert-True "Paylasilan liste 'Orgu' sutununun onunu aciyor" ('Orgu' -in $script:EDSummaryMetaColumns) 'rapor katmani sutunu acabilir'
+
+# 4D-f. Okuyan taraf listeyi KENDI kopyasindan okumasin: tek kaynak kurali
+# yorumla degil, kodla korunur.
+$compareText = Get-Content -LiteralPath (Join-Path $projectRoot 'Core\Compare.ps1') -Raw -Encoding UTF8
+Assert-True 'Compare.ps1 paylasilan listeyi kullaniyor' ($compareText -like '*$script:EDSummaryMetaColumns*') 'referans var'
+Assert-True 'Compare.ps1 kendi sutun kopyasini tasimiyor' ($compareText -notlike "*'Modul', 'Kontrol', 'Birim'*") 'yerel kopya yok'
 
 # ===========================================================================
 Write-Host "`n=== 5. Yeni / kaybolan kontroller ===" -ForegroundColor Cyan
