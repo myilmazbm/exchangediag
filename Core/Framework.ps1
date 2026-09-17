@@ -103,9 +103,24 @@ function Get-EDModules {
     [CmdletBinding()]
     param([string[]]$Id, [string[]]$Phase)
 
+    # "PARAMETRE VERILMEDI" ILE "VERILDI AMA BOS" AYNI SEY DEGILDIR.
+    #
+    # Eski kod `if ($Id)` ile karar veriyordu. PowerShell'de tek elemanli
+    # bir dizi elemaninin dogruluk degerine duser: @('') -> '' -> $false.
+    # Yani `-Id @('')` suzgeci HIC uygulamiyor ve TUM modulleri donduruyordu
+    # - "hicbiri" istenirken "hepsi" donmesi, bir suzgecin verebilecegi en
+    # tehlikeli cevaptir. Cagiran bunu "demek ki hepsi gecerli" diye okur.
+    # PSBoundParameters, parametrenin GECILIP gecilmedigini degerden bagimsiz
+    # soyler; bos/bosluk elemanlar da elenir ki ' ' bir kimlik sayilmasin.
     $all = @($script:EDModules.Values)
-    if ($Id)    { $all = @($all | Where-Object { $_.Id -in $Id }) }
-    if ($Phase) { $all = @($all | Where-Object { $_.Phase -in $Phase }) }
+    if ($PSBoundParameters.ContainsKey('Id')) {
+        $wantedId = @(@($Id) | Where-Object { "$_".Trim() })
+        $all = @($all | Where-Object { $_.Id -in $wantedId })
+    }
+    if ($PSBoundParameters.ContainsKey('Phase')) {
+        $wantedPhase = @(@($Phase) | Where-Object { "$_".Trim() })
+        $all = @($all | Where-Object { $_.Phase -in $wantedPhase })
+    }
     # NOT: burada ",$all" YAZILMAZ. Cagiran taraf sonucu @() ile sarmalar;
     # virgul operatoruyle birleserek diziyi cift sarmalar ve sessizce bozar.
     return $all

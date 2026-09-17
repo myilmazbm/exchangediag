@@ -112,6 +112,22 @@ $registered = @(Get-EDModules)
 Assert-True 'Tum modul dosyalari kayit oldu' ($registered.Count -eq $moduleFiles.Count) `
     ("{0} kayit / {1} dosya" -f $registered.Count, $moduleFiles.Count)
 
+# BIR SUZGECIN VEREBILECEGI EN TEHLIKELI CEVAP "HEPSI"DIR.
+#
+# Get-EDModules eskiden `if ($Id)` ile karar veriyordu. PowerShell'de tek
+# elemanli dizi elemaninin dogruluk degerine duser: @('') -> '' -> $false,
+# yani suzgec HIC uygulanmiyor ve TUM moduller donuyordu. "Hicbiri" isteyen
+# cagiran "hepsi" aliyordu ve bunu "demek ki hepsi gecerli" diye okuyordu.
+# Olculdu: duzeltmeden once -Id @('') 30 modul donduruyordu.
+Assert-Equal 'Bos kimlikle suzmek HICBIR modul dondurur' 0 @(Get-EDModules -Id @('')).Count
+Assert-Equal 'Bosluktan ibaret kimlik de kimlik sayilmaz' 0 @(Get-EDModules -Id @('  ')).Count
+Assert-Equal 'Bos dizi ile suzmek de hicbiri demektir' 0 @(Get-EDModules -Id @()).Count
+Assert-Equal 'Gecerli kimlik hala suzuyor' 1 @(Get-EDModules -Id 'M30').Count
+# Parametre HIC verilmediginde davranis degismemeli: hepsi.
+Assert-Equal 'Suzgecsiz cagri tum modulleri dondurur' $registered.Count @(Get-EDModules).Count
+Assert-True 'Faz suzgeci calisiyor' (@(Get-EDModules -Phase 'A').Count -gt 0) 'Faz A'
+Assert-Equal 'Bos faz da hicbiri demektir' 0 @(Get-EDModules -Phase @('')).Count
+
 $duplicateIds = @($registered | Group-Object -Property Id | Where-Object { $_.Count -gt 1 })
 Assert-True 'Modul kimlikleri benzersiz' ($duplicateIds.Count -eq 0) `
     (($duplicateIds | ForEach-Object { $_.Name }) -join ', ')
