@@ -14,6 +14,12 @@
     Asil bulgu SUNUCULAR ARASI FARKTIR: ayni rolu tasiyan iki sunucunun
     farkli limitlerle calismasi, birinin neden yavas gorundugunun siradan
     aciklamasidir.
+
+    ⚠️ KARSILASTIRMA YALNIZCA INCELENEN SUNUCULAR ARASINDA YAPILIR. Kullanilan
+    iki cmdlet org genelinde calisir ve taramaya hic girmemis sunuculari da
+    dondurur; onlar tabloya alinirsa raporda sutun olur, cogunlugu belirler ve
+    incelenen sunucuyu "sapan" ilan eder. Kapsam disi satirlar kirpilir ve
+    gunluge yazilir.
 #>
 
 Register-EDModule @{
@@ -59,26 +65,52 @@ Register-EDModule @{
             if (-not $result.Succeeded) { $log.Warn("M16/$($result.Key) : $($result.State) - $($result.Error)") }
         }
 
+        # --- KAPSAM: org genelinde calisan cmdlet KAPSAM DISI sunuculari da dondurur ---
+        # Get-TransportService / Get-MailboxTransportService organizasyonun TUM
+        # sunucularini dondurur, ama incelenen kume -Server ve
+        # environment.excludeServers ile daraltilmistir. Eskiden donen her satir
+        # tabloya giriyordu ve sonuc dogrudan yanlis hukumdu: operator SRV1'i
+        # incelerken, taramaya hic girmemis KAPSAMDISI sunucusu rapora sutun
+        # olarak dusuyor, Test-EDValueDrift'te COGUNLUK olup, incelenen TEK
+        # sunucuyu "sapan" ilan ediyordu. Yanlis sunucuyu suclamak bu aracin en
+        # acik yasagidir; bu yuzden tablolar topolojiye KIRPILIR.
+        $inScope = @{}
+        foreach ($server in $servers) { $inScope[$server.Name] = $true }
+        # Kirpilan sunucular sessizce kaybolmaz; gunluge yazilir ki kullanici
+        # "neden o sunucu raporda yok" sorusunun cevabini bulabilsin.
+        $dropped = @{}
+
         function Get-EDSettingTable {
-            param($Result, [string]$Property)
+            # $Dropped bir HASHTABLE'dir ve REFERANSLA gecer; fonksiyon icinde
+            # doldurulmasi cagiranin tablosunu gunceller ($script: gerekmez -
+            # $script: ayni oturumda arka arkaya kosan calistirmalar arasinda
+            # sizardi).
+            param($Result, [string]$Property, [hashtable]$InScope, [hashtable]$Dropped)
             $table = @{}
             if (-not $Result -or -not $Result.Succeeded) { return $table }
             foreach ($row in $Result.Output) {
                 $name = Get-EDServerName (Get-EDProperty $row 'Name')
                 if (-not $name) { continue }
+                # Hashtable anahtar karsilastirmasi buyuk/kucuk harf duyarsizdir;
+                # Get-EDServerName ayrica FQDN/DN farkini da esitler.
+                if (-not $InScope.ContainsKey($name)) { $Dropped[$name] = $true; continue }
                 $value = Get-EDProperty $row $Property
                 if ($null -ne $value) { $table[$name] = [string]$value }
             }
             return $table
         }
 
-        $deliveries   = Get-EDSettingTable $byKey['mailboxTransport'] 'MaxConcurrentMailboxDeliveries'
-        $submissions  = Get-EDSettingTable $byKey['mailboxTransport'] 'MaxConcurrentMailboxSubmissions'
-        $outbound     = Get-EDSettingTable $byKey['transport'] 'MaxOutboundConnections'
-        $perDomain    = Get-EDSettingTable $byKey['transport'] 'MaxPerDomainOutboundConnections'
-        $expiration   = Get-EDSettingTable $byKey['transport'] 'MessageExpirationTimeout'
-        $retryCount   = Get-EDSettingTable $byKey['transport'] 'TransientFailureRetryCount'
-        $retryInterval = Get-EDSettingTable $byKey['transport'] 'TransientFailureRetryInterval'
+        $deliveries   = Get-EDSettingTable $byKey['mailboxTransport'] 'MaxConcurrentMailboxDeliveries' $inScope $dropped
+        $submissions  = Get-EDSettingTable $byKey['mailboxTransport'] 'MaxConcurrentMailboxSubmissions' $inScope $dropped
+        $outbound     = Get-EDSettingTable $byKey['transport'] 'MaxOutboundConnections' $inScope $dropped
+        $perDomain    = Get-EDSettingTable $byKey['transport'] 'MaxPerDomainOutboundConnections' $inScope $dropped
+        $expiration   = Get-EDSettingTable $byKey['transport'] 'MessageExpirationTimeout' $inScope $dropped
+        $retryCount   = Get-EDSettingTable $byKey['transport'] 'TransientFailureRetryCount' $inScope $dropped
+        $retryInterval = Get-EDSettingTable $byKey['transport'] 'TransientFailureRetryInterval' $inScope $dropped
+
+        if ($dropped.Count -gt 0) {
+            $log.Info("M16: kapsam disi $($dropped.Count) sunucu rapora alinmadi - $((@($dropped.Keys) | Sort-Object) -join ', ')")
+        }
 
         # Okunamayan sunucular icin hucreler bos kalmasin.
         foreach ($server in $servers) {
