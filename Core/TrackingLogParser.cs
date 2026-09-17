@@ -709,6 +709,9 @@ namespace ExchangeDiag
                     long rawLines = 0;
                     while ((line = reader.ReadLine()) != null)
                     {
+                        // Granularite 64K ham satir: yavas bir SMB payinda bu
+                        // birkac saniyelik asim demektir - 840 sn butce icinde kabul
+                        // edilebilir, ama kesin bir kesme noktasi DEGILDIR.
                         // Kontrol HER satir icin gecerli olmali. Asagi tarafa
                         // konursa semasi uymayan (haveFields == false) bir dosya
                         // butceye hic bakilmadan sonuna kadar okunur.

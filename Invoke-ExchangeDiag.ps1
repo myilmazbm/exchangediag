@@ -248,7 +248,10 @@ try {
     $allRows += $topologyRows
 
     if ($verifyParserBlocked) {
-        $allRows += New-EDRow -Module 'M10' -Check 'Parser dogrulama (-VerifyParser)' -Status 'N/A' `
+        # WARN, N/A degil: N/A satirlari bulgu tablosuna girmez ve tam da
+        # "dogrulandi sanma" izlenimini onlemek icin eklenen satir, raporun
+        # en gorunmez satiri olurdu.
+        $allRows += New-EDRow -Module 'M10' -Check 'Parser dogrulama (-VerifyParser)' -Status 'WARN' `
             -Note "-VerifyParser verildi ama calistirilamadi: $verifyParserBlocked. Gecikme turetimi DOGRULANMIS SAYILMAZ; -Heavy ile tekrar calistirin."
     }
 
@@ -291,8 +294,13 @@ try {
     # yavasliklarindan degil, kapasite daralmasindan olabilir.
     if ($context.Executor.AbandonedPipelines -gt 0) {
         $abandonNote = "$($context.Executor.AbandonedPipelines) is zaman asimina ugradi ve TERK EDILDI (arka planda suruyor olabilir). "
-        $abandonNote += 'PowerShell.Stop() yerel kodda calisan bir isi durduramaz. Bu calistirmadaki diger TIMEOUT hucreleri '
-        $abandonNote += 'kapasite daralmasindan kaynaklanmis olabilir; -Parallelism degerini artirin veya pencereyi daraltin.'
+        $abandonNote += 'PowerShell.Stop() yerel kodda calisan bir isi durduramaz. Sayiya kuyrukta beklerken zaman asan isler de '
+        $abandonNote += 'dahildir; ikisi ayirt edilemiyor. Bu calistirmadaki diger TIMEOUT hucreleri kapasite daralmasindan '
+        $abandonNote += 'kaynaklanmis olabilir - pencereyi daraltin, sonraki calistirmada -Parallelism degerini artirin.'
+        if ($context.Executor.CompensationRefused -gt 0) {
+            $abandonNote += " KAPASITE TELAFI EDILEMEDI ($($context.Executor.CompensationRefused) kez): havuz tavani doldu veya "
+            $abandonNote += 'uzak uc nokta reddetti. Bu calistirmadaki TIMEOUT hucrelerine guvenmeyin.'
+        }
         $log.Warn($abandonNote)
         $allRows += New-EDRow -Module 'CORE' -Check 'Terk edilen is' -Status 'WARN' -Note $abandonNote
     }

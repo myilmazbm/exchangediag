@@ -82,6 +82,8 @@ Register-EDModule @{
         $evidence = @()
         $storeDominant = @()
         $partialServers = @()
+        $coverageValues = @{}
+        $coverageStatus = @{}
         $anyData = $false
 
         foreach ($result in $Context.Executor.RunLocal([ExchangeDiag.ExecTask[]]@($tasks))) {
@@ -103,7 +105,13 @@ Register-EDModule @{
 
             if ($breakdown.Truncated) {
                 $partialServers += $server
+                $coverageValues[$server] = "KISMI $($breakdown.FilesProcessed)/$($breakdown.FilesScanned) dosya"
+                $coverageStatus[$server] = 'WARN'
                 $log.Warn("M11/$server : zaman siniri kesti; faz kirilimi EKSIK pencereden hesaplandi.")
+            }
+            else {
+                $coverageValues[$server] = "tam $($breakdown.FilesScanned) dosya"
+                $coverageStatus[$server] = 'OK'
             }
 
             $messageCounts[$server] = $breakdown.MessagesComplete
@@ -157,10 +165,26 @@ Register-EDModule @{
             Save-EDEvidence -Context $Context -Name 'M11-phase-breakdown' -Data $evidence | Out-Null
         }
 
+        # Kapsam satiri veri cikmasa DA uretilmeli: "zincir bulunamadi"nin
+        # sebebi zaman siniri olabilir ve tavsiye o zaman TERSINE doner.
+        $coverageRow = @()
+        if ($partialServers.Count -gt 0) {
+            $coverageRow += New-EDRow -Module 'M11' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
+                -Status 'WARN' -Note 'Zaman siniri okumayi kesti; isaretli sunucularda faz kirilimi eksik pencereden hesaplandi.'
+        }
+
         if (-not $anyData) {
+            if ($partialServers.Count -gt 0) {
+                $noDataNote = "Zaman siniri okumayi kesti ($($partialServers -join ', ')); mesaj zinciri birlestirilemedi. "
+                $noDataNote += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
+                $noDataStatus = 'WARN'
+            }
+            else {
+                $noDataNote = 'Pencerede birlestirilebilir mesaj zinciri bulunamadi. RECEIVE ve DELIVER olaylari ayni pencerede olmali; -WindowHours ile genisletin.'
+                $noDataStatus = 'N/A'
+            }
             return @(New-EDRow -Module 'M11' -Check 'Faz kirilimi' -Values $dominantValues -CellStatus $cellStatus `
-                -Status 'N/A' -Patterns @('P2') `
-                -Note 'Pencerede birlestirilebilir mesaj zinciri bulunamadi. RECEIVE ve DELIVER olaylari ayni pencerede olmali; -WindowHours ile genisletin.')
+                -Status $noDataStatus -Patterns @('P2') -Note $noDataNote) + $coverageRow
         }
 
         $note = ''
@@ -184,14 +208,17 @@ Register-EDModule @{
         $rows = @()
         $rows += New-EDRow -Module 'M11' -Check 'Baskin faz' -Values $dominantValues -CellStatus $cellStatus `
             -Status $phaseStatus -Patterns @('P2') -Note $note
+        # Faz p95 satirlari da ayni eksik pencereden geliyor.
+        $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
         $rows += New-EDRow -Module 'M11' -Check 'Store fazi p95 (DeliveryToMailbox)' -Values $storeValues -Unit 'sn' -Status 'OK' `
-            -Note 'DELIVER ile Mailbox Transport Delivery RECEIVE arasi. Yuksekse sorun Store icinde.'
+            -Note ($partialTag + 'DELIVER ile Mailbox Transport Delivery RECEIVE arasi. Yuksekse sorun Store icinde.')
         $rows += New-EDRow -Module 'M11' -Check 'Transport fazi p95' -Values $transportValues -Unit 'sn' -Status 'OK' `
-            -Note 'Transport RECEIVE ile Mailbox RECEIVE arasi: kategorize + kuyruk.'
+            -Note ($partialTag + 'Transport RECEIVE ile Mailbox RECEIVE arasi: kategorize + kuyruk.')
         $rows += New-EDRow -Module 'M11' -Check 'Ingress fazi p95' -Values $ingressValues -Unit 'sn' -Status 'OK' `
-            -Note 'Gonderim ile Transport RECEIVE arasi: ag ve yukari akis; cogu zaman bizim disimizda.'
-        $rows += New-EDRow -Module 'M11' -Check 'Uctan uca p95' -Values $totalValues -Unit 'sn' -Status 'OK'
-        $rows += New-EDRow -Module 'M11' -Check 'Birlestirilen mesaj' -Values $messageCounts -Unit 'adet' -Status 'OK'
+            -Note ($partialTag + 'Gonderim ile Transport RECEIVE arasi: ag ve yukari akis; cogu zaman bizim disimizda.')
+        $rows += New-EDRow -Module 'M11' -Check 'Uctan uca p95' -Values $totalValues -Unit 'sn' -Status 'OK' -Note $partialTag
+        $rows += New-EDRow -Module 'M11' -Check 'Birlestirilen mesaj' -Values $messageCounts -Unit 'adet' -Status 'OK' -Note $partialTag
+        $rows += $coverageRow
 
         return $rows
     }

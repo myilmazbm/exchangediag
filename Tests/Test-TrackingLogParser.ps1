@@ -236,7 +236,11 @@ Assert-True 'Dolmus butce: KISMI uyarisi uretildi' (@($expired.Warnings | Where-
 # (b) Butce dosya ORTASINDA doluyor. Regresyon testi: dosya sayisi karsilastirmasi
 # (islenen < bulunan) bu durumu YAKALAMAZ, cunku dosya islenmis sayilir.
 # Tek dosyali fixture ile bu tam olarak o senaryodur.
-$midDeadline = [datetime]::UtcNow.AddMilliseconds(30)
+#
+# Butce SABIT verilemez: yavas makinede dongu hic baslamadan dolar ve test
+# o zaman "hicbir dosya islenmedi" yolundan gecer - yani kapsamasi gereken
+# senaryoyu atlar. Olculen sureden turetilir.
+$midDeadline = [datetime]::UtcNow.AddMilliseconds([math]::Max(20, $analysis.ElapsedMs / 4))
 $midCut = [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency(
     'EXC01', $FixtureDir, 'MSGTRKMD',
     $fixture.StartUtc.AddMinutes(-5), $endUtc.AddMinutes(5),
@@ -248,6 +252,11 @@ Assert-True 'Dosya ortasinda kesilme: KISMI uyarisi uretildi' (@($midCut.Warning
     (($midCut.Warnings -join ' | '))
 Assert-True 'Dosya ortasinda kesilme: tam taramadan az satir okundu' ($midCut.LinesScanned -lt $analysis.LinesScanned) `
     ("{0} < {1}" -f $midCut.LinesScanned, $analysis.LinesScanned)
+# Asil mesele: dosya ISLENMIS sayildi, yani sayim bu kesilmeyi goremezdi.
+# Bu iddia duserse test, yakalamasi gereken yoldan degil dosya sayimi
+# yolundan geciyor demektir.
+Assert-Equal 'Dosya ortasinda kesilme: dosya islenmis sayildi (sayim yakalayamaz)' $midCut.FilesScanned $midCut.FilesProcessed
+Assert-True 'Dosya ortasinda kesilme: kismi da olsa satir okundu' ($midCut.LinesScanned -gt 0)
 
 # (c) Butce verilmeyen eski imza sinirsizdir; kesilme olmamali.
 Assert-Equal 'Butcesiz imza: Truncated kapali' $false $analysis.Truncated

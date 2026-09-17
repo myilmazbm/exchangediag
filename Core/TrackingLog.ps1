@@ -397,7 +397,7 @@ function Get-EDDeliveryAnalysis {
                     elseif ($analysis.DeliverEvents -eq 0) {
                         $log.Info("$($result.Key): pencerede DELIVER olayi yok; ham log bos sonuc verdi.")
                     }
-                    elseif ($analysis.NegativeLatency -gt $analysis.LatencyMissing) {
+                    elseif ($analysis.NegativeLatency -ge $analysis.LatencyMissing) {
                         # Baskin neden saat kaymasi. Bu bir AYRISTIRICI hatasi
                         # degildir, zaman senkronizasyonu bulgusudur ve oyle
                         # raporlanmalidir. Sayaclar tam bu ayrim icin ayrildi.
@@ -508,6 +508,18 @@ function Test-EDParserAgreement {
             $findings += [pscustomobject]@{
                 Server = $server; Status = 'N/A'
                 Detail = 'Ham log yolundan veri cikmadi; karsilastirma anlamsiz.'
+            }
+            continue
+        }
+
+        # Kismi pencere cmdlet'in TAM penceresiyle karsilastirilamaz: cmdlet
+        # $window.StartUtc/EndUtc araligini bastan sona okur, ham yol ise
+        # butce bitince kesilmistir. Fark ayristiricinin degil zaman
+        # sinirinin eseridir; FAIL demek dogrulayiciyi yalanci cikarir.
+        if ($smb.Truncated) {
+            $findings += [pscustomobject]@{
+                Server = $server; Status = 'N/A'
+                Detail = "Ham yol zaman sinirina takildi ($($smb.FilesProcessed)/$($smb.FilesScanned) dosya); kismi pencere tam pencereyle karsilastirilamaz. Pencereyi daraltip (-WindowHours) tekrar deneyin."
             }
             continue
         }

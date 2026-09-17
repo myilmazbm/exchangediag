@@ -149,6 +149,7 @@ namespace ExchangeDiag
         private bool _disposed;
         private bool _exchangeIsConstrained;
         private int _abandonedPipelines;
+        private int _compensationRefused;
 
         /// <summary>Exchange baglantisinin nasil kuruldugu - rapor basligina yazilir.</summary>
         public string ExchangeConnection = "none";
@@ -167,6 +168,16 @@ namespace ExchangeDiag
         public int AbandonedPipelines
         {
             get { return _abandonedPipelines; }
+        }
+
+        /// <summary>
+        /// Havuz tavani yukseltilemedigi durum sayisi (uzak uc nokta
+        /// throttling'i reddedebilir). Sifirdan buyukse kapasite telafi
+        /// EDILEMEMISTIR ve sonraki TIMEOUT'lar bundan kaynaklanabilir.
+        /// </summary>
+        public int CompensationRefused
+        {
+            get { return _compensationRefused; }
         }
 
         public int Parallelism
@@ -405,14 +416,26 @@ namespace ExchangeDiag
         /// </summary>
         private void CompensateAbandonedRunspace(RunspacePool pool)
         {
+            // NOT: bu sayac "zaman asimina ugrayan is" sayar. Havuzda sira
+            // bekledigi icin hic baslamamis bir is de buraya dusebilir -
+            // PowerShell kuyruktaki boru hattini da Running gosterdigi icin
+            // ikisi ayirt edilemiyor. Rapor bunu oldugu gibi soylemelidir.
             Interlocked.Increment(ref _abandonedPipelines);
             if (pool == null) return;
             try
             {
                 int max = pool.GetMaxRunspaces();
-                if (max < _parallelism * 2) pool.SetMaxRunspaces(max + 1);
+                if (max >= _parallelism * 2)
+                {
+                    // Tavan doldu: artik telafi edilemiyor.
+                    Interlocked.Increment(ref _compensationRefused);
+                    return;
+                }
+                // Donus degeri onemli: uzak havuzda throttling reddedebilir ve
+                // o zaman telafi ettigimizi SANMAK en kotu durumdur.
+                if (!pool.SetMaxRunspaces(max + 1)) Interlocked.Increment(ref _compensationRefused);
             }
-            catch (Exception) { }
+            catch (Exception) { Interlocked.Increment(ref _compensationRefused); }
         }
 
         /// <summary>

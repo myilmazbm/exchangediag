@@ -45,6 +45,9 @@ Register-EDModule @{
         $partialServers = @()
         $coverageValues = @{}
         $coverageStatus = @{}
+        # DELIVER okundu ama hicbirinden gecikme turetilemedi: "olay yok" ile
+        # ayni sey DEGIL ve rapor ikisini karistirmamali.
+        $eventsNoLatency = @()
         $anyData = $false
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
@@ -60,8 +63,13 @@ Register-EDModule @{
                 $coverageStatus[$server] = 'WARN'
                 $log.Warn("M10/$server : zaman siniri kesti; persentiller EKSIK pencereden hesaplandi.")
             }
-            else {
+            elseif ($analysis.Via -eq 'smb') {
                 $coverageValues[$server] = "tam $($analysis.FilesScanned) dosya"
+                $coverageStatus[$server] = 'OK'
+            }
+            else {
+                # Cmdlet yolunda dosya kavrami yok; "tam 0 dosya" yaniltir.
+                $coverageValues[$server] = 'cmdlet yolu'
                 $coverageStatus[$server] = 'OK'
             }
 
@@ -69,7 +77,8 @@ Register-EDModule @{
                 $p50[$server] = 'N/A'; $p95[$server] = 'N/A'; $p99[$server] = 'N/A'
                 $maxValues[$server] = 'N/A'; $counts[$server] = 0; $meanValues[$server] = 'N/A'
                 $cellStatus[$server] = 'N/A'
-                $noDataServers += $server
+                if ($analysis.DeliverEvents -gt 0) { $eventsNoLatency += $server }
+                else { $noDataServers += $server }
                 continue
             }
 
@@ -89,6 +98,11 @@ Register-EDModule @{
             if ($isPassive -and $status -in @('WARN', 'FAIL')) {
                 $log.Info("M10/$server : pasif sitede, $status bulgusu PASSIVE olarak etiketlendi.")
                 $status = 'PASSIVE'
+            }
+            if ($analysis.Truncated) {
+                # Satiri WARN yapmak yetmez: hucre esik hukmunu (yesil OK)
+                # gostermeye devam ederse operator o sayiya guvenir.
+                $status = Get-EDWorstStatus @($status, 'WARN')
             }
             $cellStatus[$server] = $status
 
@@ -135,12 +149,50 @@ Register-EDModule @{
             Save-EDEvidence -Context $Context -Name 'M10-slowest-deliveries' -Data @($slowEvidence | Sort-Object -Property Saniye -Descending) | Out-Null
         }
 
+        # Kapsam ve parser dogrulama satirlari VERI CIKMASA DA uretilmelidir:
+        # "veri yok"un sebebi tam da bu satirlarda yaziyor. Erken return
+        # bunlari dusurursek operator hicbir bulgu gormeden "temiz" rapor alir.
+        $contextRows = @()
+        if ($partialServers.Count -gt 0) {
+            $contextRows += New-EDRow -Module 'M10' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
+                -Status 'WARN' -Note 'Zaman siniri okumayi kesti; isaretli sunucularda persentiller eksik pencereden hesaplandi.'
+        }
+        if ($Context.VerifyParser) {
+            $log.Info('M10: -VerifyParser istendi; ham ayristirici cmdlet ile karsilastiriliyor.')
+            $verification = Test-EDParserAgreement -Context $Context
+            $verifyValues = @{}
+            $verifyCellStatus = @{}
+            $details = @()
+            foreach ($finding in $verification) {
+                $verifyValues[$finding.Server] = $finding.Status
+                $verifyCellStatus[$finding.Server] = $finding.Status
+                $details += "$($finding.Server): $($finding.Detail)"
+            }
+            $contextRows += New-EDRow -Module 'M10' -Check 'Parser dogrulama (-VerifyParser)' -Values $verifyValues `
+                -CellStatus $verifyCellStatus -Status (Get-EDWorstStatus @($verifyValues.Values)) `
+                -Note ($details -join ' | ')
+        }
+
         if (-not $anyData) {
-            $detail = 'Pencerede DELIVER olayi bulunamadi'
-            if ($noDataServers.Count -gt 0) { $detail += " ($($noDataServers -join ', '))" }
+            # Neden uc ayri sey olabilir ve tavsiye her birinde FARKLI.
+            if ($partialServers.Count -gt 0) {
+                $detail = "Zaman siniri okumayi kesti ($($partialServers -join ', ')); gecikme hesaplanamadi. "
+                $detail += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
+                $noDataStatus = 'WARN'
+            }
+            elseif ($eventsNoLatency.Count -gt 0) {
+                $detail = "DELIVER olaylari okundu ama hicbirinden gecikme turetilemedi ($($eventsNoLatency -join ', ')). "
+                $detail += 'Saat kaymasi veya ayristirici regresyonu olabilir; -VerifyParser satirina ve log kayitlarina bakin.'
+                $noDataStatus = 'WARN'
+            }
+            else {
+                $detail = 'Pencerede DELIVER olayi bulunamadi'
+                if ($noDataServers.Count -gt 0) { $detail += " ($($noDataServers -join ', '))" }
+                $detail += ". Pencereyi -WindowHours ile genisletin veya tracking log'un acik oldugunu dogrulayin."
+                $noDataStatus = 'N/A'
+            }
             return @(New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p95' -Values $p95 -CellStatus $cellStatus `
-                -Unit 'sn' -Status 'N/A' -Patterns @('P1', 'P6') `
-                -Note "$detail. Pencereyi -WindowHours ile genisletin veya tracking log'un acik oldugunu dogrulayin.")
+                -Unit 'sn' -Status $noDataStatus -Patterns @('P1', 'P6') -Note $detail) + $contextRows
         }
 
         # --- P1: bir sunucu digerlerinden kat kat yavas mi? ---
@@ -202,34 +254,17 @@ Register-EDModule @{
 
         $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p95' -Values $p95 -CellStatus $cellStatus `
             -Unit 'sn' -Status $overallStatus -Patterns @('P1', 'P6') -Note $p95Note
-        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p50' -Values $p50 -Unit 'sn' -Status 'OK'
-        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p99' -Values $p99 -Unit 'sn' -Status 'OK' -Note $p99Note
-        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi max' -Values $maxValues -Unit 'sn' -Status 'OK'
+        # p50/p99/max/ortalama da ayni eksik pencereden geliyor; notsuz
+        # birakilirsa "yetkili sayi" gibi okunurlar.
+        $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
+        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p50' -Values $p50 -Unit 'sn' -Status 'OK' -Note $partialTag
+        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p99' -Values $p99 -Unit 'sn' -Status 'OK' -Note ($partialTag + $p99Note)
+        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi max' -Values $maxValues -Unit 'sn' -Status 'OK' -Note $partialTag
         $rows += New-EDRow -Module 'M10' -Check 'Ortalama (tek basina YANILTIR)' -Values $meanValues -Unit 'sn' -Status 'OK' `
-            -Note 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.'
-        $rows += New-EDRow -Module 'M10' -Check 'Olculen teslim sayisi' -Values $counts -Unit 'adet' -Status 'OK'
+            -Note ($partialTag + 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.')
+        $rows += New-EDRow -Module 'M10' -Check 'Olculen teslim sayisi' -Values $counts -Unit 'adet' -Status 'OK' -Note $partialTag
         $rows += New-EDRow -Module 'M10' -Check 'Okuma yolu' -Values $viaValues -Status 'OK'
-        if ($partialServers.Count -gt 0) {
-            $rows += New-EDRow -Module 'M10' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
-                -Status 'WARN' -Note 'Zaman siniri okumayi kesti; isaretli sunucularda persentiller eksik pencereden hesaplandi.'
-        }
-
-        # --- Parser dogrulama ---
-        if ($Context.VerifyParser) {
-            $log.Info('M10: -VerifyParser istendi; ham ayristirici cmdlet ile karsilastiriliyor.')
-            $verification = Test-EDParserAgreement -Context $Context
-            $verifyValues = @{}
-            $verifyCellStatus = @{}
-            $details = @()
-            foreach ($finding in $verification) {
-                $verifyValues[$finding.Server] = $finding.Status
-                $verifyCellStatus[$finding.Server] = $finding.Status
-                $details += "$($finding.Server): $($finding.Detail)"
-            }
-            $rows += New-EDRow -Module 'M10' -Check 'Parser dogrulama (-VerifyParser)' -Values $verifyValues `
-                -CellStatus $verifyCellStatus -Status (Get-EDWorstStatus @($verifyValues.Values)) `
-                -Note ($details -join ' | ')
-        }
+        $rows += $contextRows
 
         return $rows
     }
