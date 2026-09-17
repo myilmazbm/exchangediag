@@ -22,7 +22,9 @@ function Get-EDCopyStatus {
             -Parameters @{ Server = $server.Name } `
             -Select 'Name', 'DatabaseName', 'MailboxServer', 'Status', 'CopyQueueLength', 'ReplayQueueLength',
                     'ContentIndexState', 'ContentIndexErrorMessage', 'ActiveCopy', 'ActivationPreference',
-                    'LastInspectedLogTime', 'ErrorMessage'
+                    'LastInspectedLogTime', 'ErrorMessage',
+                    # Lagged kopyayi bozuk kopyadan ayirmanin TEK yolu.
+                    'ReplayLagStatus', 'ReplayLagTime'
     })
 
     $copies = @()
@@ -40,13 +42,28 @@ function Get-EDCopyStatus {
                     QueriedFrom       = $result.Key
                     Database          = Get-EDShortName (Get-EDProperty $row 'DatabaseName')
                     Status            = [string](Get-EDProperty $row 'Status')
-                    CopyQueue         = [int](Get-EDProperty $row 'CopyQueueLength' 0)
-                    ReplayQueue       = [int](Get-EDProperty $row 'ReplayQueueLength' 0)
+                    # Kuyruk uzunlugu OKUNAMAZSA 0 degil $null. 0 "kopya
+                    # tamamen guncel" demektir ve esikler (warn 10 / fail 50)
+                    # yuksek-kotu yondedir: okunamayan bir kopya boylece
+                    # saglikli gorunurdu. Failed/ServiceDown kopyalar bu
+                    # alanlari bos dondurur, yani tam da sorunlu kopyalar.
+                    CopyQueue         = $(if ($null -ne (Get-EDProperty $row 'CopyQueueLength')) { [int](Get-EDProperty $row 'CopyQueueLength') } else { $null })
+                    ReplayQueue       = $(if ($null -ne (Get-EDProperty $row 'ReplayQueueLength')) { [int](Get-EDProperty $row 'ReplayQueueLength') } else { $null })
                     ContentIndexState = [string](Get-EDProperty $row 'ContentIndexState')
                     IndexError        = [string](Get-EDProperty $row 'ContentIndexErrorMessage')
-                    IsActive          = [bool](Get-EDProperty $row 'ActiveCopy' $false)
-                    Preference        = [int](Get-EDProperty $row 'ActivationPreference' 0)
+                    # [bool]'False' PowerShell'de $true'dur; uzak oturumdan
+                    # string gelme ihtimaline karsi metin de cozulur.
+                    IsActive          = (ConvertTo-EDBoolean (Get-EDProperty $row 'ActiveCopy' $false))
+                    # Tercih okunamazsa 0 gecerli bir deger DEGILDIR (1'den
+                    # baslar); $null kalir ki "tercih disi" hukmu kurulmasin.
+                    Preference        = $(if ($null -ne (Get-EDProperty $row 'ActivationPreference')) { [int](Get-EDProperty $row 'ActivationPreference') } else { $null })
                     LastInspected     = Get-EDProperty $row 'LastInspectedLogTime'
+                    # LAGGED KOPYA: replay kuyrugunun buyuk olmasi TASARIMDIR.
+                    # Bu alanlar okunmadan lagged kopya bozuk kopyadan ayirt
+                    # edilemez; modul de "yorumu operatore birakan" bir FAIL
+                    # uretmek zorunda kaliyordu.
+                    ReplayLagStatus   = [string](Get-EDProperty $row 'ReplayLagStatus')
+                    ReplayLagTime     = Get-EDProperty $row 'ReplayLagTime'
                     ErrorMessage      = [string](Get-EDProperty $row 'ErrorMessage')
                 }
             }

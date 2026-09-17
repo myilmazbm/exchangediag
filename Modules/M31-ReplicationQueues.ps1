@@ -27,7 +27,9 @@ Register-EDModule @{
         param($Context)
 
         $log = $Context.Log
-        $copies = @((Get-EDCopyStatus -Context $Context).Copies)
+        $copyStatus = Get-EDCopyStatus -Context $Context
+        $copies = @($copyStatus.Copies)
+        $failedServers = @($copyStatus.FailedServers)
 
         if ($copies.Count -eq 0) {
             return @(New-EDRow -Module 'M31' -Check 'Replikasyon kuyruklari' -Status 'N/A' -Note 'Kopya durumu okunamadi.')
@@ -43,8 +45,20 @@ Register-EDModule @{
         $copyValues = @{}; $replayValues = @{}; $worstDbValues = @{}
         $copyCellStatus = @{}; $replayCellStatus = @{}
         $problems = @()
+        $unreadable = @()
+        $laggedNotes = @()
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
+            # Okunamayan sunucu icin "pasif kopya yok" DENMEZ: ikisi de N/A
+            # gorunur ama gerekceleri farklidir ve biri bir olcum eksikligidir.
+            if ($server.Name -in $failedServers) {
+                $copyValues[$server.Name] = 'N/A'; $replayValues[$server.Name] = 'N/A'
+                $worstDbValues[$server.Name] = 'okunamadi'
+                $copyCellStatus[$server.Name] = 'N/A'; $replayCellStatus[$server.Name] = 'N/A'
+                $unreadable += $server.Name
+                continue
+            }
+
             $serverCopies = @($passive | Where-Object { $_.Server -eq $server.Name })
             if ($serverCopies.Count -eq 0) {
                 $copyValues[$server.Name] = 'N/A'; $replayValues[$server.Name] = 'N/A'; $worstDbValues[$server.Name] = '-'
@@ -52,8 +66,39 @@ Register-EDModule @{
                 continue
             }
 
+            # LAGGED KOPYALAR replay hukmunden CIKARILIR. Bir lagged kopyada
+            # buyuk replay kuyrugu tasarimdir; onu FAIL yapip "veritabani
+            # adina bakarak yorumlayin" demek, yorumu operatore iade etmektir
+            # - oysa aracin urunu yorumlanmis sonuctur.
+            # Get-EDProperty: alan yoksa (eski surum) strict mode altinda
+            # patlamak yerine $null doner.
+            $lagged = @($serverCopies | Where-Object {
+                $status = [string](Get-EDProperty $_ 'ReplayLagStatus')
+                $status -and $status -ne 'Disabled'
+            })
+            foreach ($copy in $lagged) {
+                $laggedNotes += ("{0}/{1}: lagged kopya (replay gecikmesi {2}), replay kuyrugu hukme girmez" -f `
+                    $server.Name, $copy.Database, [string](Get-EDProperty $copy 'ReplayLagTime'))
+            }
+            $replayCandidates = @($serverCopies | Where-Object {
+                $status = [string](Get-EDProperty $_ 'ReplayLagStatus')
+                -not ($status -and $status -ne 'Disabled')
+            })
+
             $worstCopy = @($serverCopies | Sort-Object -Property @{ Expression = 'CopyQueue'; Descending = $true })[0]
-            $worstReplay = @($serverCopies | Sort-Object -Property @{ Expression = 'ReplayQueue'; Descending = $true })[0]
+            if ($replayCandidates.Count -eq 0) {
+                # Sunucudaki tum pasif kopyalar lagged: replay hukmu yok.
+                $replayValues[$server.Name] = 'N/A'
+                $replayCellStatus[$server.Name] = 'N/A'
+                $copyValues[$server.Name] = $worstCopy.CopyQueue
+                $worstDbValues[$server.Name] = $worstCopy.Database
+                $copyCellStatus[$server.Name] = Get-EDStatus -Value $worstCopy.CopyQueue -ThresholdName 'copyQueueLength' -Config $Context.Config
+                if ($copyCellStatus[$server.Name] -in @('WARN', 'FAIL')) {
+                    $problems += ("{0}/{1}: kopya kuyrugu {2} log (ag veya kaynak sunucu yetismiyor)" -f $server.Name, $worstCopy.Database, $worstCopy.CopyQueue)
+                }
+                continue
+            }
+            $worstReplay = @($replayCandidates | Sort-Object -Property @{ Expression = 'ReplayQueue'; Descending = $true })[0]
 
             $copyValues[$server.Name] = $worstCopy.CopyQueue
             $replayValues[$server.Name] = $worstReplay.ReplayQueue
@@ -66,7 +111,9 @@ Register-EDModule @{
                 $problems += ("{0}/{1}: kopya kuyrugu {2} log (ag veya kaynak sunucu yetismiyor)" -f $server.Name, $worstCopy.Database, $worstCopy.CopyQueue)
             }
             if ($replayCellStatus[$server.Name] -in @('WARN', 'FAIL')) {
-                $problems += ("{0}/{1}: replay kuyrugu {2} log (hedef diski yetismiyor veya lagged kopya)" -f $server.Name, $worstReplay.Database, $worstReplay.ReplayQueue)
+                # Lagged kopyalar zaten ayiklandi; burada kalan tek aciklama
+                # hedef diskin yetismemesidir.
+                $problems += ("{0}/{1}: replay kuyrugu {2} log - hedef diski yetismiyor (lagged kopya DEGIL)" -f $server.Name, $worstReplay.Database, $worstReplay.ReplayQueue)
             }
         }
 
@@ -76,11 +123,22 @@ Register-EDModule @{
                     Sunucu = $_.Server; Veritabani = $_.Database; Durum = $_.Status
                     KopyaKuyruk = $_.CopyQueue; ReplayKuyruk = $_.ReplayQueue
                     SonIncelenenLog = $_.LastInspected; Tercih = $_.Preference
+                    LagDurumu = [string](Get-EDProperty $_ 'ReplayLagStatus')
+                    LagSuresi = [string](Get-EDProperty $_ 'ReplayLagTime')
                 }
             }
         ) | Out-Null
 
         $note = 'EN KOTU kopya gosterilir, sunucu ortalamasi degil. Tamami: M31-replication-queues.csv'
+        # Lagged kopyalar hukum disidir ama GORUNMEZ degildir: neyin neden
+        # hukme girmedigi replay satirinin notuna yazilir.
+        $replayNote = 'Lagged kopyalar bu hukme GIRMEZ (replay kuyrugunun buyuk olmasi orada tasarimdir); asagidaki degerler yalnizca lagged OLMAYAN kopyalardan gelir.'
+        if ($laggedNotes.Count -gt 0) {
+            $replayNote = ($laggedNotes -join ' | ') + '. ' + $replayNote
+        }
+        if ($unreadable.Count -gt 0) {
+            $note = ("Kopya durumu okunamayan sunucular: {0} (N/A degerleri 'kuyruk sifir' anlamina GELMEZ). " -f ($unreadable -join ', ')) + $note
+        }
         if ($problems.Count -gt 0) {
             $note = ($problems -join ' | ') + '. ' + $note
             $log.Warn("M31: $($problems -join ' | ')")
@@ -90,8 +148,7 @@ Register-EDModule @{
             New-EDRow -Module 'M31' -Check 'CopyQueueLength (en kotu)' -Values $copyValues -CellStatus $copyCellStatus `
                 -Unit 'log' -Status (Get-EDWorstStatus @($copyCellStatus.Values)) -Note $note
             New-EDRow -Module 'M31' -Check 'ReplayQueueLength (en kotu)' -Values $replayValues -CellStatus $replayCellStatus `
-                -Unit 'log' -Status (Get-EDWorstStatus @($replayCellStatus.Values)) `
-                -Note 'Kasitli gecikmeli (lagged) kopyalarda buyuk olmasi TASARIMDIR; veritabani adina bakarak yorumlayin.'
+                -Unit 'log' -Status (Get-EDWorstStatus @($replayCellStatus.Values)) -Note $replayNote
             New-EDRow -Module 'M31' -Check 'En geride kalan DB' -Values $worstDbValues -Status 'OK'
         )
     }

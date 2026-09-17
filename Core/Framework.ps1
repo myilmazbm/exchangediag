@@ -278,6 +278,30 @@ function Get-EDProperty {
 # Esik degerlendirme
 # ---------------------------------------------------------------------------
 
+function ConvertTo-EDBoolean {
+<#
+    .SYNOPSIS
+        Degeri guvenli sekilde bool'a cevirir.
+
+    .DESCRIPTION
+        TUZAK: PowerShell'de [bool]'False' $TRUE'dur (bos olmayan string).
+        Uzak Exchange oturumu degerleri CliXml ile serilestirir ve cogu zaman
+        bool'u korur, ama bir alan metin olarak gelirse dogrudan cast sessizce
+        TERS sonuc uretir - ornegin her veritabani "kurtarma DB'si" sayilip
+        hepsi elenebilir.
+#>
+    [CmdletBinding()]
+    param([AllowNull()]$Value)
+
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool]) { return $Value }
+    $text = ([string]$Value).Trim()
+    if (-not $text) { return $false }
+    if ($text -match '^(false|hayir|no|0)$') { return $false }
+    if ($text -match '^(true|evet|yes|1)$') { return $true }
+    return [bool]$Value
+}
+
 function ConvertTo-EDNumber {
 <#
     .SYNOPSIS

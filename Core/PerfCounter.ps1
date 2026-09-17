@@ -333,7 +333,10 @@ function Get-EDVolumeInventory {
                         Label      = $_.Label
                         CapacityGB = [math]::Round($_.Capacity / 1GB, 1)
                         FreeGB     = [math]::Round($_.FreeSpace / 1GB, 1)
-                        FreePct    = $(if ($_.Capacity -gt 0) { [math]::Round(($_.FreeSpace / $_.Capacity) * 100, 1) } else { 0 })
+                        # Kapasite okunamadiysa FreePct 0 YAZILAMAZ: diskFreePercent
+                        # dusuk-kotu yondedir, yani 0 dogrudan FAIL demektir ve
+                        # uydurma bir sayidan hukum cikar.
+                        FreePct    = $(if ($_.Capacity -gt 0) { [math]::Round(($_.FreeSpace / $_.Capacity) * 100, 1) } else { $null })
                         BlockSize  = $_.BlockSize
                     }
                 }

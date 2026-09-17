@@ -46,11 +46,15 @@ $m32 = @(Get-EDModules -Id 'M32')[0]
 $m33 = @(Get-EDModules -Id 'M33')[0]
 $m34 = @(Get-EDModules -Id 'M34')[0]
 
+# NOT: gercek Get-MailboxDatabaseCopyStatus lag alanlarini da dondurur.
+# Mock bunlari tasimazsa lagged kopya senaryosu test edilemez - ve tam da
+# bu yuzden "lagged kopya her zaman FAIL" hatasi uzun sure gorunmedi.
 function New-Copy {
     param(
         [string]$Server, [string]$Database, [string]$Status = 'Healthy',
         [int]$CopyQueue = 0, [int]$ReplayQueue = 0,
-        [string]$Index = 'Healthy', [switch]$Active, [int]$Preference = 1
+        [string]$Index = 'Healthy', [switch]$Active, [int]$Preference = 1,
+        [string]$ReplayLagStatus = 'Disabled', [string]$ReplayLagTime = ''
     )
     return [pscustomobject]@{
         Server = $Server; QueriedFrom = $Server; Database = $Database; Status = $Status
@@ -58,6 +62,7 @@ function New-Copy {
         ContentIndexState = $Index; IndexError = ''
         IsActive = [bool]$Active; Preference = $Preference
         LastInspected = (Get-Date); ErrorMessage = ''
+        ReplayLagStatus = $ReplayLagStatus; ReplayLagTime = $ReplayLagTime
     }
 }
 
@@ -180,18 +185,37 @@ Assert-Equal 'En geride kalan DB adlandirildi' 'DB-GERIDE' $worstDbRow.Values['M
 Assert-Equal 'Aktif kopyali sunucu N/A' 'N/A' $copyRow.Values['MBX1']
 
 # 3c. Kopya kuyrugu ile replay kuyrugu AYRI seylerdir.
-# Sifir kopya + yuksek replay = log geldi ama uygulanmadi (lagged veya yavas disk).
+# Sifir kopya + yuksek replay = log geldi ama uygulanmadi.
+# Bu kopya LAGGED DEGILDIR (ReplayLagStatus varsayilani 'Disabled'), yani
+# geriye tek aciklama kalir: hedef diski yetismiyor.
 $lagContext = New-DagContext -Servers $servers2 -Copies @(
     (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active)
-    (New-Copy -Server 'MBX2' -Database 'DB1-LAG' -CopyQueue 0 -ReplayQueue 5000)
+    (New-Copy -Server 'MBX2' -Database 'DB-YAVAS-DISK' -CopyQueue 0 -ReplayQueue 5000)
 )
 $rows = @(& $m31.Run $lagContext)
 $copyRow = Get-EDTestRow $rows 'CopyQueueLength'
 $replayRow = Get-EDTestRow $rows 'ReplayQueueLength'
 Assert-Equal 'Sifir kopya kuyrugu OK kaldi' 'OK' $copyRow.CellStatus['MBX2']
-Assert-Equal 'Yuksek replay kuyrugu FAIL' 'FAIL' $replayRow.CellStatus['MBX2']
-Assert-True 'Replay notu lagged kopyayi hatirlatiyor' ($replayRow.Note -like '*lagged*') 'tasarim olabilecegi yaziyor'
+Assert-Equal 'Lagged olmayan yuksek replay FAIL' 'FAIL' $replayRow.CellStatus['MBX2']
+Assert-True 'Lagged OLMADIGI acikca yaziyor' ($copyRow.Note -like '*lagged kopya DEGIL*') $copyRow.Note
 Assert-True 'Replay sorunu hedef diski isaret ediyor' ($copyRow.Note -like '*hedef diski yetismiyor*') $copyRow.Note
+
+# 3d. GERCEK lagged kopya: buyuk replay kuyrugu TASARIMDIR.
+# Eskiden -Select listesinde hicbir lag alani yoktu, yani modul lagged
+# kopyayi bozuk kopyadan ayirt EDEMIYORDU: 7 gunluk bir lagged kopya
+# garantili FAIL veriyor ve not "veritabani adina bakarak yorumlayin"
+# diyerek yorumu operatore iade ediyordu. Aracin urunu yorumlanmis sonuctur.
+$realLagContext = New-DagContext -Servers $servers2 -Copies @(
+    (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active)
+    (New-Copy -Server 'MBX2' -Database 'DB1' -CopyQueue 0 -ReplayQueue 240000 `
+        -ReplayLagStatus 'Enabled' -ReplayLagTime '7.00:00:00')
+)
+$rows = @(& $m31.Run $realLagContext)
+$replayRow = Get-EDTestRow $rows 'ReplayQueueLength'
+Assert-True 'Lagged kopya FAIL URETMIYOR' ($replayRow.CellStatus['MBX2'] -ne 'FAIL') $replayRow.CellStatus['MBX2']
+Assert-Equal 'Lagged kopya hukum disi (N/A)' 'N/A' $replayRow.Values['MBX2']
+Assert-True 'Lagged kopya oldugu ve gecikmesi yaziliyor' `
+    ($replayRow.Note -like '*lagged kopya*' -and $replayRow.Note -like '*7.00:00:00*') $replayRow.Note
 
 # 3d. Pasif kopya yoksa kuyruk kavrami gecerli degil
 $noPassiveContext = New-DagContext -Servers @((New-EDTestServer -Name 'MBX1')) -Copies @(
