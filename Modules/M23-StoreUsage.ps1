@@ -16,6 +16,9 @@
     DIKKAT - HANGI HUKUM NEREDEN GELIYOR? Ikisi karistirilmamalidir:
       - Satirin OK/WARN/FAIL durumu MUTLAK esikten gelir: storeTimeInServerMs
         (thresholds.json). Goreli kiyastan gelmez.
+      - Teshis sutununun KAPISI environment.json -> storeDiagnosisFloorMs'tir:
+        o kadar sunucu zamani harcamamis bir posta kutusu icin hicbir oruntu
+        iddia edilmez. Kapi bir hukum siniri degil, SUSMA esigidir.
       - ROPCount / PageRead / LogRecordCount teshisleri GORELIDIR: ortancanin
         10 kati esas alinir.
 
@@ -170,10 +173,25 @@ Register-EDModule @{
         # olcum penceresinde en az BIR SANIYE sunucu zamani harcamis olmasi
         # gerekir. (Satir hukmunun esigi storeTimeInServerMs = 30.000 ms'dir;
         # 1000 ms onun cok altinda kalir, yani gercek bulgu elenmez - yalnizca
-        # gurultu elenir.) Deger thresholds.json'a EKLENMEDI: orada tanimsiz
-        # bir anahtar Get-EDStatus'u throw ettirir ve bu sayi bir kullanici
-        # esigi degil, teshisin anlamli oldugu en kucuk buyukluktur.
+        # gurultu elenir.)
+        #
+        # ARTIK GOMULU DEGIL: deger environment.json -> storeDiagnosisFloorMs
+        # ile ayarlanir, cunku "gurultu" ortamin buyuklugune gore degisir -
+        # binlerce kullanicili bir sunucuda bir saniyelik bekleme siradan,
+        # sessiz bir ortamda ise gercek bir sinyaldir. THRESHOLDS.JSON'A
+        # KONMADI: bu bir OK/WARN/FAIL siniri degil, iddianin kurulabildigi
+        # en kucuk buyukluktur; warn/fail ikilisine sokmak yonu uydurmak
+        # olurdu (M12'nin maxRecipientLookups'i ve M24'un maxFolderScans'i
+        # da ayni sebeple environment tarafindadir).
         $diagnosisFloorMs = 1000.0
+        if ($Context.Config.Environment.Contains('storeDiagnosisFloorMs')) {
+            # Kultur tuzagi: "1000.0" gibi bir metin tr-TR'de dogrudan
+            # cevrildiginde 10000 olur; ConvertTo-EDNumber invariant ayristirir.
+            $configuredFloor = ConvertTo-EDNumber $Context.Config.Environment['storeDiagnosisFloorMs']
+            # Okunamayan/negatif deger sessizce kabul edilmez: varsayilan
+            # taban korunur, aksi halde tum gurultu geri gelirdi.
+            if ($null -ne $configuredFloor -and $configuredFloor -ge 0) { $diagnosisFloorMs = $configuredFloor }
+        }
         # CPU tarafinda 1 ms altindaki degerler olcum cozunurlugunun altindadir;
         # oran hesabina sokulmaz, ayri kol olarak ele alinir.
         $cpuFloorMs = 1.0
@@ -316,7 +334,7 @@ Register-EDModule @{
         # Notun anlattigi sey kodun YAPTIGI sey olmalidir: satir hukmu mutlak
         # esikten gelir, goreli kiyas yalnizca teshis sutununda kullanilir ve
         # kullanilan ortanca ortamin degil, EN AGIR TUKETICILERIN ortancasidir.
-        $note = ("TimeInServer MILISANIYEDIR (50.000 = 50 sn). Bu satirin hukmu MUTLAK esikten gelir (storeTimeInServerMs). Goreli kiyas yalnizca teshis sutunundaki ROPCount/PageRead/LogRecordCount oruntuleri icindir ve kullanilan ortanca ORTAMIN DEGIL, Get-StoreUsageStatistics'in dondurdugu EN AGIR TUKETICILERIN ortancasidir ({0} posta kutusu) - siradan kullanici bu kumede yoktur. Teshis icin en az {1:N0} ms sunucu zamani aranir; altindaki degerler icin oruntu iddia edilmez. " -f `
+        $note = ("TimeInServer MILISANIYEDIR (50.000 = 50 sn). Bu satirin hukmu MUTLAK esikten gelir (storeTimeInServerMs). Goreli kiyas yalnizca teshis sutunundaki ROPCount/PageRead/LogRecordCount oruntuleri icindir ve kullanilan ortanca ORTAMIN DEGIL, Get-StoreUsageStatistics'in dondurdugu EN AGIR TUKETICILERIN ortancasidir ({0} posta kutusu) - siradan kullanici bu kumede yoktur. Teshis icin en az {1:N0} ms sunucu zamani aranir (environment.json -> storeDiagnosisFloorMs); altindaki degerler icin oruntu iddia edilmez." -f `
             @($comparisonSet).Count, $diagnosisFloorMs)
         if ($referenceDatabase) {
             $note += ("Referans (en saglikli) veritabani: {0} - en yuksek TimeInServer {1:N0} ms. " -f `

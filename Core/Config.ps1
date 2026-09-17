@@ -25,6 +25,18 @@ function Get-EDDefaultEnvironment {
         maxFolderScans      = 50    # M24: her posta kutusu pahali bir klasor taramasidir
         perfSampleCount     = 20    # M20/M21: persentil icin ornek sayisi
         perfSampleIntervalSeconds = 1
+
+        # M23: teshis KAPISI (esik degil). Bir posta kutusu hakkinda
+        # "BEKLIYOR" / "CPU YAKIYOR" demek icin olcum penceresinde en az bu
+        # kadar sunucu zamani harcamis olmasi aranir. Neden burada, neden
+        # thresholds.json'da degil: bu sayi bir OK/WARN/FAIL siniri DEGILDIR,
+        # iddianin kurulabildigi en kucuk buyukluktur - warn/fail ikilisine
+        # karsiligi yoktur ve Get-EDStatus'a verilseydi yonu uydurulmus
+        # olurdu. Ayni kalibi maxRecipientLookups (M12) ve maxFolderScans
+        # (M24) da izler: ikisi de modulun NEYI IDDIA ETTIGINI sinirlar.
+        # Buyuk ortamlarda bir saniyelik bekleme gurultudur; kucuk/sessiz
+        # ortamlarda gercek bir bulgudur - bu yuzden ortama gore ayarlanabilir.
+        storeDiagnosisFloorMs = 1000
     }
 }
 
@@ -43,6 +55,15 @@ function Get-EDDefaultThresholds {
         calendarItemCount     = [ordered]@{ warn = 5000;  fail = 20000 }
         certExpiryDays        = [ordered]@{ warn = 30;    fail = 7 }      # dusuk kotu
         cpuPercent            = [ordered]@{ warn = 70;    fail = 90 }
+        # M05 bellek baglacinin IKI BACAGI. Tek basina hicbiri hukum uretmez:
+        # Exchange ESE onbellegini TASARIM GEREGI buyutur, yani dusuk bos
+        # bellek saglikli bir sunucuda normaldir. Uyari ancak bos bellek
+        # esigin altinda VE pagefile esigin ustundeyken verilir; hukum ikisinin
+        # ZAYIF HALKASIDIR (ikisi de FAIL seviyesindeyse FAIL). Degerler
+        # ortamdan ortama degisir (RAM buyuklugu, pagefile boyutlandirmasi),
+        # bu yuzden gomulu degil ayarlanabilirdir.
+        memoryFreePercent     = [ordered]@{ warn = 5;     fail = 1 }      # dusuk kotu
+        pagefileUsedPercent   = [ordered]@{ warn = 50;    fail = 95 }
         storeTimeInServerMs   = [ordered]@{ warn = 30000; fail = 60000 }
         diskFreePercent       = [ordered]@{ warn = 20;    fail = 10 }     # dusuk kotu
         backupAgeDays         = [ordered]@{ warn = 3;     fail = 7 }
