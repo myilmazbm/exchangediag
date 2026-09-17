@@ -84,7 +84,19 @@ Register-EDModule @{
             $unassignedCount = 0
 
             foreach ($certificate in $certificates) {
-                $rawServices = [int](Get-EDProperty $certificate 'Services' 0)
+                # Services normalde bayrak tam sayisidir, ama uzak oturumdan
+                # metin gelirse ([int]'IMAP, POP, IIS, SMTP') ISTISNA firlatir
+                # ve modulun TAMAMI tek bir ERROR satirina donusur: SMTP
+                # sertifikasi son kullanma kontrolu - modulun varlik sebebi -
+                # boylece kaybolur. Tek bir sertifika tum hukmu dusuremez.
+                $servicesRaw = Get-EDProperty $certificate 'Services' 0
+                $servicesNumber = ConvertTo-EDNumber $servicesRaw
+                $rawServices = $(if ($null -ne $servicesNumber) { [int]$servicesNumber } else { 0 })
+                if ($null -eq $servicesNumber -and $servicesRaw) {
+                    # Metin olarak geldi: ham degeri kanitta koru, hukum
+                    # uretme (atanmamis gibi davranilir).
+                    $log.Info("M04/$server : 'Services' sayisal degil ('$servicesRaw'); bu sertifika servis atamasi hukmune girmedi.")
+                }
                 $rawStatus = Get-EDProperty $certificate 'Status'
                 $notAfter = Get-EDProperty $certificate 'NotAfter'
 

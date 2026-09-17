@@ -55,6 +55,9 @@ Register-EDModule @{
         $evidence = @()
         $problems = @()
         $naNotes = @()
+        # Kurtarma eylemi calisan saglik setleri: bu modulun anlattigi
+        # gecikme mekanizmasinin ta kendisi.
+        $repairNotes = @()
         $suppressedCount = 0
 
         foreach ($result in $results) {
@@ -77,6 +80,10 @@ Register-EDModule @{
             $bad = @()
             $unknown = @()
             $notApplicable = @()
+            # Repairing: MA su anda bir kurtarma eylemi calistiriyor.
+            $repairing = @()
+            # Taninmayan AlertValue: hukum yok ama sayilir.
+            $unrecognizedAlerts = @()
             $healthyCount = 0
 
             foreach ($monitor in $monitors) {
@@ -131,20 +138,54 @@ Register-EDModule @{
                         $unknown += $record
                     }
                 }
-                else { continue }   # tanimadigimiz bir AlertValue - hukum verilmez
+                elseif ($alert -eq 'Repairing') {
+                    # REPAIRING: Managed Availability SU ANDA bir kurtarma
+                    # eylemi calistiriyor (servis yeniden baslatma, uygulama
+                    # havuzu geri donusumu, hatta failover). Bu modulun
+                    # basliginda "gecikme mekanizmasi" diye anlatilan sey tam
+                    # da budur - ve eskiden sessizce atiliyordu.
+                    $repairing += $record
+                }
+                elseif ($alert -eq 'Unrecoverable') {
+                    # MA kurtarma zincirini TUKETTI ve basaramadi: bozuk
+                    # kopyadan daha ciddi bir durumdur.
+                    $bad += $record
+                }
+                else {
+                    # Taninmayan AlertValue: hukum verilmez ama SAYILIR.
+                    # Eskiden "continue" ile tamamen dusuruluyordu ve hepsi
+                    # boyleyse asagidaki dal "donen 0 monitorun tamami
+                    # NotApplicable" diye YANLIS bir cumle yaziyordu.
+                    $unrecognizedAlerts += $record
+                    $evidence += $record
+                    continue
+                }
 
                 $evidence += $record
             }
 
             $unhealthyValues[$server] = $bad.Count
             $unknownValues[$server] = $unknown.Count
+            if ($repairing.Count -gt 0) {
+                $repairNotes += ("{0}: {1} saglik seti SU ANDA kurtarma eyleminde (Repairing) - {2}" -f `
+                    $server, $repairing.Count, (@($repairing | ForEach-Object { $_.SaglikSeti } | Select-Object -Unique -First 5) -join ', '))
+            }
 
             # Hicbir monitor gercek bir hukum bildirmediyse (hepsi NotApplicable
             # veya kapali), bu sunucu hakkinda "saglikli" demek DAYANAKSIZDIR.
-            if ($healthyCount -eq 0 -and $bad.Count -eq 0 -and $unknown.Count -eq 0) {
+            if ($healthyCount -eq 0 -and $bad.Count -eq 0 -and $unknown.Count -eq 0 -and $repairing.Count -eq 0) {
                 $unhealthyValues[$server] = 'N/A'
                 $cellStatus[$server] = 'N/A'
-                $naNotes += ("{0}: donen {1} monitorun tamami bu sunucuda GECERLI DEGIL (NotApplicable); saglik hakkinda hukum verilmedi." -f $server, $notApplicable.Count)
+                # Gerekce, gercekten NE oldugunu soylemeli. Eskiden taninmayan
+                # AlertValue'lar dusuruldugu icin bu cumle "donen 0 monitorun
+                # tamami NotApplicable" seklinde yaziliyordu - hem sayi hem
+                # gerekce yanlisti.
+                $naNotes += $(if ($unrecognizedAlerts.Count -gt 0) {
+                    "{0}: donen monitorlerin durumu TANINMADI ({1} kayit, ornek: {2}); saglik hakkinda hukum verilmedi." -f `
+                        $server, $unrecognizedAlerts.Count, (@($unrecognizedAlerts | ForEach-Object { $_.Durum } | Select-Object -Unique -First 3) -join ', ')
+                } else {
+                    "{0}: donen {1} monitorun tamami bu sunucuda GECERLI DEGIL (NotApplicable); saglik hakkinda hukum verilmedi." -f $server, $notApplicable.Count
+                })
                 $log.Info("M40/$server : $($notApplicable.Count) monitorun tamami NotApplicable; hukum verilmedi.")
                 continue
             }
@@ -180,6 +221,11 @@ Register-EDModule @{
 
         $note = 'Yalnizca saglikli OLMAYAN monitorler kanita yazilir. Ayrinti: M40-health-sets.csv'
         if ($naNotes.Count -gt 0) { $note = ($naNotes -join ' ') + ' ' + $note }
+        if ($repairNotes.Count -gt 0) {
+            # Kurtarma eylemi CALISIRKEN gecikme olmasi beklenir; bu bilgi
+            # diger modullerin bulgularini okurken BAGLAMDIR.
+            $note = ($repairNotes -join ' | ') + '. Kurtarma eylemi surerken (servis yeniden baslatma, havuz geri donusumu, failover) gecikme ve kuyruk artisi BEKLENIR; diger modullerin bulgularini bu bilgiyle okuyun. ' + $note
+        }
         if ($problems.Count -gt 0) {
             $deliveryAll = @($evidence | Where-Object { $_.TeslimIle -and -not $_.Bastirildi -and $_.AlertValue -in @('Unhealthy', 'Degraded') })
             $note = ($problems -join ' | ') + '. '

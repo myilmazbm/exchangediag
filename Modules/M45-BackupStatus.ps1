@@ -68,7 +68,12 @@ Register-EDModule @{
 
         foreach ($row in $rows) {
             $database = Get-EDShortName (Get-EDProperty $row 'Name')
+            # Server bos gelebilir (kurtarma veritabani, sunucu nesnesi
+            # silinmis DB). Bos anahtar ContainsKey() cagrisinda istisna
+            # firlatiyor ve MODULUN TAMAMI tek bir ERROR satirina donusuyordu:
+            # tek bir tuhaf satir yuzunden butun yedek bulgulari kayboluyordu.
             $serverName = Get-EDServerName (Get-EDProperty $row 'Server')
+            if (-not $serverName) { $serverName = '(sunucu bilinmiyor)' }
             $lastFull = Get-EDProperty $row 'LastFullBackup'
             $lastIncremental = Get-EDProperty $row 'LastIncrementalBackup'
             $circular = [bool](Get-EDProperty $row 'CircularLoggingEnabled' $false)

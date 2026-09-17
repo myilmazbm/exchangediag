@@ -437,7 +437,33 @@ function Test-EDValueDrift {
     # Cogunluk degeri referans alinir; azinlikta kalanlar sapan hucredir.
     $counts = @{}
     foreach ($value in $comparable.Values) { $counts[$value] = 1 + [int]$counts[$value] }
-    $majority = ($counts.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
+
+    # COGUNLUK YOKSA SAPAN DA YOKTUR.
+    #
+    # Iki sunucu farkli degerler tasiyorsa (1-1) ya da tum degerler
+    # birbirinden farkliysa ortada cogunluk yoktur. Eski kod yine de birini
+    # seciyordu ve secim hashtable siralamasina kaliyordu: iki sunuculu bir
+    # ortamda YAMALI sunucu "sapan" ilan edilip kirmizi isaretlenebiliyordu.
+    # "Yanlis sunucuyu suclamak" bu aracin en acik yasagidir.
+    $ranked = @($counts.GetEnumerator() | Sort-Object -Property Value -Descending)
+    $topCount = [int]$ranked[0].Value
+    $tied = @($ranked | Where-Object { [int]$_.Value -eq $topCount })
+
+    if ($tied.Count -gt 1) {
+        # Fark VAR ama kimin sapan oldugu soylenemez: hepsi isaretlenir,
+        # hicbiri suclanmaz.
+        foreach ($key in @($comparable.Keys)) { $cellStatus[$key] = $DriftStatus }
+        $pairs = @($comparable.GetEnumerator() | Sort-Object -Property Key | ForEach-Object { "$($_.Key)=$($_.Value)" })
+        return [pscustomobject]@{
+            Status     = $DriftStatus
+            CellStatus = $cellStatus
+            Distinct   = $distinct
+            Majority   = $null
+            Note       = "Sunucular arasi fark var ama COGUNLUK YOK; hangisinin dogru oldugu bu veriyle soylenemez. Degerler: $($pairs -join ', ')"
+        }
+    }
+
+    $majority = $ranked[0].Key
 
     foreach ($key in @($comparable.Keys)) {
         if ($comparable[$key] -ne $majority) { $cellStatus[$key] = $DriftStatus }

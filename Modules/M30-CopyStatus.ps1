@@ -33,11 +33,36 @@ Register-EDModule @{
                 -Note 'Kopya durumu okunamadi.')
         }
 
+        # SINIFLANDIRMA "VARSAYILAN OLARAK BOZUK" OLAMAZ.
+        #
+        # Eski kod $bad'i "saglikli da degil gecici de degil" diye taniyordu,
+        # yani listede olmayan HER durum bozuk sayiliyordu. Sonuc: planli bir
+        # Move-ActiveMailboxDatabase sirasinda yakalanan Mounting/Dismounting
+        # "1 bozuk" FAIL'i uretiyor ve not "failover imkansiz" diyordu.
+        # DisconnectedAndResynchronizing, listede olan
+        # DisconnectedAndHealthy'nin kardesi oldugu halde disaridaydi.
+        # Exchange'in ileride ekleyecegi her yeni durum da otomatik olarak
+        # "bozuk" olurdu.
         $healthy = @('Mounted', 'Healthy')
-        $transient = @('Initializing', 'Resynchronizing', 'Seeding', 'SeedingSource', 'DisconnectedAndHealthy')
+        # Gecis durumlari: saniyeler-dakikalar surer, kendiliginden gecer.
+        $transient = @(
+            'Initializing', 'Resynchronizing', 'Seeding', 'SeedingSource',
+            'DisconnectedAndHealthy', 'DisconnectedAndResynchronizing',
+            'Mounting', 'Dismounting', 'SinglePageRestore'
+        )
+        # Gercekten bozuk olanlar ACIKCA sayilir.
+        $broken = @(
+            'Failed', 'FailedAndSuspended', 'Suspended', 'ServiceDown',
+            'Misconfigured', 'NotSupported'
+        )
+        # Dismounted bir HUKUM gerektirir ama "bozuk kopya" degildir:
+        # kasitli da olabilir, bu yuzden WARN.
+        $dismounted = @('Dismounted')
 
         $statusValues = @{}; $indexValues = @{}; $cellStatus = @{}; $indexCellStatus = @{}
         $problems = @()
+        # Taninmayan kopya durumlari: hukum degil, bildirim.
+        $unrecognized = @()
         $evidence = @()
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
@@ -48,13 +73,32 @@ Register-EDModule @{
                 continue
             }
 
-            $bad = @($serverCopies | Where-Object { $_.Status -notin $healthy -and $_.Status -notin $transient })
+            $bad = @($serverCopies | Where-Object { $_.Status -in $broken })
             $pending = @($serverCopies | Where-Object { $_.Status -in $transient })
+            $down = @($serverCopies | Where-Object { $_.Status -in $dismounted })
+            # Hicbir kovaya girmeyen durum: TANINMADI. Bunu "bozuk" saymak
+            # uydurma bir hukumdur; hukum verilemedigini soylemek dogrudur.
+            $unknownState = @($serverCopies | Where-Object {
+                $_.Status -notin $healthy -and $_.Status -notin $transient -and
+                $_.Status -notin $broken -and $_.Status -notin $dismounted
+            })
 
             if ($bad.Count -gt 0) {
                 $statusValues[$server.Name] = "$($bad.Count) bozuk / $($serverCopies.Count)"
                 $cellStatus[$server.Name] = 'FAIL'
                 $problems += ("{0}: {1}" -f $server.Name, (@($bad | ForEach-Object { "$($_.Database)=$($_.Status)" }) -join ', '))
+            }
+            elseif ($down.Count -gt 0) {
+                $statusValues[$server.Name] = "$($down.Count) dismounted / $($serverCopies.Count)"
+                $cellStatus[$server.Name] = 'WARN'
+                $problems += ("{0}: {1} (DISMOUNTED - kasitli olabilir, ama bu kopya posta almiyor)" -f `
+                    $server.Name, (@($down | ForEach-Object { $_.Database }) -join ', '))
+            }
+            elseif ($unknownState.Count -gt 0) {
+                # Taninmayan durum: bozuk DEMEK yerine ham degeri goster.
+                $statusValues[$server.Name] = (@($unknownState | ForEach-Object { $_.Status } | Select-Object -Unique) -join ', ')
+                $cellStatus[$server.Name] = 'N/A'
+                $unrecognized += ("{0}: {1}" -f $server.Name, (@($unknownState | ForEach-Object { "$($_.Database)=$($_.Status)" }) -join ', '))
             }
             elseif ($pending.Count -gt 0) {
                 $statusValues[$server.Name] = "$($pending.Count) gecici / $($serverCopies.Count)"
@@ -79,8 +123,14 @@ Register-EDModule @{
                 $indexCellStatus[$server.Name] = 'N/A'
             }
             else {
-                $indexValues[$server.Name] = 'Healthy'
-                $indexCellStatus[$server.Name] = 'OK'
+                # DIKKAT: burada 'Healthy' SABITI yazmak, okunmamis bir degeri
+                # uydurmaktir. Crawling, Unknown, Disabled, AutoSuspended,
+                # HealthyAndUpgrading gibi durumlarin hepsi bu dala dusuyor ve
+                # raporda "Healthy" olarak gorunuyordu - indeks yeniden
+                # olusturulurken bile.
+                $indexStates = @($serverCopies | ForEach-Object { $_.ContentIndexState } | Select-Object -Unique)
+                $indexValues[$server.Name] = ($indexStates -join ', ')
+                $indexCellStatus[$server.Name] = $(if (@($indexStates | Where-Object { $_ -ne 'Healthy' }).Count -eq 0) { 'OK' } else { 'N/A' })
             }
 
             foreach ($copy in $serverCopies) {
@@ -107,6 +157,11 @@ Register-EDModule @{
         }
         if ($inventory.FailedServers.Count -gt 0) {
             $note += " Okunamayan sunucular: $($inventory.FailedServers -join ', ')."
+        }
+        if ($unrecognized.Count -gt 0) {
+            # Taninmayan durum bir hukum DEGILDIR: ham deger gosterilir ve
+            # "bozuk" denmez. Exchange surumleri yeni durum adlari ekler.
+            $note += (" TANINMAYAN KOPYA DURUMU ({0}): bu durumlar icin hukum verilmedi, ham deger gosteriliyor." -f ($unrecognized -join ' | '))
         }
 
         return @(

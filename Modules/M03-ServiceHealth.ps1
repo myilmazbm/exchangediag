@@ -65,7 +65,28 @@ Register-EDModule @{
             }
             $stopped = @($stopped | Select-Object -Unique)
 
-            if ($stopped.Count -eq 0) {
+            # RequiredServicesRunning seciliyor ama HIC OKUNMUYORDU.
+            #
+            # Test-ServiceHealth, gerekli bir servis calismiyor olsa da onu
+            # her zaman ServicesNotRunning listesine koymayabilir (ornegin
+            # baslatma tipi Otomatik degilse). O durumda liste bos gelir ama
+            # RequiredServicesRunning $false'tur: modul "tumu calisiyor / OK"
+            # diyordu. Disabled duruma alinmis bir MSExchangeTransport - kuyruk
+            # birikmesinin en dogrudan sebebi - boylece gorunmez kaliyordu.
+            $requiredOk = $true
+            foreach ($role in $result.Output) {
+                $flag = Get-EDProperty $role 'RequiredServicesRunning'
+                if ($null -eq $flag) { continue }
+                if (-not (ConvertTo-EDBoolean $flag)) { $requiredOk = $false }
+            }
+
+            if ($stopped.Count -eq 0 -and -not $requiredOk) {
+                $values[$name] = 'gerekli servis eksik'
+                $cellStatus[$name] = 'FAIL'
+                $problems += ("{0}: Test-ServiceHealth 'gerekli servisler calismiyor' diyor ama durmus servis LISTELEMIYOR - " -f $name) +
+                    'servis baslatma tipi Otomatik disinda (Disabled/Manual) olabilir. Sunucuda Get-Service ile dogrulayin.'
+            }
+            elseif ($stopped.Count -eq 0) {
                 $values[$name] = 'tumu calisiyor'
                 $cellStatus[$name] = 'OK'
             }
