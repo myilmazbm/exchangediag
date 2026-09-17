@@ -292,7 +292,31 @@ try {
     # 2) Genis pencere + kasitli yogun saat.
     $hourlyDir = Join-Path $PSScriptRoot 'fixtures\hourly'
     New-Item -ItemType Directory -Path $hourlyDir -Force | Out-Null
-    $hourlyEnd = [datetime]::UtcNow
+
+    # PENCERE YEREL SAAT SINIRINA HIZALANIR - bu satir testin OYNAKLIGINI
+    # (flaky) kaldiran satirdir. Kok neden olculdu:
+    #
+    # Fixture'in tohumu sabittir ($Seed), yani teslim ZAMAN OFSETLERI her
+    # kosumda aynidir. Ama pencerenin bittigi an [datetime]::UtcNow idi ve
+    # saat kovalarinin siniri YEREL SAAT BASIDIR. Bittigi an HH:37 ise
+    # 8 saatlik pencere 9 kovaya bolunur ve ikisi PARCA kovadir (23 dk ve
+    # 37 dk). Yani ayni tohumdan her kosumda FARKLI saatlik hacimler cikar.
+    #
+    # M13'un kapasite iddiasi "tepe saatin hacmi >= saatlik ortanca"
+    # kosuluna baglidir. Yedi tam kovanin hacimleri birbirine cok yakin
+    # (~2000 +/- 40, binom gurultusu) oldugu icin tepe saatin ortancanin
+    # ustunde mi altinda mi kaldigi RASTGELE belirleniyordu; dahasi parca
+    # kovalardan birinin p95'i (agir kuyruklu dagilimda ~33 ornek) arada
+    # bir gercek tepe saati de geciyordu. Sonuc: ayni kod, ayni tohum,
+    # bazen yesil bazen kirmizi. Bir CI kirmizisi "gercek regresyon mu
+    # gurultu mu" ayirt edilemezse gurultu normallesir ve GERCEK kirmizilar
+    # da gormezden gelinir.
+    #
+    # Saat sinirina hizalayinca parca kova KALMAZ: sekiz TAM kova olur,
+    # her kovanin hacmi yalnizca tohumdan belirlenir ve tepe saat her
+    # kosumda ayni kovadir (pencerenin sonundan uc saat once).
+    $nowLocal = Get-Date
+    $hourlyEnd = $nowLocal.Date.AddHours($nowLocal.Hour).ToUniversalTime()
     $peakHour = $hourlyEnd.AddHours(-3).ToLocalTime().Hour
     Write-Host ("  Yogun saat {0:00}:00 olacak sekilde 8 saatlik fixture uretiliyor..." -f $peakHour) -ForegroundColor Gray
     $hourlyFixture = & (Join-Path $PSScriptRoot 'New-TrackingLogFixture.ps1') `
@@ -300,7 +324,14 @@ try {
         -DeliverCount 16000 -EndUtc $hourlyEnd -WindowHours 8 -PeakHourLocal $peakHour -PeakMultiplier 8
 
     $context.Cache.Remove('DeliveryAnalysis'); $context.Cache.Remove('AnalysisWindow')
-    $context.WindowHours = 9
+    # PENCEREYE BIR SAATLIK DEGIL IKI SAATLIK PAY BIRAKILIR.
+    # Analiz penceresi modulun icinde [UtcNow - WindowHours, UtcNow] olarak
+    # kurulur; fixture ise yukarida hizalanmis SAAT BASINDA biter. Pay 1 saat
+    # olsaydi, test M13'e tam saat basinda (orn. 01:59:50'de baslayip
+    # 02:00:20'de kosarken) gelirse fixture'in ILK saat kovasinin bir kismi
+    # pencerenin disinda kalir - kova kirpilir, hacmi degisir ve oynaklik
+    # baska bir kapidan geri doner. Iki saatlik pay bu kenari kapatir.
+    $context.WindowHours = 10
     $context.Cache['TrackingLogLocation'] = @(
         [pscustomobject]@{ Server = $serverName; Enabled = $true; LocalPath = $hourlyDir
                            UncPath = $hourlyDir; Accessible = $true; FileCount = 1; Error = $null }
@@ -329,13 +360,26 @@ try {
     # calistigi SAATE bagimli kiliyordu: ayni kod ayni gun bir kosumda
     # yesil, digerinde kirmizi. Yanlis sebepten KALAN bir test, yanlis
     # sebepten GECEN kadar zararlidir - dogru iddia sartli olandir.
+    #
+    # KOSUL, MODULUN KENDI SECTIGI TEPE SAATTEN TURETILIR.
+    # Eskiden kosul fixture'a SOYLENEN saatten ($peakHour) turetiliyordu:
+    # modul baska bir saati tepe secerse test yanlis dala giriyor ve iki
+    # ayri sebepten birden kirmizi oluyordu. Modulun raporladigi saat zaten
+    # bir ustteki iddiayla sabitlendigi icin, kosulu ORADAN okumak testin
+    # kendi icinde tutarli kalmasini garanti eder.
     $hourStats = (Get-EDDeliveryAnalysis -Context $context)[$serverName].ByHourLocal
     $qualifiedHours = @($hourStats.Keys | Where-Object { $hourStats[$_].Count -ge 20 })
     $hourVolumes = @($qualifiedHours | ForEach-Object { [double]$hourStats[$_].Count } | Sort-Object)
     $medianVolume = $hourVolumes[[int][math]::Floor($hourVolumes.Count / 2)]
-    $peakIsBusy = ([double]$hourStats[[int]$peakHour].Count -ge $medianVolume)
+    $reportedPeakHour = [int]($peakRow.Values[$serverName] -replace ':.*$', '')
+    $peakVolume = [double]$hourStats[$reportedPeakHour].Count
+    $peakIsBusy = ($peakVolume -ge $medianVolume)
+    # Hizalama calisiyorsa parca kova kalmaz: sekiz TAM saat kovasi. Bu
+    # iddia, hizalamanin sessizce bozulmasini (ve oynakligin geri gelmesini)
+    # yakalar.
+    Assert-Equal 'Pencere tam saat kovalarina bolunmus' 8 $qualifiedHours.Count
     Write-Host ("  Tepe saat hacmi {0:N0}, saatlik ortanca {1:N0} -> kapasite iddiasi {2}" -f `
-        $hourStats[[int]$peakHour].Count, $medianVolume, $(if ($peakIsBusy) { 'BEKLENIYOR' } else { 'BEKLENMIYOR' })) -ForegroundColor Gray
+        $peakVolume, $medianVolume, $(if ($peakIsBusy) { 'BEKLENIYOR' } else { 'BEKLENMIYOR' })) -ForegroundColor Gray
 
     if ($peakIsBusy) {
         Assert-True 'P7 notta aciklanmis' ($ratioRow.Note -like '*ORGU P7*')

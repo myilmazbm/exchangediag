@@ -585,14 +585,14 @@ Paketler geliştiricinin makinesinde (çoğunlukla en-US) koşuyordu ve **tek bi
 
 **Geçmek yetmez, iki kültürde de geçmek gerekir.** Bir iddia yalnızca tek kültürde geçiyorsa ya ürün kültüre bağımlıdır (hata) ya da iddianın kendisi geliştiricinin ondalık ayracını varsayıyordur (test hatası); ikisi de düzeltilir. Sonuç satırı üretmeyen bir paket "0 hata" sayılmaz, `COKTU` olarak raporlanır.
 
-Bugünkü durum — **15 paket × 2 kültür = 2384 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
+Bugünkü durum — **15 paket × 2 kültür = 2486 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
 
 | Paket | Doğrulama | Kapsam |
 |---|---|---|
 | `Test-TrackingLogParser` | 137 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
 | `Test-CoreUnits` | 130 | C# çekirdek birim testleri: `PercentileEngine`, `StatsAccumulator`, `CsvLineSplitter` |
-| `Test-LatencyModules` | 47 | M10-M13 uçtan uca (**canlı Exchange uç noktası ister**) |
-| `Test-LatencyPatterns` | 69 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
+| `Test-LatencyModules` | 48 | M10-M13 uçtan uca (**canlı Exchange uç noktası ister**) |
+| `Test-LatencyPatterns` | 119 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
 | `Test-TransportModules` | 71 | M14-M16 |
 | `Test-PerfModules` | 52 | M20-M22, örgü P4 ve P5 |
 | `Test-StoreModules` | 50 | M23-M24, yorum tablosu |

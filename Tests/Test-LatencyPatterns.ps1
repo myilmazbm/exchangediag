@@ -145,6 +145,109 @@ $p95Row = Get-EDTestRow $rows 'Teslim gecikmesi p95'
 Assert-True 'Pasif site sunucusu P1 ile suclanmiyor' ($p95Row.Note -notlike '*DR01 diger sunuculardan*') $p95Row.Note
 Assert-Equal 'Pasif sunucu hucresi PASSIVE kaliyor' 'PASSIVE' $p95Row.CellStatus['DR01']
 
+# ---------------------------------------------------------------------------
+# 1c-2 .. 1c-6: P1'in UC VE DAHA FAZLA SUNUCULU KOLU
+#
+# NEDEN AYRICA GEREKTI (olculdu):
+# Yukaridaki 1a iki sunuculu DOGRUDAN kiyas kolunu kuruyor; 1b ve 1c ise uc
+# sunuculu senaryolari yalnizca NEGATIF iddia ile ("suclanmamali") sinar.
+# Yani ortanca kolunun POZITIF tarafi - aracin ASIL HEDEFI olan 3+ sunuculu
+# ortamda P1'in tetiklenmesi - hic sinanmiyordu. Olculmus mutasyon:
+# M10 icindeki 'en yavas / ortanca -ge 3' kosulu '-ge 300' yapildiginda
+# paketin TAMAMI YESIL kaliyordu. Yani P1 coklu sunuculu bir ortamda hic
+# tetiklenemez hale gelse bile tek bir test kirmizi olmuyordu.
+#
+# Asagidaki bes senaryo esigi IKI TARAFTAN da sikistirir:
+#   pozitif  : 3 sunucu (tek sayi -> ortanca ortadaki), tam 3.0x sinir,
+#              4 sunucu (cift sayi -> ortanca iki ortanin ortalamasi)
+#   negatif  : 2.5x fark ORGU ILAN ETTIRMEZ
+# Boylece hem esigin kaldirilmasi hem de dusurulmesi kirmiziya duser.
+
+# 1c-2. UC SUNUCU, belirgin sapan: P1 KURULUR ve ortanca kolu adlandirilir.
+$context = New-PatternContext -Servers $servers3
+Set-AnalysisCache -Context $context -Analyses @(
+    (New-Analysis -Server 'SRV1' -P95 2   -Count 5000),
+    (New-Analysis -Server 'SRV2' -P95 2.5 -Count 5000),
+    (New-Analysis -Server 'SRV3' -P95 30  -Count 5000)
+)
+$rows = @(& $m10.Run $context)
+$p95Row = Get-EDTestRow $rows 'Teslim gecikmesi p95'
+Assert-True 'Uc sunuculu ortamda P1 tetikleniyor' ($p95Row.Note -like '*ORGU P1*') $p95Row.Note
+Assert-True 'Sapan sunucu adiyla suclaniyor' ($p95Row.Note -like '*SRV3 diger sunuculardan*') $p95Row.Note
+Assert-True 'Hukmun ORTANCAYA dayandigi yaziyor' ($p95Row.Note -like '*ortanca*') $p95Row.Note
+Assert-True 'Kiyasa giren sunucu sayisi notta' ($p95Row.Note -like '*3 sunucu kiyaslandi*') $p95Row.Note
+Assert-Equal 'Sapan sunucunun hucresi yesil kalmiyor' 'WARN' $p95Row.CellStatus['SRV3']
+Assert-Equal 'Kiyasa giren saglikli sunucu OK' 'OK' $p95Row.CellStatus['SRV1']
+Assert-Equal 'P1 satiri bulgu tablosuna giriyor' 'WARN' $p95Row.Status
+
+# 1c-3. SINIRIN TAM USTU: en yavas / ortanca = 3.0. Esik '>= 3' oldugu icin
+# bu senaryo POZITIFTIR. Esik yukari kaydirilirsa (3 -> 300, hatta 3 -> 4)
+# burasi kirmizi olur.
+$context = New-PatternContext -Servers $servers3
+Set-AnalysisCache -Context $context -Analyses @(
+    (New-Analysis -Server 'SRV1' -P95 2 -Count 5000),
+    (New-Analysis -Server 'SRV2' -P95 2 -Count 5000),
+    (New-Analysis -Server 'SRV3' -P95 6 -Count 5000)
+)
+$rows = @(& $m10.Run $context)
+$p95Row = Get-EDTestRow $rows 'Teslim gecikmesi p95'
+Assert-True 'Tam 3.0x sinirinda P1 KURULUYOR' ($p95Row.Note -like '*ORGU P1*') $p95Row.Note
+Assert-True 'Sinirdaki sapan da adiyla geciyor' ($p95Row.Note -like '*SRV3 diger sunuculardan*') $p95Row.Note
+
+# 1c-4. SINIRIN ALTI: 2.5x. YANLIS YAKALAMAMAK da orgu testinin isidir -
+# esik asagi kaydirilirsa (3 -> 1, 3 -> 2) burasi kirmizi olur.
+$context = New-PatternContext -Servers $servers3
+Set-AnalysisCache -Context $context -Analyses @(
+    (New-Analysis -Server 'SRV1' -P95 2 -Count 5000),
+    (New-Analysis -Server 'SRV2' -P95 2 -Count 5000),
+    (New-Analysis -Server 'SRV3' -P95 5 -Count 5000)
+)
+$rows = @(& $m10.Run $context)
+$p95Row = Get-EDTestRow $rows 'Teslim gecikmesi p95'
+Assert-True '2.5x fark ORGU P1 ilan ETTIRMIYOR' ($p95Row.Note -notlike '*ORGU P1*') $p95Row.Note
+Assert-Equal 'Sapmayan ortamda satir OK kaliyor' 'OK' $p95Row.Status
+Assert-Equal 'En yavas sunucunun hucresi de OK' 'OK' $p95Row.CellStatus['SRV3']
+
+# 1c-5. CIFT SAYIDA SUNUCU: ortanca iki ortadakinin ORTALAMASIDIR.
+# (2 + 4) / 2 = 3 -> 30 / 3 = 10x. Ortanca indeksi tek elemana kayarsa
+# (eski kusur) payda 2 ya da 4 olur ve oran degisir; bu senaryo o kaymayi
+# gorunur kilar.
+$servers4 = @(
+    (New-PatternServer 'SRV1'), (New-PatternServer 'SRV2'),
+    (New-PatternServer 'SRV3'), (New-PatternServer 'SRV4')
+)
+$context = New-PatternContext -Servers $servers4
+Set-AnalysisCache -Context $context -Analyses @(
+    (New-Analysis -Server 'SRV1' -P95 2  -Count 5000),
+    (New-Analysis -Server 'SRV2' -P95 2  -Count 5000),
+    (New-Analysis -Server 'SRV3' -P95 4  -Count 5000),
+    (New-Analysis -Server 'SRV4' -P95 30 -Count 5000)
+)
+$rows = @(& $m10.Run $context)
+$p95Row = Get-EDTestRow $rows 'Teslim gecikmesi p95'
+Assert-True 'Dort sunucuda P1 tetikleniyor' ($p95Row.Note -like '*SRV4 diger sunuculardan*') $p95Row.Note
+Assert-True 'Dort sunucunun hepsi kiyasa girdi' ($p95Row.Note -like '*4 sunucu kiyaslandi*') $p95Row.Note
+Assert-True 'Cift sayida sunucuda ortanca ORTALAMA aliniyor (10x)' `
+    ($p95Row.Note -like '*10x yavas*') $p95Row.Note
+
+# 1c-6. UC SUNUCU + PASIF SITE: pasif sunucu kiyas kumesinden CIKARILINCA
+# geriye kalan IKI sunucu DOGRUDAN kiyasa duser. Yani "kim kiyasa girer"
+# kurali, hangi kolun calisacagini da belirler; bu iki kural birbirine
+# baglidir ve birlikte sinanmalidir.
+$context = New-PatternContext -Servers $serversPassive
+Set-AnalysisCache -Context $context -Analyses @(
+    (New-Analysis -Server 'SRV1' -P95 2  -Count 5000),
+    (New-Analysis -Server 'SRV2' -P95 30 -Count 5000),
+    (New-Analysis -Server 'DR01' -P95 2  -Count 5000)
+)
+$rows = @(& $m10.Run $context)
+$p95Row = Get-EDTestRow $rows 'Teslim gecikmesi p95'
+Assert-True 'Pasif sunucu disarida kalinca DOGRUDAN kiyas kuruluyor' `
+    ($p95Row.Note -like '*ortanca yoktur*') $p95Row.Note
+Assert-True 'Sapan sunucu yine adiyla geciyor' ($p95Row.Note -like '*SRV2 sunucusu*') $p95Row.Note
+Assert-True 'Kiyas disi kalan pasif sunucu adlandirilmis' `
+    ($p95Row.Note -like '*Kiyas disi birakilan sunucular: DR01*') $p95Row.Note
+
 # ===========================================================================
 Write-Host "`n=== 1d. M11: zincir hic kurulamadiginda TESHIS dogru olmali ===" -ForegroundColor Cyan
 
@@ -562,6 +665,101 @@ Assert-Equal 'Yogun saatteki tepe WARN' 'WARN' $ratioRow.Status
 Assert-True 'Kapasite iddiasi kuruluyor' ($ratioRow.Note -like '*kapasite/eszamanlilik siniri suphesi*') $ratioRow.Note
 Assert-True 'M16/M14 yonlendirmesi var' ($ratioRow.Note -like '*M16*') $ratioRow.Note
 
+# ---------------------------------------------------------------------------
+# 2c .. 2e: P7'NIN GURULTU KAPISI (saat basina en az teslim)
+#
+# NEDEN AYRICA GEREKTI (olculdu):
+# M13'te iki kapi vardir - '$minimumHours = 6' (kac farkli saat) ve
+# '$minimumSamples = 20' (saat basina en az teslim). Yalnizca birincisi
+# korunuyordu: '$minimumSamples = 20' degeri 1 yapildiginda paketin TAMAMI
+# YESIL kaliyordu. Oysa brief'in P7 icin YAZDIGI cumle tam olarak bu kapidir -
+# "trafigin binde birini tasiyan 03:00 saatini yogun saat ilan edip operatoru
+# MaxConcurrentMailboxDeliveries ayarina yonlendirmek".
+#
+# Kapi IKI TARAFTAN sikistirilir: 5 teslimlik saat kirilima GIRMEMELI (2c),
+# tam 20 teslimlik saat GIRMELI (2d). Boylece hem esigin dusurulmesi hem de
+# yukseltilmesi kirmizi olur.
+
+# 2c. NEGATIF: 03:00'te 5 teslim var ve biri felaket yavas. Bu saat gurultu
+# kapisinin ALTINDA oldugu icin kirilima HIC girmemeli; geriye kalan 6 saat
+# birbirine esit oldugundan hicbir tepe iddia edilmemeli.
+$context = New-PatternContext -Servers @((New-PatternServer 'SRV1'))
+$noisyHour = New-HourlyAnalysis -Server 'SRV1' -HoursSpec @{
+    3  = @{ P95 = 200; Count = 5 }
+    9  = @{ P95 = 2.5; Count = 900 }
+    10 = @{ P95 = 2.5; Count = 900 }
+    11 = @{ P95 = 2.5; Count = 900 }
+    12 = @{ P95 = 2.5; Count = 900 }
+    13 = @{ P95 = 2.5; Count = 900 }
+    14 = @{ P95 = 2.5; Count = 900 }
+}
+Set-AnalysisCache -Context $context -Analyses @($noisyHour)
+$rows = @(& $m13.Run $context)
+$ratioRow = Get-EDTestRow $rows 'Yogun/sakin p95 orani'
+$peakRow = Get-EDTestRow $rows 'Yogun saat (yerel)'
+Assert-True 'Oran satiri uretildi' ($null -ne $ratioRow) 'satir'
+if ($null -eq $ratioRow -or $null -eq $peakRow) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True '5 teslimlik saat TEPE ilan EDILMIYOR' ($peakRow.Values['SRV1'] -ne '03:00') $peakRow.Values['SRV1']
+    Assert-True 'Gurultu saati icin tepe notu kurulmuyor' ($ratioRow.Note -notlike '*03:00*') $ratioRow.Note
+    Assert-Equal 'Gurultuden WARN uretilmiyor' 'OK' $ratioRow.Status
+    Assert-True 'Kapasite iddiasi da kurulmuyor' `
+        ($ratioRow.Note -notlike '*kapasite/eszamanlilik siniri suphesi*') $ratioRow.Note
+    Assert-True 'Aranan en az ornek sayisi notta yaziyor' ($ratioRow.Note -like '*en az 20 ornek*') $ratioRow.Note
+}
+
+# 2d. POZITIF SINIR: saat basina TAM 20 teslim gurultu degildir, kirilima
+# GIRER. Alti saatin hepsi 20 teslimlik oldugu icin tepe saat ayni zamanda
+# hacim ortancasindadir; kapasite iddiasi da kurulur. Esik yukari kaydirilirsa
+# (20 -> 21, 20 -> 100) hicbir saat kalmaz ve burasi kirmizi olur.
+$context = New-PatternContext -Servers @((New-PatternServer 'SRV1'))
+$exactGate = New-HourlyAnalysis -Server 'SRV1' -HoursSpec @{
+    9  = @{ P95 = 2.5; Count = 20 }
+    10 = @{ P95 = 2.5; Count = 20 }
+    11 = @{ P95 = 2.5; Count = 20 }
+    12 = @{ P95 = 2.5; Count = 20 }
+    13 = @{ P95 = 60;  Count = 20 }
+    14 = @{ P95 = 2.5; Count = 20 }
+}
+Set-AnalysisCache -Context $context -Analyses @($exactGate)
+$rows = @(& $m13.Run $context)
+$ratioRow = Get-EDTestRow $rows 'Yogun/sakin p95 orani'
+$peakRow = Get-EDTestRow $rows 'Yogun saat (yerel)'
+# SATIRIN VARLIGI DA BIR IDDIADIR: esik yukari kaydirilirsa kirilim hic
+# kurulmaz ve oran satiri uretilmez. Bunu sessizce "atlandi" diye gecmek,
+# mutasyonun tam da yakalanmasi gereken yerde gorunmez kalmasi demektir.
+Assert-True 'Tam 20 teslimlik saatlerden kirilim satiri uretiliyor' ($null -ne $ratioRow) 'satir'
+if ($null -eq $ratioRow -or $null -eq $peakRow) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-Equal 'Tam 20 teslimlik saatler kirilima giriyor' '13:00' $peakRow.Values['SRV1']
+    Assert-Equal 'Sinirdaki ornekten de WARN uretiliyor' 'WARN' $ratioRow.Status
+    Assert-True 'Sinirdaki ornekte kapasite iddiasi kuruluyor' `
+        ($ratioRow.Note -like '*kapasite/eszamanlilik siniri suphesi*') $ratioRow.Note
+}
+
+# 2e. NEGATIF: gurultu kapisini gecen saat sayisi altinin ALTINDA kalirsa
+# (bes saat) dagilim iddia EDILMEZ. Iki kapi ayri ayri calismalidir; biri
+# digerinin yerine gecemez.
+$context = New-PatternContext -Servers @((New-PatternServer 'SRV1'))
+$fiveHours = New-HourlyAnalysis -Server 'SRV1' -HoursSpec @{
+    9  = @{ P95 = 2.5; Count = 900 }
+    10 = @{ P95 = 2.5; Count = 900 }
+    11 = @{ P95 = 2.5; Count = 900 }
+    12 = @{ P95 = 2.5; Count = 900 }
+    13 = @{ P95 = 60;  Count = 900 }
+}
+Set-AnalysisCache -Context $context -Analyses @($fiveHours)
+$rows = @(& $m13.Run $context)
+$shortRow = @($rows)[0]
+Assert-Equal 'Bes saatten dagilim cikarilmiyor' 'N/A' $shortRow.Status
+Assert-True 'Gerekce (en az 6 saat) notta' ($shortRow.Note -like '*en az 6 farkli saatte 20+ teslim*') $shortRow.Note
+Assert-True 'Yetersiz orneklemden tepe uydurulmadigi yaziyor' `
+    ($shortRow.Note -like '*Yetersiz orneklemden tepe saat uydurulmaz*') $shortRow.Note
+
 # ===========================================================================
 Write-Host "`n=== 3. M13: 'yetersiz ornek' ile 'okuma basarisiz' AYNI SEY DEGIL ===" -ForegroundColor Cyan
 
@@ -636,6 +834,158 @@ else {
     Assert-Equal 'Kismi okumadan cikan hukum OK kalmiyor' 'WARN' $ratioRow.Status
     Assert-True 'Kismi okuma notta soyleniyor' ($ratioRow.Note -like '*PENCERE KISMI*') $ratioRow.Note
     Assert-True 'Kismi okumada da cozum DARALTMAK' ($ratioRow.Note -like '*DARALT*') $ratioRow.Note
+}
+
+# ===========================================================================
+Write-Host "`n=== 4. ORGU P3: yogunlasma esigi DB SAYISINA gore normalize ===" -ForegroundColor Cyan
+
+# NEDEN BU PAKETTE (olculdu):
+# M12'nin yogunlasma esigi min(max(100/N * 2, 50), 80) formuludur ve
+# kirpma sinirlari ('50' tabani, '80' tavani) hicbir test tarafindan
+# tutulmuyordu: '..., 50), 80)' -> '..., 5), 8)' mutasyonu paketi YESIL
+# birakiyordu. Yani iki DB'li bir ortamda %50 esiginin MATEMATIKSEL
+# GARANTISI geri gelse - brief'in bizzat duzeltmek icin yazdigi kusur -
+# arac her kosumda "kok neden DB seviyesinde" der ve operatoru M22/M23/M24'e
+# yollardi.
+#
+# Canli paket (Test-LatencyModules.ps1) bu kolu kuramaz: lab ortaminda tek
+# veritabani vardir, oysa esik ancak 2+ DB varken ve N'e gore DEGISEREK
+# anlamlidir. Bu yuzden esleme yolu burada sahte yurutucu ile kurulur.
+
+$m12 = @(Get-EDModules -Id 'M12')[0]
+
+function New-SlowRecipientAnalysis {
+    <#
+        Yavas teslimleri alici bazinda tasiyan bir analiz uretir.
+        $RecipientCounts: alici adresi -> o alicidaki yavas teslim sayisi.
+        $TotalSlow verilirse "eslestirilebilen alt kume" ile "tum yavas
+        teslimler" ayrisir; M12'nin orneklem uyarisi bu farktan dogar.
+    #>
+    param([string]$Server, [hashtable]$RecipientCounts, [long]$TotalSlow = 0)
+
+    $analysis = New-Analysis -Server $Server -P95 120 -Count 5000
+    $sum = [long]0
+    foreach ($address in @($RecipientCounts.Keys | Sort-Object)) {
+        $entry = New-Object ExchangeDiag.RecipientLatency
+        $entry.Recipient = $address
+        $entry.Count = [long]$RecipientCounts[$address]
+        $entry.MaxSeconds = 300
+        $entry.SumSeconds = 120 * [double]$entry.Count
+        $analysis.SlowRecipients.Add($entry)
+        $sum += $entry.Count
+    }
+    $analysis.SlowThresholdSeconds = 60
+    $analysis.SlowDeliveryCount = $(if ($TotalSlow -gt 0) { $TotalSlow } else { $sum })
+    return $analysis
+}
+
+function New-P3Context {
+    <# Alici -> veritabani eslemesini sahte Exchange kanalindan dondurur. #>
+    param([hashtable]$DatabaseByRecipient)
+    $ctx = New-PatternContext -Servers @((New-PatternServer 'SRV1'))
+    $map = @{}
+    foreach ($key in $DatabaseByRecipient.Keys) { $map[$key.ToLowerInvariant()] = $DatabaseByRecipient[$key] }
+    $ctx.Executor = New-EDMockExecutor -ResponsesByCommand @{
+        'Get-Recipient' = {
+            param($Key, $Identity)
+            $database = $map[([string]$Key).ToLowerInvariant()]
+            if (-not $database) { return @() }
+            return @([pscustomobject]@{
+                Name = $Key; PrimarySmtpAddress = $Key; Database = $database
+                RecipientType = 'UserMailbox'; RecipientTypeDetails = 'UserMailbox'
+            })
+        }.GetNewClosure()
+    }
+    return $ctx
+}
+
+function Get-P3Row {
+    param($DatabaseByRecipient, $RecipientCounts, [long]$TotalSlow = 0)
+    $ctx = New-P3Context -DatabaseByRecipient $DatabaseByRecipient
+    Set-AnalysisCache -Context $ctx -Analyses @(
+        (New-SlowRecipientAnalysis -Server 'SRV1' -RecipientCounts $RecipientCounts -TotalSlow $TotalSlow)
+    )
+    return (Get-EDTestRow @(& $m12.Run $ctx) 'Yavas teslim (aktif DB')
+}
+
+# 4a. IKI DB, %55 / %45. Beklenen pay %50, esik min(max(100,50),80) = %80.
+# YANLIS YAKALAMAMA TESTI: dengeye yakin bir dagilim yogunlasma DEGILDIR.
+# Esik tabani/tavani dusurulurse (50/80 -> 5/8) burasi FAIL'e doner.
+$p3Row = Get-P3Row -DatabaseByRecipient @{ 'u1@x.local' = 'DB01'; 'u2@x.local' = 'DB02' } `
+    -RecipientCounts @{ 'u1@x.local' = 55; 'u2@x.local' = 45 }
+Assert-True 'M12 satiri uretildi' ($null -ne $p3Row) 'satir'
+if ($null -eq $p3Row) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True 'Iki DB de %55 pay ORGU P3 ilan ETTIRMIYOR' ($p3Row.Note -notlike '*ORGU P3*') $p3Row.Note
+    Assert-Equal 'Dengeli dagilim FAIL uretmiyor' 'WARN' $p3Row.Status
+    Assert-True 'Beklenen pay notta yaziyor' ($p3Row.Note -like '*beklenen pay %50*') $p3Row.Note
+    Assert-True 'Tek DB kok neden gibi gorunmuyor deniyor' ($p3Row.Note -like '*Tek bir DB kok neden gibi gorunmuyor*') $p3Row.Note
+}
+
+# 4b. IKI DB, %85 / %15: TAVAN (%80) asildi -> P3 kurulur.
+# Tavan yukari kaydirilirsa (80 -> 90) burasi kirmizi olur.
+$p3Row = Get-P3Row -DatabaseByRecipient @{ 'u1@x.local' = 'DB01'; 'u2@x.local' = 'DB02' } `
+    -RecipientCounts @{ 'u1@x.local' = 85; 'u2@x.local' = 15 } -TotalSlow 10300
+if ($null -eq $p3Row) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True 'Tavani asan pay ORGU P3 kuruyor' ($p3Row.Note -like '*ORGU P3*') $p3Row.Note
+    Assert-Equal 'Yogunlasma FAIL uretiyor' 'FAIL' $p3Row.Status
+    Assert-True 'Iki DB ortaminda esik %80 olarak yaziyor' ($p3Row.Note -like '*esik %80*') $p3Row.Note
+    Assert-True 'Yogunlasan DB adiyla geciyor' ($p3Row.Note -like '*(DB01)*') $p3Row.Note
+    # ORNEKLEM UYARISI CUMLENIN ICINDE: 10.300 yavas teslimin yalnizca 100'u
+    # eslestirilebildi; yuzde o alt kumeye aittir.
+    Assert-True 'Oranin ESLESTIRILEBILEN alt kumeye ait oldugu yaziyor' `
+        ($p3Row.Note -like '*ESLESTIRILEBILEN 100 teslimin*') $p3Row.Note
+    Assert-True 'Tum yavas teslim sayisi da veriliyor' ($p3Row.Note -like '*10300*') $p3Row.Note
+    Assert-True 'Sonraki adim M22/M23/M24 olarak gosterilmis' ($p3Row.Note -like '*M22*') $p3Row.Note
+}
+
+# 4c. ON DB, en yuksek pay %30. Beklenen pay %10, iki kati %20, ama TABAN
+# %50'dir -> iddia kurulmaz. Taban dusurulurse (50 -> 5) burasi FAIL'e doner:
+# cok sayida DB'li bir ortamda %30 zaten beklenenin uzerindedir ama
+# yogunlasma diye rapor edilmesi operatoru yanlis yere yollar.
+$manyCounts = @{
+    'a1@x.local' = 30; 'a2@x.local' = 8; 'a3@x.local' = 8; 'a4@x.local' = 8
+    'a5@x.local' = 8;  'a6@x.local' = 8; 'a7@x.local' = 8; 'a8@x.local' = 8
+    'a9@x.local' = 7;  'a10@x.local' = 7
+}
+$manyMap = @{}
+$index = 0
+foreach ($address in @($manyCounts.Keys | Sort-Object)) {
+    $index++
+    $manyMap[$address] = ('DB{0:00}' -f $index)
+}
+# En buyuk payin hangi DB'de oldugu belirli olmali: a1 -> kendi DB'si.
+$p3Row = Get-P3Row -DatabaseByRecipient $manyMap -RecipientCounts $manyCounts
+if ($null -eq $p3Row) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True 'On DB de %30 pay ORGU P3 ilan ETTIRMIYOR' ($p3Row.Note -notlike '*ORGU P3*') $p3Row.Note
+    Assert-Equal 'Taban altindaki pay FAIL uretmiyor' 'WARN' $p3Row.Status
+    Assert-True 'Beklenen pay DB sayisina gore hesaplanmis' ($p3Row.Note -like '*beklenen pay %10*') $p3Row.Note
+    Assert-True 'Yayilma sayisi notta' ($p3Row.Note -like '*10 veritabanina yayilmis*') $p3Row.Note
+}
+
+# 4d. ON DB, en yuksek pay %55: TABAN (%50) asildi -> P3 kurulur.
+# Taban yukari kaydirilirsa (50 -> 60) burasi kirmizi olur.
+$manyCounts = @{
+    'a1@x.local' = 55; 'a2@x.local' = 5; 'a3@x.local' = 5; 'a4@x.local' = 5
+    'a5@x.local' = 5;  'a6@x.local' = 5; 'a7@x.local' = 5; 'a8@x.local' = 5
+    'a9@x.local' = 5;  'a10@x.local' = 5
+}
+$p3Row = Get-P3Row -DatabaseByRecipient $manyMap -RecipientCounts $manyCounts
+if ($null -eq $p3Row) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True 'Tabani asan pay ORGU P3 kuruyor' ($p3Row.Note -like '*ORGU P3*') $p3Row.Note
+    Assert-Equal 'Cok DB li ortamda da yogunlasma FAIL' 'FAIL' $p3Row.Status
+    Assert-True 'On DB ortaminda esik %50 olarak yaziyor' ($p3Row.Note -like '*esik %50*') $p3Row.Note
 }
 
 # ===========================================================================
