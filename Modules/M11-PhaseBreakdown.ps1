@@ -280,13 +280,16 @@ Register-EDModule @{
             -Status $phaseStatus -Patterns @('P2') -Note $note
         # Faz p95 satirlari da ayni eksik pencereden geliyor.
         $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
+        # Brief P2'yi iki sayiyla tanimlar: baskin fazin Store olmasi VE uctan
+        # uca p95'in buyukluk tabanini asmasi. Iddiayi tasiyan iki satir da
+        # etiketlenir, yoksa okuyucu hukmun neye dayandigini goremez.
         $rows += New-EDRow -Module 'M11' -Check 'Store fazi p95 (DeliveryToMailbox)' -Values $storeValues -Unit 'sn' -Status 'OK' `
-            -Note ($partialTag + 'DELIVER ile Mailbox Transport Delivery RECEIVE arasi. Yuksekse sorun Store icinde.')
+            -Patterns @('P2') -Note ($partialTag + 'DELIVER ile Mailbox Transport Delivery RECEIVE arasi. Yuksekse sorun Store icinde.')
         $rows += New-EDRow -Module 'M11' -Check 'Transport fazi p95' -Values $transportValues -Unit 'sn' -Status 'OK' `
             -Note ($partialTag + 'Transport RECEIVE ile Mailbox RECEIVE arasi: kategorize + kuyruk.')
         $rows += New-EDRow -Module 'M11' -Check 'Ingress fazi p95' -Values $ingressValues -Unit 'sn' -Status 'OK' `
             -Note ($partialTag + 'Gonderim ile Transport RECEIVE arasi: ag ve yukari akis; cogu zaman bizim disimizda.')
-        $rows += New-EDRow -Module 'M11' -Check 'Uctan uca p95' -Values $totalValues -Unit 'sn' -Status 'OK' -Note $partialTag
+        $rows += New-EDRow -Module 'M11' -Check 'Uctan uca p95' -Values $totalValues -Unit 'sn' -Status 'OK' -Patterns @('P2') -Note $partialTag
         $rows += New-EDRow -Module 'M11' -Check 'Birlestirilen mesaj' -Values $messageCounts -Unit 'adet' -Status 'OK' -Note $partialTag
         $rows += $coverageRow
 

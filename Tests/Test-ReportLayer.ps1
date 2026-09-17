@@ -238,6 +238,112 @@ $zero = Invoke-EDEntry @('-Quick', '-WindowHours', '0', '-OutputRoot', $runRoot,
 Assert-Equal 'Sifir pencere sessizce config degeriyle degistirilmiyor' 3 $zero.ExitCode
 
 # ===========================================================================
+Write-Host "`n=== 9. Orgu etiketi operatorun GORDUGU yere ulasiyor ===" -ForegroundColor Cyan
+
+# Satirlar P1-P8 etiketini tasiyordu ama rapor bu alani HIC okumuyordu:
+# brief'in merkezindeki orgu kavrami olu meta veriydi. Etiket tek basina da
+# yetmez - 'P6' yazan bir hucre operatore hicbir sey soylemez.
+$patternRows = @(
+    New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p95' -Values @{ MBX1 = 42 } -Unit 'sn' `
+        -Status 'WARN' -Patterns @('P1', 'P6') -Note 'MBX1 ortancanin 4 kati.'
+    New-EDRow -Module 'M14' -Check 'Kuyruk derinligi' -Values @{ MBX1 = 900 } -Unit 'adet' `
+        -Status 'FAIL' -Note 'Kuyruk esigi asti.'
+    New-EDRow -Module 'M97' -Check 'Bilinmeyen etiket' -Values @{ MBX1 = 1 } -Status 'WARN' -Patterns @('P99')
+)
+
+$patternCsv = Join-Path $script:Root 'SUMMARY-orgu.csv'
+Export-EDSummaryCsv -Rows $patternRows -Columns @('MBX1') -Path $patternCsv | Out-Null
+$patternBack = @(Import-Csv -LiteralPath $patternCsv -Encoding UTF8)
+
+Assert-True 'CSV: orgu etiketi satirda gorunuyor' ($patternBack[0].Not -match 'P1') $patternBack[0].Not
+Assert-True 'CSV: ikinci orgu de yazildi (tek orgu varsayilmiyor)' ($patternBack[0].Not -match 'P6') $patternBack[0].Not
+Assert-True 'CSV: etiketin ne anlama geldigi de yazildi' ($patternBack[0].Not -like '*tail olayi*') $patternBack[0].Not
+Assert-True 'CSV: satirin kendi notu kaybolmadi' ($patternBack[0].Not -like '*ortancanin 4 kati*') $patternBack[0].Not
+# Orgusu olmayan satira 'YOK'/'-' gibi bir doldurma degeri YAZILMAZ.
+Assert-Equal 'CSV: orgusuz satirin notu dokunulmadan geciyor' 'Kuyruk esigi asti.' $patternBack[1].Not
+Assert-Equal 'CSV: bilinmeyen etikete anlam uydurulmuyor' '[ORGU P99]' $patternBack[2].Not
+
+$patternHtml = Get-ReportHtml -Rows $patternRows -Columns @('MBX1')
+Assert-True 'HTML: bulgu tablosunda Orgu sutunu var' ($patternHtml -match '<th>Orgu</th>') 'bulgu tablosu basligi'
+Assert-True 'HTML: etiket ve anlami bulgu satirinda' ($patternHtml -like '*P1: Bir sunucunun teslim gecikmesi*') 'P1 hucresi'
+Assert-True 'HTML: ikinci orgu de gorunuyor' ($patternHtml -like '*P6: Ortalama dusuk*') 'P6 hucresi'
+Assert-True 'HTML: orgusuz bulgunun hucresi BOS' ($patternHtml -match '<td class="orgu"></td>') 'uydurma deger yok'
+Assert-True 'HTML: bilinmeyen etiket ciplak yaziliyor' ($patternHtml -match '<td class="orgu">P99</td>') 'anlam uydurulmuyor'
+
+# Aciklamalar TEK sozlukten gelmelidir: her modul kendi cumlesini yazarsa
+# ayni orgu raporda iki farkli anlamla cikar.
+$reportText = Get-Content -LiteralPath (Join-Path $projectRoot 'Core\Report.ps1') -Raw -Encoding UTF8
+$modulePaths = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Modules') -Filter 'M*.ps1' -File)
+$duplicated = @()
+foreach ($id in @('P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8')) {
+    $description = Get-EDPatternDescription -Pattern $id
+    if (-not $description) { $duplicated += "$id : sozlukte anlami yok"; continue }
+    if ($reportText -like "*$description*") { $duplicated += "$id : Report.ps1" }
+    foreach ($file in $modulePaths) {
+        if ((Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8) -like "*$description*") {
+            $duplicated += ("{0} : {1}" -f $id, $file.Name)
+        }
+    }
+}
+Assert-Equal 'Orgu aciklamasi tek yerde tutuluyor' 0 $duplicated.Count
+
+# ===========================================================================
+Write-Host "`n=== 10. Brief'in modul tablosu ile orgu beyanlari ===" -ForegroundColor Cyan
+
+Reset-EDModuleRegistry
+Import-EDModules -ModuleRoot (Join-Path $projectRoot 'Modules')
+
+# Brief Bolum 6, modul tablosunun orgu sutunu. Kodda beyan edilmeyen bir
+# eslesme, raporda hic gorunmeyen bir orgu demektir.
+$briefPatterns = [ordered]@{
+    M10 = @('P1', 'P6'); M11 = @('P2'); M12 = @('P3'); M13 = @('P7')
+    M20 = @('P4');       M21 = @('P4'); M22 = @('P5'); M32 = @('P8')
+}
+$missingDeclarations = @()
+foreach ($id in $briefPatterns.Keys) {
+    $module = @(Get-EDModules -Id $id)
+    if ($module.Count -eq 0) { $missingDeclarations += "$id : modul kayitli degil"; continue }
+    foreach ($pattern in $briefPatterns[$id]) {
+        if ($pattern -notin @($module[0].Patterns)) { $missingDeclarations += "$id : $pattern" }
+    }
+}
+Assert-Equal 'Brief tablosundaki orguler modullerde beyan edilmis' 0 $missingDeclarations.Count
+
+$unknownDeclarations = @()
+foreach ($module in @(Get-EDModules)) {
+    foreach ($pattern in @($module.Patterns)) {
+        if (-not (Get-EDPatternDescription -Pattern $pattern)) {
+            $unknownDeclarations += ("{0} : {1}" -f $module.Id, $pattern)
+        }
+    }
+}
+Assert-Equal 'Beyan edilen her etiketin sozlukte anlami var' 0 $unknownDeclarations.Count
+
+# Modul duzeyinde beyan yetmez: orguyu KURAN satir etiketi tasimazsa, bulgu
+# tablosunda orgu yine gorunmez. Asagidaki satirlarin her biri brief'in
+# ilgili orguyu tanimlarken adiyla saydigi olcumdur.
+$expectedRowPatterns = @(
+    @{ File = 'M10-LatencyPercentile.ps1';     Check = 'Ortalama (tek basina YANILTIR)'; Pattern = 'P6' }
+    @{ File = 'M11-PhaseBreakdown.ps1';        Check = 'Store fazi p95 (DeliveryToMailbox)'; Pattern = 'P2' }
+    @{ File = 'M11-PhaseBreakdown.ps1';        Check = 'Uctan uca p95'; Pattern = 'P2' }
+    @{ File = 'M12-SlowDeliveryDatabases.ps1'; Check = 'Yavas teslim (veritabani bazinda)'; Pattern = 'P3' }
+    @{ File = 'M13-HourlyDistribution.ps1';    Check = 'Yogun saat p95'; Pattern = 'P7' }
+    @{ File = 'M13-HourlyDistribution.ps1';    Check = 'Sakin saat p95'; Pattern = 'P7' }
+    @{ File = 'M21-DiskLatency.ps1';           Check = 'Disk kuyrugu p95 (ayni volume)'; Pattern = 'P4' }
+    @{ File = 'M32-ActiveCopyBalance.ps1';     Check = 'Tercih disi aktif DB'; Pattern = 'P8' }
+)
+foreach ($expected in $expectedRowPatterns) {
+    $text = Get-Content -LiteralPath (Join-Path $projectRoot ('Modules\' + $expected.File)) -Raw -Encoding UTF8
+    # Satir kurulumu birden fazla kaynak satirina yayilabilir; metin
+    # New-EDRow cagrilarina bolunup yalnizca ilgili parca sorgulanir.
+    $chunks = @($text -split 'New-EDRow' | Where-Object { $_ -like ("*-Check '" + $expected.Check + "'*") })
+    $tagged = @($chunks | Where-Object { $_ -match ("-Patterns\s+@\([^)]*'" + [regex]::Escape($expected.Pattern) + "'") })
+    Assert-True ("{0} / {1} satiri {2} tasiyor" -f ($expected.File -replace '-.*$', ''), $expected.Check, $expected.Pattern) `
+        ($chunks.Count -gt 0 -and $tagged.Count -eq $chunks.Count) `
+        ("{0} satir kurulumu, {1} tanesi etiketli" -f $chunks.Count, $tagged.Count)
+}
+
+# ===========================================================================
 Write-EDTestSummary
 Remove-Item -Path $script:Root -Recurse -Force -ErrorAction SilentlyContinue
 if (Get-EDTestFailed -gt 0) { exit 1 }

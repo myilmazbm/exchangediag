@@ -568,6 +568,105 @@ function Get-EDUnknownModuleIds {
 }
 
 # ---------------------------------------------------------------------------
+# Orgu (P1-P8) sozlugu
+# ---------------------------------------------------------------------------
+
+# Brief Bolum 3'teki orgu tablosunun TEK kopyasi.
+#
+# NEDEN BURADA: satirlar 'P6' gibi ciplak bir etiket tasiyordu ve etiketin
+# anlami yalnizca brief'te duruyordu. Raporu okuyan operator brief'i acmak
+# zorunda kalirsa etiket bir sey ANLATMAZ. Aciklamalar modul dosyalarina
+# dagitilsaydi ayni orgu iki modulde iki farkli cumleyle cikardi; oysa
+# orgunun anlami modulun degil brief'in tanimidir.
+$script:EDPatternDescriptions = [ordered]@{
+    P1 = 'Bir sunucunun teslim gecikmesi digerlerinden kat kat yuksek - sunucuya ozgu sorun, topoloji degil'
+    P2 = 'Gecikme DeliveryToMailbox fazinda yogunlasiyor - darbogaz transportta degil Store tarafinda'
+    P3 = 'Gecikmeli teslimlerin alicilari belirli veritabanlarinda toplaniyor - kok neden DB seviyesinde'
+    P4 = 'Yuksek RPC Average Latency + saglikli disk + dusuk kuyruk - darbogaz depolamada degil Store icinde'
+    P5 = 'Ayni volume/LUN uzerindeki veritabanlari birbirini dolayli etkiliyor - paylasilan kaynak'
+    P6 = 'Ortalama dusuk, p95/p99 cok yuksek - sorun bir tail olayi, ortalamaya bakan kacirir'
+    P7 = 'Yogun saatte tepe, sakin saatte normal - kapasite/eszamanlilik siniri'
+    P8 = 'Aktif kopyalar ActivationPreference disinda dagilmis - failover sonrasi dengelenmemis yuk'
+}
+
+function Get-EDPatternDescription {
+<#
+    .SYNOPSIS
+        Orgu etiketinin brief'teki anlamini dondurur.
+
+    .DESCRIPTION
+        BILINMEYEN ETIKETE ANLAM UYDURULMAZ: sozlukte olmayan bir kimlik icin
+        bos metin doner ve cagiran taraf yalnizca etiketi yazar. Yanlis bir
+        aciklama, hic aciklama olmamasindan daha kotudur - operatoru baska bir
+        teshise goturur.
+#>
+    [CmdletBinding()]
+    param([AllowNull()][string]$Pattern)
+
+    if (-not $Pattern) { return '' }
+    $key = $Pattern.Trim()
+    if (-not $script:EDPatternDescriptions.Contains($key)) { return '' }
+    return [string]$script:EDPatternDescriptions[$key]
+}
+
+function Get-EDRowPatterns {
+<#
+    .SYNOPSIS
+        Satirin orgu etiketlerini guvenle okur.
+
+    .DESCRIPTION
+        Rapor katmani elle kurulmus satirlarla da karsilasabilir (testler,
+        cekirdek satirlari). StrictMode altinda olmayan bir alana erismek
+        exception firlatir ve bu, TUM raporu ciktisiz birakan sinif bir
+        hatadir (bkz. Get-EDModuleResultRows). Alan yoksa bos dizi doner:
+        orgusuz satir gecerli bir satirdir.
+#>
+    [CmdletBinding()]
+    param([AllowNull()]$Row)
+
+    if ($null -eq $Row) { return @() }
+    if ($null -eq $Row.PSObject.Properties['Patterns']) { return @() }
+    if ($null -eq $Row.Patterns) { return @() }
+    return @($Row.Patterns | Where-Object { $_ })
+}
+
+function Get-EDPatternLines {
+<#
+    .SYNOPSIS
+        Etiketleri "P6: anlami" bicimindeki satirlara cevirir.
+
+    .DESCRIPTION
+        Bir satirin BIRDEN FAZLA orgusu olabilir (ornegin M10 p95 satiri hem
+        P1 hem P6 tasir); bu yuzden tek metin degil LISTE dondurulur ve
+        birlestirme bicimini cikti katmani secer (HTML'de satir sonu, CSV'de
+        ayrac). Orgusu olmayan satir icin bos liste doner - 'YOK' ya da '-'
+        gibi bir doldurma degeri YAZILMAZ; olmayan seye deger uydurmamak bu
+        aracin temel kurali.
+#>
+    [CmdletBinding()]
+    param([AllowNull()][string[]]$Patterns)
+
+    $lines = @()
+    foreach ($pattern in @($Patterns)) {
+        if (-not $pattern) { continue }
+        $description = Get-EDPatternDescription -Pattern $pattern
+        if ($description) { $lines += ("{0}: {1}" -f $pattern.Trim(), $description) }
+        else { $lines += $pattern.Trim() }
+    }
+    return @($lines)
+}
+
+function Format-EDPatternList {
+    <# Etiket listesini tek satirlik metne cevirir; orgusuzse bos metin. #>
+    [CmdletBinding()]
+    param([AllowNull()][string[]]$Patterns, [string]$Separator = ' | ')
+
+    $lines = @(Get-EDPatternLines -Patterns $Patterns)
+    if ($lines.Count -eq 0) { return '' }
+    return ($lines -join $Separator)
+}
+
+# ---------------------------------------------------------------------------
 # Sonuc satiri
 # ---------------------------------------------------------------------------
 
