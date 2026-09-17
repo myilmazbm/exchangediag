@@ -238,6 +238,40 @@ Assert-Equal 'Dengeli ve tercihli ortam OK' 'OK' $activeRow.Status
 Assert-True 'P8 iddia edilmedi' ($activeRow.Note -notlike '*P8*') $activeRow.Note
 Assert-True 'Dengeli oldugu yazildi' ($activeRow.Note -like '*dengeli*')
 
+# 4a-2. TERCIHINDEKI kopyalari sayan satirin adi TERSINE OKUNMAMALI.
+#
+# Bu satirin adi bir sure 'Tercih 1 uzerinde aktif' idi. Turkcede "tercih
+# 1'IN USTUNDE aktif" diye okunur, yani SAGLIKSIZ sayiyi anlatiyormus gibi.
+# Deger ise tam tersini sayar: Preference -eq 1 olan, kendi tercih
+# sunucusunda calisan kopyalari. Hemen yanindaki 'Tercih disi aktif DB'
+# satiriyla birlikte okununca operator saglikli bir DB'yi yanlis yerde
+# sanabiliyordu. Gercek DAG uzerindeki ilk kosumda ayrica raporun NOTSUZ
+# TEK satiriydi - adi belirsiz, aciklamasi yok.
+$preferredRow = Get-EDTestRow $rows 'Tercih 1 sunucusunda aktif DB'
+Assert-True 'Tercihindeki kopyalari sayan satir var' ($null -ne $preferredRow) 'satir adi'
+
+# SATIR YOKSA KALAN IDDIALAR ATLANIR, PAKET COKMEZ.
+# Aksi halde StrictMode altinda $null uzerinde .Values okumak paketi
+# bastan dusurur ve kirmizi kosum, hangi iddialarin da bozuldugunu
+# gostermeden "COKTU" olarak kalir. Bir testin basarisizligi OKUNABILIR
+# olmak zorundadir, yoksa duzeltmeyi yapan kisi kore dokunur.
+if ($null -eq $preferredRow) {
+    Write-Host '  (satir bulunamadi; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    # Deger SUNUCU BASINADIR, toplam degil: fixture'da 3 DB MBX1'de, 3 DB MBX2'de.
+    Assert-Equal 'MBX1 tercihindeki kopya sayisi' 3 $preferredRow.Values['MBX1']
+    Assert-Equal 'MBX2 tercihindeki kopya sayisi' 3 $preferredRow.Values['MBX2']
+    # Kardes satirla tamamlayici olma iddiasi SAYIYLA da dogrulanmali, yoksa
+    # not dogru cumleyi yazip yanlis sayiyi gosterebilir.
+    $offRow = Get-EDTestRow $rows 'Tercih disi aktif DB'
+    Assert-Equal 'Iki satirin toplami MBX1 aktif kopya sayisini verir' 3 `
+        ([int]$preferredRow.Values['MBX1'] + [int]$offRow.Values['MBX1'])
+    Assert-True 'Satirin notu BOS DEGIL' (-not [string]::IsNullOrWhiteSpace($preferredRow.Note)) $preferredRow.Note
+    Assert-True 'Notta BEKLENEN yerdekiler oldugu yaziyor' ($preferredRow.Note -like '*BEKLENEN*') $preferredRow.Note
+    Assert-True 'Not kardes satira baglaniyor' ($preferredRow.Note -like '*Tercih disi aktif DB*') $preferredRow.Note
+}
+
 # 4b. Tercih disi aktif kopya = orgu P8
 $offPrefCopies = @(
     (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active -Preference 1)

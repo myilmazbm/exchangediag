@@ -155,7 +155,19 @@ Register-EDModule @{
             # satirindaydi ve iddianin kanit satiri etiketsiz kaliyordu.
             New-EDRow -Module 'M32' -Check 'Tercih disi aktif DB' -Values $offPreferenceValues -Unit 'adet' -Status 'OK' `
                 -Patterns @('P8') -Note 'ActivationPreference degeri 1 olmayan sunucuda calisan aktif kopyalar. Ayrinti: M32-active-distribution.csv'
-            New-EDRow -Module 'M32' -Check 'Tercih 1 uzerinde aktif' -Values $preferredValues -Unit 'adet' -Status 'OK'
+            # ADI TERSINE OKUNABILEN SATIR DUZELTILDI.
+            # Eski ad 'Tercih 1 uzerinde aktif' idi ve Turkcede "tercih
+            # 1'IN USTUNDE aktif" diye okunuyordu - yani SAGLIKSIZ sayiyi
+            # anlatiyormus gibi. Oysa deger tam tersidir: Preference -eq 1
+            # olan, yani KENDI tercih sunucusunda calisan kopyalari sayar.
+            # Hemen ustunde 'Tercih disi aktif DB' satiri dururken bu
+            # yanlis okuma operatoru saglikli bir DB'yi yanlis yerde
+            # sanmaya goturur. Gercek DAG uzerindeki ilk kosumda ayrica
+            # raporun NOTSUZ TEK satiriydi: adi belirsiz, aciklamasi yok.
+            New-EDRow -Module 'M32' -Check 'Tercih 1 sunucusunda aktif DB' -Values $preferredValues -Unit 'adet' -Status 'OK' `
+                -Note ('ActivationPreference degeri 1 olan sunucuda calisan aktif kopyalar - yani BEKLENEN yerdekiler. ' +
+                       'Bir ustteki "Tercih disi aktif DB" satirinin tamamlayicisidir; ikisinin toplami aktif kopya sayisini verir. ' +
+                       'Ayrinti: M32-active-distribution.csv')
         )
     }
 }

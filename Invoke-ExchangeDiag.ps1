@@ -163,6 +163,39 @@ try {
     }
     if (-not $LogAccess) { $LogAccess = [string]$config.Environment.logAccess }
 
+    Reset-EDModuleRegistry
+    Import-EDModules -ModuleRoot (Join-Path $projectRoot 'Modules')
+    $registered = @(Get-EDModules)
+    $log.Info("$($registered.Count) modul kayitli.")
+
+    # -Module ile ISTENEN ID'LERIN HICBIRI TANINMIYORSA TARAMA YAPILMAMISTIR.
+    #
+    # Eskiden bu durum yalnizca bir WARN satiri dusuruyor, arac sonra
+    # "Sonuc: OK" deyip 0 ile cikiyordu. Zamanlanmis bir gorev cikis kodunu
+    # okur, log metnini DEGIL: yani hicbir kontrol kosmamisken "temiz" sinyali
+    # aliyordu. Cikis kodu 3'un ayri tutulma gerekcesi (bkz. .NOTES) tam
+    # olarak buydu - "bakacak rapor yok" ile "bakilacak rapor temiz" ayni
+    # kod olamaz.
+    #
+    # Kontrol BAGLANTIDAN ONCE yapilir: bir kullanim hatasi icin Exchange'e
+    # baglanmak, salt okunur bir aracta bile gereksiz bir dokunustur - ve
+    # testin Exchange'siz kosabilmesi de buna bagli, aksi halde "kod 3"
+    # yanlis sebeple (baglanti yok) gelir ve test bosa yesil olur.
+    # Modul kaydi baglantidan hicbir sey almaz; yalnizca dosyalari okur.
+    # Kismi tanima (bazilari gecerli) eskisi gibi UYARI ile gecer; orada
+    # gercekten bir tarama yapiliyor.
+    if ($PSCmdlet.ParameterSetName -eq 'Module') {
+        $unknownRequested = @(Get-EDUnknownModuleIds -Requested $Module -Known $registered.Id)
+        if ($unknownRequested.Count -eq @($Module).Count) {
+            throw ("-Module ile istenen ID'lerin HICBIRI kayitli degil: {0}. Hicbir kontrol kosmadi, rapor uretilmedi. " -f ($unknownRequested -join ', ')) +
+                  ("Kayitli ID'leri -ListModules ile gorebilirsiniz. " ) +
+                  ("NOT: powershell.exe -File ile cagirirken 'M30,M31' TEK BIR METIN olarak gecer; dizi gecirmek icin -Command kullanin.")
+        }
+        if ($unknownRequested.Count -gt 0) {
+            $log.Warn("Bilinmeyen modul ID'leri yok sayildi: $($unknownRequested -join ', ')")
+        }
+    }
+
     $executor = Connect-EDExchange -Config $config -Log $log -Credential $Credential -ParallelismOverride $Parallelism
 
     # NOT: $( ... ) icinde @() donen bir if, bos diziyi bosluga acar ve deger $null
@@ -189,10 +222,6 @@ try {
         Cache        = @{}
     }
 
-    Reset-EDModuleRegistry
-    Import-EDModules -ModuleRoot (Join-Path $projectRoot 'Modules')
-    $registered = @(Get-EDModules)
-    $log.Info("$($registered.Count) modul kayitli.")
 
     # -----------------------------------------------------------------------
     # M01 her zaman once calisir: diger tum modullerin girdisi topolojidir.
@@ -241,11 +270,6 @@ try {
         default  { @(Get-EDModules -Phase 'A', 'D') }   # -Quick
     }
     $selected = @($selected | Where-Object { $_.Id -ne 'M01' })
-
-    if ($PSCmdlet.ParameterSetName -eq 'Module') {
-        $missing = @(Get-EDUnknownModuleIds -Requested $Module -Known $registered.Id)
-        if ($missing) { $log.Warn("Bilinmeyen modul ID'leri yok sayildi: $($missing -join ', ')") }
-    }
 
     # Bu ortamda gecerlilik degerlendirmesi.
     # NOT: dongu degiskeni $module OLAMAZ - script parametresi [string[]]$Module

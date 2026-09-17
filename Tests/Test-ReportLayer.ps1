@@ -237,6 +237,28 @@ Assert-True 'Gerekce WindowHours olarak yazildi' ($negative.Output -like '*Windo
 $zero = Invoke-EDEntry @('-Quick', '-WindowHours', '0', '-OutputRoot', $runRoot, '-Quiet')
 Assert-Equal 'Sifir pencere sessizce config degeriyle degistirilmiyor' 3 $zero.ExitCode
 
+# HIC KONTROL KOSMADIYSA SONUC "OK" OLAMAZ.
+#
+# -Module ile istenen ID'lerin hicbiri kayitli degilse arac eskiden bir WARN
+# satiri dusurup "Sonuc: OK" diyor ve 0 ile cikiyordu. Zamanlanmis bir gorev
+# cikis kodunu okur, log metnini DEGIL: hicbir sey taranmamisken "temiz"
+# sinyali aliyordu. Bu, kod 3'un ayri tutulma gerekcesinin ta kendisi.
+$badModule = Invoke-EDEntry @('-Module', 'M99', '-OutputRoot', $runRoot, '-Quiet')
+Assert-Equal 'Gecersiz modul: tarama yapilmadi kodu' 3 $badModule.ExitCode
+Assert-True 'Gerekce hicbir ID taninmadigini soyluyor' ($badModule.Output -like '*HICBIRI kayitli degil*') 'hata metni'
+Assert-True 'Hangi ID oldugu yazili' ($badModule.Output -like '*M99*') 'hata metni'
+
+# Kullanim hatasi icin Exchange'e BAGLANILMAMALI. Bu yalnizca zarafet
+# meselesi degil: dogrulama baglantidan sonra yapilsaydi Exchange'siz bir
+# makinede bu test kod 3'u YANLIS sebeple (baglanti yok) gorur ve bosa
+# yesil kalirdi - yani testin kendisi anlamsizlasirdi.
+Assert-True 'Kullanim hatasi icin Exchange baglantisi denenmedi' `
+    ($badModule.Output -notlike '*Baglandi*') $badModule.Output
+
+# Kismi tanima farklidir: gercekten bir tarama yapilir, uyari yeterlidir.
+Assert-True 'Kismi tanimada uyari yolu duruyor' `
+    ($entryText -like "*Bilinmeyen modul ID'leri yok sayildi*") 'uyari dali'
+
 # ===========================================================================
 Write-Host "`n=== 9. Orgu etiketi operatorun GORDUGU yere ulasiyor ===" -ForegroundColor Cyan
 
