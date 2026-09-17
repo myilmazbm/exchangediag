@@ -280,9 +280,30 @@ namespace ExchangeDiag
         public string Server;
         public string Via;                  // "smb" | "cmdlet"
         public long FilesScanned;          // pencereyle kesisen dosya sayisi
-        public long FilesProcessed;        // gercekten islenen dosya sayisi
-        public bool Truncated;             // zaman siniri kesti: SONUC KISMI
-        public bool ReadFailed;            // okuma basarisiz: "veri yok" ile ayni sey DEGIL
+        public long FilesProcessed;        // BASARIYLA islenen dosya sayisi
+        public long FilesFailed;           // acilamayan/okunamayan dosya sayisi
+
+        /// <summary>
+        /// Pencere EKSIK okundu. Iki ayri sebebi vardir (asagidaki iki bayrak)
+        /// ve ikisinin TAVSIYESI TERSTIR; bu yuzden sebep de tasinir.
+        /// </summary>
+        public bool Truncated;
+
+        /// <summary>Kooperatif zaman butcesi doldu; kalan dosyalar okunmadi.</summary>
+        public bool TruncatedByDeadline;
+
+        /// <summary>
+        /// En az bir dosya okunamadi (kilit, izin, AV, kopmus SMB). Bu bir
+        /// zaman asimi DEGILDIR: pencereyi daraltmak hicbir sey degistirmez.
+        /// </summary>
+        public bool TruncatedByReadFailure;
+
+        /// <summary>
+        /// Okuma basarisiz: "veri yok" ile ayni sey DEGIL. Cmdlet yolunda
+        /// sorgunun tamami basarisiz oldugunda, ham yolda ise dosyalardan en
+        /// az biri okunamadiginda isaretlenir.
+        /// </summary>
+        public bool ReadFailed;
         public long LinesScanned;
         public long MalformedLines;         // semaya uymayan satirlar: ATILDI ama SAYILDI
         public long DeliverEvents;
@@ -307,6 +328,35 @@ namespace ExchangeDiag
         public List<RecipientLatency> SlowRecipients;
         public List<string> Warnings;
         public double ElapsedMs;
+
+        /// <summary>
+        /// SONUC KISMI MI? Tuketicinin (M10) hukme tasimasi gereken TEK
+        /// bayrak budur: kismilik hangi sebepten gelirse gelsin buradan
+        /// gorunur. "Olculemedi" ile "olculdu, sorun yok" birbirine ancak bu
+        /// bayrak hukme ulasmadiginda karisir.
+        /// </summary>
+        public bool IsPartial
+        {
+            get { return Truncated || ReadFailed; }
+        }
+
+        /// <summary>
+        /// Kismiligin SEBEBI, tek cumlede. Sebebi soylememek kotu, YANLIS
+        /// sebep soylemek daha kotudur: "pencereyi daraltin" tavsiyesi
+        /// kilitli bir dosyada hicbir ise yaramaz.
+        /// </summary>
+        public string PartialReason
+        {
+            get
+            {
+                if (TruncatedByDeadline && TruncatedByReadFailure) return "zaman siniri + okuma hatasi";
+                if (TruncatedByDeadline) return "zaman siniri";
+                if (TruncatedByReadFailure) return "okuma hatasi";
+                if (ReadFailed) return "okuma hatasi";
+                if (Truncated) return "kismi okuma";
+                return string.Empty;
+            }
+        }
 
         public DeliveryLatencyAnalysis()
         {
@@ -351,12 +401,50 @@ namespace ExchangeDiag
         public long FilesScanned;
         public long LinesScanned;
         public long MalformedLines;         // semaya uymayan satirlar: ATILDI ama SAYILDI
+        /// <summary>
+        /// IZLENEN benzersiz network-message-id sayisi.
+        ///
+        /// DIKKAT: TruncatedByLimit true ise bu sayi POPULASYON DEGIL
+        /// ORNEKLEM buyuklugudur - "penceredeki mesaj sayisi" olarak
+        /// raporlanamaz. Kirpilmis nufusun gercek buyuklugu tavan altinda
+        /// OLCULEMEZ (kimlikleri saymak, tam da tavanin engelledigi bellegi
+        /// ister); olculebilen ve kirpilmayan buyukluk olay sayisidir:
+        /// ChainEventsSeen / ChainEventsDropped.
+        /// </summary>
         public long MessagesSeen;
         public long MessagesComplete;       // faz zinciri TAM olan mesajlar = PhaseSamples
         public long SkewedSamples;          // sunucular arasi saat kaymasi -> negatif faz
-        public bool TruncatedByLimit;      // maxMessages siniri
-        public bool Truncated;             // zaman siniri kesti: KIRILIM KISMI
-        public long FilesProcessed;
+
+        /// <summary>
+        /// maxMessages tavani doldu: KIRILIM BIR ORNEKLEMDIR. Musteri
+        /// olceginde (saatte 1M mesaj) 2 saatten uzun her pencere buraya
+        /// duser, yani bu bayrak istisna degil KURAL olabilir.
+        /// </summary>
+        public bool TruncatedByLimit;
+
+        /// <summary>Uygulanan tavan. Uyariyi okuyan, hangi sayinin asildigini bilmelidir.</summary>
+        public long MessageLimit;
+
+        /// <summary>
+        /// Pencerede zincire aday olan TUM olaylar (RECEIVE/DELIVER, semasi
+        /// saglam, kimligi ve zamani okunabilen). Tavandan BAGIMSIZ sayilir,
+        /// yani kirpilmamis tek buyukluk budur.
+        /// </summary>
+        public long ChainEventsSeen;
+
+        /// <summary>
+        /// Tavan doldugu icin hicbir zincire yazilamayan olay sayisi.
+        /// Kirpilan mesaj sayisi bunun altindadir (bir mesaj birden cok olay
+        /// uretir) ama SIFIR OLMADIGI kesindir.
+        /// </summary>
+        public long ChainEventsDropped;
+
+        public bool Truncated;             // pencere eksik okundu: KIRILIM KISMI
+        public bool TruncatedByDeadline;   // kooperatif zaman butcesi doldu
+        public bool TruncatedByReadFailure;// en az bir dosya okunamadi
+        public bool ReadFailed;            // okuma basarisiz: "veri yok" ile ayni sey DEGIL
+        public long FilesProcessed;        // BASARIYLA islenen dosya sayisi
+        public long FilesFailed;           // acilamayan/okunamayan dosya sayisi
 
         public Stats Total;                 // DELIVER - gonderim (uctan uca), GENIS nufus
         public Stats Ingress;               // Transport RECEIVE - gonderim
@@ -389,6 +477,49 @@ namespace ExchangeDiag
         public double MalformedLineRatio
         {
             get { return LinesScanned > 0 ? (double)MalformedLines / LinesScanned : 0d; }
+        }
+
+        /// <summary>
+        /// Zincire aday olaylarin ne kadari fiilen kullanildi (1.0 = hepsi).
+        /// Ornekleme yapildiginda hukmun hangi paya dayandigi budur.
+        /// </summary>
+        public double SampledEventShare
+        {
+            get
+            {
+                if (ChainEventsSeen <= 0) return 1d;
+                return (double)(ChainEventsSeen - ChainEventsDropped) / ChainEventsSeen;
+            }
+        }
+
+        /// <summary>
+        /// KIRILIM KISMI MI? M11'in hukme tasimasi gereken tek bayrak.
+        /// Ornekleme (TruncatedByLimit) da buraya dahildir: tam okunmus ama
+        /// nufusu kirpilmis bir kirilim da kismi bir sonuctur ve tam sonuc
+        /// gibi sunulamaz.
+        /// </summary>
+        public bool IsPartial
+        {
+            get { return Truncated || TruncatedByLimit || ReadFailed; }
+        }
+
+        /// <summary>
+        /// Kismiligin SEBEBI. Uc sebep ayri ayri adlandirilir cunku
+        /// tavsiyeleri farklidir: zaman siniri -> pencereyi daralt;
+        /// okuma hatasi -> kilidi/izni coz; ornekleme -> pencereyi daralt
+        /// AMA sonuc yine de yorumlanabilir (yalnizca ornekleme yanlidir).
+        /// </summary>
+        public string PartialReason
+        {
+            get
+            {
+                List<string> reasons = new List<string>();
+                if (TruncatedByDeadline) reasons.Add("zaman siniri");
+                if (TruncatedByReadFailure || ReadFailed) reasons.Add("okuma hatasi");
+                if (TruncatedByLimit) reasons.Add("mesaj tavani (ornekleme)");
+                if (reasons.Count == 0 && Truncated) reasons.Add("kismi okuma");
+                return string.Join(" + ", reasons.ToArray());
+            }
         }
 
         public PhaseBreakdown()
@@ -522,8 +653,77 @@ namespace ExchangeDiag
                 selected.Add(path);
             }
 
-            selected.Sort(StringComparer.OrdinalIgnoreCase);
+            // SIRA ORDINAL DEGIL, ZAMANSAL.
+            //
+            // Ordinal sira dosyalari -1, -10, -100, -101, -2, -20 diye dizer.
+            // Tam okunan bir pencerede sira sonucu degistirmez; ama okuma
+            // KESILDIGINDE (zaman butcesi ya da mesaj tavani) hangi dosyalarin
+            // icerde kaldigini belirleyen sey tam olarak budur. Ordinal sirada
+            // elde kalan kume ne en yeni, ne en eski, ne de rastgeledir - yani
+            // kismi sonucun neyi temsil ettigi SOYLENEMEZ ve iki kosum ayni
+            // pencerede farkli cevaplar verir. Zamansal sirada ise kismi sonuc
+            // "pencerenin bastan su kadari" olur: soylenebilir ve tekrarlanabilir.
+            selected.Sort(CompareByLogSequence);
             return selected.ToArray();
+        }
+
+        /// <summary>
+        /// Dosya adindaki tarih, sonra rotasyon numarasi SAYISAL olarak
+        /// karsilastirilir. Tarihi cozulemeyen dosyalar sona alinir (adlandirma
+        /// beklenenden farklidir; onlari one koymak kesilmede once onlarin
+        /// okunmasi demek olurdu). Esitlikte ordinal ad karsilastirmasi
+        /// siralamayi KARARLI kilar - ayni klasorde MSGTRK ve MSGTRKMD ayni
+        /// tarih/numarayi tasir ve sira kosumdan kosuma degismemelidir.
+        /// </summary>
+        private static int CompareByLogSequence(string left, string right)
+        {
+            string leftName = Path.GetFileName(left);
+            string rightName = Path.GetFileName(right);
+
+            DateTime leftDate, rightDate;
+            bool leftHasDate = TryParseDateFromFileName(leftName, out leftDate);
+            bool rightHasDate = TryParseDateFromFileName(rightName, out rightDate);
+
+            if (leftHasDate != rightHasDate) return leftHasDate ? -1 : 1;
+            if (leftHasDate)
+            {
+                int byDate = leftDate.CompareTo(rightDate);
+                if (byDate != 0) return byDate;
+
+                long leftIndex = ParseSequenceNumber(leftName);
+                long rightIndex = ParseSequenceNumber(rightName);
+                int bySequence = leftIndex.CompareTo(rightIndex);
+                if (bySequence != 0) return bySequence;
+            }
+
+            return string.Compare(leftName, rightName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// MSGTRKMD20260917-12.LOG -> 12. Numara bulunamazsa -1 doner; boyle
+        /// bir dosya ayni tarihin numarali dosyalarindan once gelir (Exchange
+        /// numarayi ilk dosyada da yazar, yani bu yol pratikte adlandirmasi
+        /// beklenenden farkli dosyalar icindir).
+        /// </summary>
+        private static long ParseSequenceNumber(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName)) return -1;
+
+            int end = fileName.LastIndexOf('.');
+            if (end < 0) end = fileName.Length;
+
+            int start = end;
+            while (start > 0 && fileName[start - 1] >= '0' && fileName[start - 1] <= '9') start--;
+            if (start == end) return -1;                 // uzantidan once rakam yok
+            if (start == 0 || fileName[start - 1] != '-') return -1;
+
+            long value = 0;
+            for (int i = start; i < end; i++)
+            {
+                value = value * 10 + (fileName[i] - '0');
+                if (value > 1000000000L) return 1000000000L;   // absurt uzun numara: tasmayi engelle
+            }
+            return value;
         }
 
         /// <summary>MSGTRKMD20260917-1.LOG -> 2026-09-17</summary>
@@ -706,6 +906,7 @@ namespace ExchangeDiag
             if (DateTime.UtcNow > deadlineUtc)
             {
                 analysis.Truncated = true;
+                analysis.TruncatedByDeadline = true;
                 analysis.Warnings.Add("Zaman siniri dosya listesi cikarilirken doldu; hicbir dosya okunmadi. SONUC YOK.");
                 watch.Stop();
                 analysis.ElapsedMs = watch.Elapsed.TotalMilliseconds;
@@ -727,6 +928,7 @@ namespace ExchangeDiag
             options.MaxDegreeOfParallelism = maxDegreeOfParallelism;
 
             long filesProcessed = 0;
+            long filesFailed = 0;
             bool deadlineHit = false;
             Parallel.ForEach(files, options, delegate(string path, ParallelLoopState state)
             {
@@ -749,7 +951,17 @@ namespace ExchangeDiag
 
                 lock (sync)
                 {
-                    filesProcessed++;
+                    // OKUNAMAYAN DOSYA ISLENMIS SAYILMAZ.
+                    //
+                    // Eskiden bu sayac kosulsuzdu: okuma patlayan dosya da
+                    // "islendi" sayiliyor, filesProcessed == files.Length
+                    // kaliyor ve Truncated ASLA kurulmuyordu. Sonuc, klasordeki
+                    // ikinci dosya kilitliyken p95'in 600 sn'den 2 sn'ye
+                    // dusmesi, hucrenin YESIL OK gorunmesi ve tek izin run.log
+                    // icinde bir INFO satiri olmasiydi.
+                    if (partial.Failed) filesFailed++;
+                    else filesProcessed++;
+
                     // Dosya SAYISI yetmez: son dosyanin ortasinda kesilmek de
                     // kismi sonuctur ve o durumda sayilar esitlenir.
                     if (partial.DeadlineHit) deadlineHit = true;
@@ -785,9 +997,28 @@ namespace ExchangeDiag
             });
 
             analysis.FilesProcessed = filesProcessed;
-            if (deadlineHit || filesProcessed < files.Length)
+            analysis.FilesFailed = filesFailed;
+
+            // IKI SEBEP AYRI BILDIRILIR. Yanlis sebep, sebep soylememekten
+            // kotudur: "pencereyi daraltin" tavsiyesi kilitli bir dosyada
+            // hicbir ise yaramaz, operatoru bir tur yanlis ayar avina yollar.
+            if (filesFailed > 0)
             {
                 analysis.Truncated = true;
+                analysis.TruncatedByReadFailure = true;
+                analysis.ReadFailed = true;
+                analysis.Warnings.Add(files.Length + " dosyanin " + filesFailed +
+                    " tanesi OKUNAMADI. SONUC KISMI - persentiller o dosyalardaki teslimleri ICERMIYOR. " +
+                    "Bu bir ZAMAN ASIMI DEGILDIR: pencereyi daraltmak/genisletmek sonucu degistirmez. " +
+                    "Dosya kilidi (baska bir surec dosyayi paylasimsiz acmis), NTFS/share izni, " +
+                    "antivirus ya da kopmus SMB baglantisi arayin; ayrintili istisna mesajlari yukaridaki uyarilardadir.");
+            }
+
+            long unreadFiles = files.Length - filesProcessed - filesFailed;
+            if (deadlineHit || unreadFiles > 0)
+            {
+                analysis.Truncated = true;
+                analysis.TruncatedByDeadline = true;
                 analysis.Warnings.Add("Zaman siniri asildi: " + files.Length + " dosyanin " +
                     filesProcessed + " tanesi islendi. SONUC KISMI - persentiller tam pencereyi temsil etmez.");
             }
@@ -836,6 +1067,12 @@ namespace ExchangeDiag
             public Dictionary<string, RecipientLatency> SlowRecipients =
                 new Dictionary<string, RecipientLatency>(StringComparer.OrdinalIgnoreCase);
             public bool DeadlineHit;
+            /// <summary>
+            /// Dosya acilamadi/okunamadi. Kismi veri yine de tasinir (okunan
+            /// kadari degerlidir) ama dosya ISLENMIS SAYILMAZ - cagiran taraf
+            /// pencereyi tam sanmamalidir.
+            /// </summary>
+            public bool Failed;
             // Tek string DEGIL: bir dosyada once sema hatasi, sonra bir istisna
             // olusabilir; ikincisi birincisini ezerse kok neden kaybolur.
             public List<string> Warnings = new List<string>();
@@ -992,7 +1229,11 @@ namespace ExchangeDiag
             }
             catch (Exception ex)
             {
-                result.Warnings.Add(Path.GetFileName(path) + ": " + ex.GetType().Name + " - " + ex.Message);
+                // Bayrak sart: yalnizca uyari eklemek, kismi sonucu TAM sonuc
+                // gibi dondurmek demekti (bkz. AnalyzeDeliveryLatency).
+                result.Failed = true;
+                result.Warnings.Add(Path.GetFileName(path) + ": OKUNAMADI - " +
+                                    ex.GetType().Name + " - " + ex.Message);
             }
 
             return result;
@@ -1133,13 +1374,17 @@ namespace ExchangeDiag
 
             if (maxMessages < 1) maxMessages = 1000000;
             if (maxDegreeOfParallelism < 1) maxDegreeOfParallelism = Environment.ProcessorCount;
+            breakdown.MessageLimit = maxMessages;
 
             ConcurrentDictionary<string, MessageTrace> traces =
                 new ConcurrentDictionary<string, MessageTrace>(StringComparer.OrdinalIgnoreCase);
             long linesScanned = 0;
             long malformedLines = 0;
+            long chainEventsSeen = 0;
+            long chainEventsDropped = 0;
             bool truncated = false;
             long filesProcessed = 0;
+            long filesFailed = 0;
             object sync = new object();
 
             ParallelOptions options = new ParallelOptions();
@@ -1157,8 +1402,11 @@ namespace ExchangeDiag
 
                 long localLines = 0;
                 long localMalformed = 0;
+                long localChainEvents = 0;
+                long localDropped = 0;
                 bool localTruncated = false;
                 bool localDeadline = false;
+                bool localFailed = false;
                 // Tek uyari alani yerine liste: sema hatasi sonrasi gelen bir
                 // istisna ilk mesaji ezmemeli.
                 List<string> localWarnings = new List<string>();
@@ -1237,10 +1485,17 @@ namespace ExchangeDiag
                             string messageId = splitter.GetField(idxNetworkId);
                             if (string.IsNullOrEmpty(messageId)) continue;
 
+                            // Zincire ADAY olay: tavandan bagimsiz sayilir.
+                            // Kirpilan mesaj sayisi olculemez (kimlikleri
+                            // saymak tam da tavanin engelledigi bellegi
+                            // isterdi) ama kirpilan OLAY sayisi olculebilir
+                            // ve kismiligin buyuklugunu tuketiciye o tasir.
+                            localChainEvents++;
+
                             MessageTrace trace;
                             if (!traces.TryGetValue(messageId, out trace))
                             {
-                                if (traces.Count >= maxMessages) { localTruncated = true; continue; }
+                                if (traces.Count >= maxMessages) { localTruncated = true; localDropped++; continue; }
                                 trace = new MessageTrace();
                                 trace = traces.GetOrAdd(messageId, trace);
                             }
@@ -1287,14 +1542,23 @@ namespace ExchangeDiag
                 }
                 catch (Exception ex)
                 {
-                    localWarnings.Add(Path.GetFileName(path) + ": " + ex.GetType().Name + " - " + ex.Message);
+                    // Okuma patlayan dosya ISLENMIS SAYILMAZ: zincirin bir
+                    // ucunu tasiyan dosya okunamadiginda kirilim yalnizca
+                    // eksilmez, YANLIS fazi suclayabilir (orn. Transport
+                    // RECEIVE'lerin dosyasi okunamazsa Ingress coker).
+                    localFailed = true;
+                    localWarnings.Add(Path.GetFileName(path) + ": OKUNAMADI - " +
+                                      ex.GetType().Name + " - " + ex.Message);
                 }
 
                 lock (sync)
                 {
-                    filesProcessed++;
+                    if (localFailed) filesFailed++;
+                    else filesProcessed++;
                     linesScanned += localLines;
                     malformedLines += localMalformed;
+                    chainEventsSeen += localChainEvents;
+                    chainEventsDropped += localDropped;
                     if (localTruncated) truncated = true;
                     if (localDeadline) deadlineHit = true;
                     breakdown.Warnings.AddRange(localWarnings);
@@ -1302,9 +1566,27 @@ namespace ExchangeDiag
             });
 
             breakdown.FilesProcessed = filesProcessed;
-            if (deadlineHit || filesProcessed < files.Length)
+            breakdown.FilesFailed = filesFailed;
+            breakdown.ChainEventsSeen = chainEventsSeen;
+            breakdown.ChainEventsDropped = chainEventsDropped;
+
+            if (filesFailed > 0)
             {
                 breakdown.Truncated = true;
+                breakdown.TruncatedByReadFailure = true;
+                breakdown.ReadFailed = true;
+                breakdown.Warnings.Add(files.Length + " dosyanin " + filesFailed +
+                    " tanesi OKUNAMADI. FAZ KIRILIMI KISMI - okunamayan dosyadaki olaylar zincirlere girmedi, " +
+                    "bu yuzden BASKIN FAZ HUKMU de yaniltabilir. " +
+                    "Bu bir ZAMAN ASIMI DEGILDIR: pencereyi daraltmak sonucu degistirmez. " +
+                    "Dosya kilidi, NTFS/share izni, antivirus ya da kopmus SMB baglantisi arayin.");
+            }
+
+            long unreadFiles = files.Length - filesProcessed - filesFailed;
+            if (deadlineHit || unreadFiles > 0)
+            {
+                breakdown.Truncated = true;
+                breakdown.TruncatedByDeadline = true;
                 breakdown.Warnings.Add("Zaman siniri asildi: " + files.Length + " dosyanin " + filesProcessed +
                     " tanesi islendi. FAZ KIRILIMI KISMI - tum dosyalar okunmadi.");
             }
@@ -1317,8 +1599,33 @@ namespace ExchangeDiag
             breakdown.MessagesSeen = traces.Count;
             breakdown.TruncatedByLimit = truncated;
             if (truncated)
-                breakdown.Warnings.Add("Mesaj sayisi " + maxMessages.ToString(CultureInfo.InvariantCulture) +
-                                       " sinirini asti; kirilim orneklemdir. Pencereyi daraltin.");
+            {
+                // ORNEKLEMIN TURU VE BUYUKLUGU SOYLENMEDEN "orneklemdir"
+                // demek yetmez: tuketici hukmu ne kadar kirptigini bilmeden
+                // okur. Uc sey birden yazilir:
+                //   1) kacinin kullanildigi (izlenen mesaj / tavan),
+                //   2) kirpmanin buyuklugu (kullanilamayan olay sayisi ve
+                //      olaylarin kullanilan payi - kirpilmayan tek olcu),
+                //   3) ORNEGIN NE OLDUGU: ne en yeni, ne en eski, ne rastgele.
+                // (3) kritik: rastgele bir ornekten persentil kestirilebilir,
+                // bundan kestirilemez. Dosyalar artik zamansal sirada
+                // okunuyor, yani ornek "pencerenin BASI"na yatkindir; ama
+                // Parallel.ForEach dosyalari es zamanli isledigi icin kesin
+                // bir "ilk N mesaj" garantisi de verilemez.
+                double usedShare = breakdown.SampledEventShare * 100d;
+                breakdown.Warnings.Add(
+                    "Mesaj tavani (" + maxMessages.ToString(CultureInfo.InvariantCulture) +
+                    ") doldu: KIRILIM BIR ORNEKLEMDIR. Izlenen mesaj: " +
+                    breakdown.MessagesSeen.ToString(CultureInfo.InvariantCulture) +
+                    "; zincire aday " + chainEventsSeen.ToString(CultureInfo.InvariantCulture) +
+                    " olayin " + chainEventsDropped.ToString(CultureInfo.InvariantCulture) +
+                    " tanesi tavan yuzunden hicbir zincire yazilamadi (olaylarin %" +
+                    usedShare.ToString("F1", CultureInfo.InvariantCulture) + "'i kullanildi). " +
+                    "Kirpilan mesaj sayisi BILINMIYOR - tavan altinda olculemez. " +
+                    "Ornek ne en yeni, ne en eski, ne de rastgeledir: persentiller pencerenin tamamina " +
+                    "genellenemez ve kosumlar arasinda birebir tekrarlanmaz. " +
+                    "Tam kirilim icin pencereyi daraltin (-WindowHours).");
+            }
 
             // FAZLAR TEK BIR NUFUSTAN HESAPLANIR.
             //
