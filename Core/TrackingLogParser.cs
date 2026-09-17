@@ -193,7 +193,8 @@ namespace ExchangeDiag
         public string Recipient;
         public string Sender;
         public string Subject;
-        public string NetworkMessageId;
+        public string NetworkMessageId;     // Exchange ic kimligi (network-message-id)
+        public string MessageId;            // RFC 5322 SMTP basligi (message-id) - ayri kimliktir
         public string Source;
         public string ServerHostname;
     }
@@ -313,6 +314,7 @@ namespace ExchangeDiag
         private const string ColSender = "sender-address";
         private const string ColSubject = "message-subject";
         private const string ColNetworkId = "network-message-id";
+        private const string ColMessageId = "message-id";
         private const string ColSource = "source";
         private const string ColServer = "server-hostname";
 
@@ -628,6 +630,7 @@ namespace ExchangeDiag
                     CsvLineSplitter splitter = new CsvLineSplitter();
                     int idxDateTime = -1, idxEvent = -1, idxInfo = -1, idxRecipient = -1;
                     int idxSender = -1, idxSubject = -1, idxNetworkId = -1, idxSource = -1, idxServer = -1;
+                    int idxMessageId = -1;
                     bool haveFields = false;
 
                     string line;
@@ -649,6 +652,7 @@ namespace ExchangeDiag
                                 idxSender = IndexOf(names, ColSender);
                                 idxSubject = IndexOf(names, ColSubject);
                                 idxNetworkId = IndexOf(names, ColNetworkId);
+                                idxMessageId = IndexOf(names, ColMessageId);
                                 idxSource = IndexOf(names, ColSource);
                                 idxServer = IndexOf(names, ColServer);
                                 haveFields = idxDateTime >= 0 && idxEvent >= 0;
@@ -685,7 +689,10 @@ namespace ExchangeDiag
                         double seconds = (timestampUtc - submitUtc).TotalSeconds;
                         // Saat kaymasi negatif gecikme uretebilir; kirpilmaz,
                         // atilir - aksi halde persentiller sessizce bozulur.
-                        if (seconds < 0) { result.LatencyMissing++; result.NegativeLatency++; continue; }
+                        // Yalnizca NegativeLatency artar: LatencyMissing "message-info
+                        // ayristirilamadi" demektir; saat kaymasini oraya da yazmak
+                        // iki sayaci bagimsiz okunamaz hale getirir.
+                        if (seconds < 0) { result.NegativeLatency++; continue; }
 
                         result.Latencies.Add(seconds);
                         DateTime local = TimeZoneInfo.ConvertTimeFromUtc(timestampUtc, localZone);
@@ -708,6 +715,7 @@ namespace ExchangeDiag
                             record.Sender = idxSender >= 0 ? splitter.GetField(idxSender) : null;
                             record.Subject = idxSubject >= 0 ? splitter.GetField(idxSubject) : null;
                             record.NetworkMessageId = idxNetworkId >= 0 ? splitter.GetField(idxNetworkId) : null;
+                            record.MessageId = idxMessageId >= 0 ? splitter.GetField(idxMessageId) : null;
                             record.Source = idxSource >= 0 ? splitter.GetField(idxSource) : null;
                             record.ServerHostname = idxServer >= 0 ? splitter.GetField(idxServer) : null;
                             result.Slowest.Add(record);

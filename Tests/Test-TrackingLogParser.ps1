@@ -128,7 +128,11 @@ foreach ($w in $analysis.Warnings) { Write-Host "  UYARI: $w" -ForegroundColor Y
 
 Assert-Equal 'DELIVER olayi sayisi' $fixture.DeliverRows $analysis.DeliverEvents
 Assert-Equal 'Gecikmesi hesaplanan kayit' $fixture.ExpectedCount $analysis.LatencyComputed
-Assert-Equal 'Gecikmesi hesaplanamayan kayit' ($fixture.DeliverRows - $fixture.ExpectedCount) $analysis.LatencyMissing
+# Iki sayac bagimsiz okunabilmeli: LatencyMissing yalnizca message-info'dan
+# zaman cikarilamayan satirlar, NegativeLatency yalnizca saat kaymasi.
+Assert-Equal 'message-info ayristirilamayan kayit' $fixture.ExpectedMissing $analysis.LatencyMissing
+Assert-Equal 'Saat kaymasi kaynakli atilan kayit' $fixture.ExpectedNegative $analysis.NegativeLatency
+Assert-Equal 'Toplam hesaplanamayan kayit' ($fixture.DeliverRows - $fixture.ExpectedCount) ($analysis.LatencyMissing + $analysis.NegativeLatency)
 Assert-Close 'p50' $fixture.ExpectedP50 $analysis.Overall.P50
 Assert-Close 'p90' $fixture.ExpectedP90 $analysis.Overall.P90
 Assert-Close 'p95' $fixture.ExpectedP95 $analysis.Overall.P95

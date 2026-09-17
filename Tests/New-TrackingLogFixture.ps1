@@ -46,6 +46,10 @@ if ($directory -and -not (Test-Path -LiteralPath $directory)) {
 $random = New-Object System.Random($Seed)
 $startUtc = $EndUtc.AddHours(-$WindowHours)
 $expected = New-Object System.Collections.Generic.List[double]
+# Hesaplanamayan satirlar iki ayri nedene ayrilir; parser da bunlari
+# ayri sayaclarda tutar (LatencyMissing / NegativeLatency).
+$missingRows = 0
+$negativeRows = 0
 
 $writer = New-Object System.IO.StreamWriter($Path, $false, (New-Object System.Text.UTF8Encoding($false)))
 try {
@@ -79,11 +83,13 @@ try {
 
         if ($kind -lt 3) {
             # message-info bos: gecikme HESAPLANAMAZ, sayilmamali.
+            $missingRows++
             $messageInfo = ''
             $countThis = $false
         }
         elseif ($kind -lt 5) {
             # Saat kaymasi: negatif gecikme. Kirpilmamali, atilmali.
+            $negativeRows++
             $messageInfo = $deliverUtc.AddSeconds(10).ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + ';SRV=EXC01'
             $countThis = $false
         }
@@ -174,6 +180,8 @@ return [pscustomobject]@{
     Path            = $Path
     DeliverRows     = $DeliverCount
     ExpectedCount   = $sorted.Length
+    ExpectedMissing = $missingRows
+    ExpectedNegative = $negativeRows
     ExpectedMin     = $sorted[0]
     ExpectedP50     = Get-ExpectedPercentile $sorted 50
     ExpectedP90     = Get-ExpectedPercentile $sorted 90

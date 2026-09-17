@@ -189,7 +189,7 @@ function Get-EDCmdletDeliveryAnalysis {
             End        = $EndUtc.ToLocalTime()
             ResultSize = 'Unlimited'
         } `
-        -Select 'Timestamp', 'MessageLatency', 'MessageLatencyType', 'Recipients', 'Sender', 'MessageSubject', 'MessageId', 'Source'
+        -Select 'Timestamp', 'MessageLatency', 'MessageLatencyType', 'Recipients', 'Sender', 'MessageSubject', 'MessageId', 'NetworkMessageId', 'Source'
 
     $result = $Context.Executor.RunExchange([ExchangeDiag.ExecTask[]]@($task))[0]
 
@@ -202,7 +202,11 @@ function Get-EDCmdletDeliveryAnalysis {
     $latencies = New-Object System.Collections.Generic.List[double]
     $byHour = New-Object ExchangeDiag.StatsAccumulator
     $slowRecipients = @{}
-    $slowest = @()
+    # Ham dizi + '+=' her satirda tum diziyi kopyalar (O(N^2)) ve butun
+    # satirlari bellekte tutar. Liste + periyodik kirpma: C# tarafindaki
+    # AnalyzeFile davranisinin aynisi.
+    $slowest = New-Object System.Collections.Generic.List[psobject]
+    $slowestCap = [Math]::Max($TopSlowCount * 4, 200)
 
     foreach ($row in $result.Output) {
         $analysis.DeliverEvents++
@@ -219,7 +223,9 @@ function Get-EDCmdletDeliveryAnalysis {
             if ([timespan]::TryParse([string]$raw, [ref]$parsed)) { $seconds = $parsed.TotalSeconds }
         }
         if ($null -eq $seconds) { $analysis.LatencyMissing++; continue }
-        if ($seconds -lt 0) { $analysis.LatencyMissing++; $analysis.NegativeLatency++; continue }
+        # Saat kaymasi yalnizca NegativeLatency'e yazilir; LatencyMissing
+        # "message-info ayristirilamadi" demektir (C# yolu ile ayni semantik).
+        if ($seconds -lt 0) { $analysis.NegativeLatency++; continue }
 
         $latencies.Add([double]$seconds)
         $timestamp = Get-EDProperty $row 'Timestamp'
@@ -243,14 +249,22 @@ function Get-EDCmdletDeliveryAnalysis {
             }
         }
 
-        $slowest += [pscustomobject]@{
+        $slowest.Add([pscustomobject]@{
             Seconds   = [double]$seconds
             Timestamp = $timestamp
             Recipient = ($recipients -join ';')
             Sender    = [string](Get-EDProperty $row 'Sender')
             Subject   = [string](Get-EDProperty $row 'MessageSubject')
+            NetworkMessageId = [string](Get-EDProperty $row 'NetworkMessageId')
             MessageId = [string](Get-EDProperty $row 'MessageId')
             Source    = [string](Get-EDProperty $row 'Source')
+        })
+
+        # Liste buyudukce periyodik kirp: bellek $TopSlowCount mertebesinde kalir.
+        if ($slowest.Count -gt $slowestCap) {
+            $trimmed = @($slowest | Sort-Object -Property Seconds -Descending | Select-Object -First $TopSlowCount)
+            $slowest.Clear()
+            foreach ($t in $trimmed) { $slowest.Add($t) }
         }
     }
 
@@ -272,7 +286,8 @@ function Get-EDCmdletDeliveryAnalysis {
         $record.Recipient = $item.Recipient
         $record.Sender = $item.Sender
         $record.Subject = $item.Subject
-        $record.NetworkMessageId = $item.MessageId
+        $record.NetworkMessageId = $item.NetworkMessageId
+        $record.MessageId = $item.MessageId
         $record.Source = $item.Source
         $record.ServerHostname = $Server
         $analysis.Slowest.Add($record)
@@ -365,6 +380,16 @@ function Get-EDDeliveryAnalysis {
                 $log.Warn("$($result.Key): ham log ayristirma basarisiz ($($result.State)) $($result.Error)")
                 if ($Context.LogAccess -eq 'auto') {
                     $cmdletTargets += ($locations | Where-Object { $_.Server -eq $result.Key })
+                }
+                else {
+                    # -LogAccess Smb acikca verildi: cmdlet'e dusulmez, ama sunucu
+                    # tablodan tamamen dusmemeli - yoksa operator eksik bir kume
+                    # gorur ve nedenini yalnizca log satirindan anlayabilir.
+                    $failed = New-Object ExchangeDiag.DeliveryLatencyAnalysis
+                    $failed.Server = $result.Key
+                    $failed.Via = 'smb'
+                    $failed.Warnings.Add("Ham log ayristirma basarisiz ($($result.State)): $($result.Error). -LogAccess Smb verildi; cmdlet'e dusulmedi.")
+                    $analyses[$result.Key] = $failed
                 }
             }
         }
