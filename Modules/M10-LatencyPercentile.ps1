@@ -224,9 +224,15 @@ Register-EDModule @{
         # bozmasina izin verip sonra "200x yavas" diye suclamak kendi icinde
         # celiskiydi - ustelik satir OK kaldigi icin iddia bulgu tablosuna
         # hic girmiyor, yalnizca detay notunda gomulu kaliyordu.
+        # Pasif site sunuculari TOPOLOJIDEN okunur, hucre etiketinden DEGIL.
+        # 'PASSIVE' etiketi yalnizca sunucunun kendi hukmu WARN/FAIL oldugunda
+        # yaziliyor; OK olcen bir pasif site sunucusu etiketsiz kaliyor ve
+        # kiyas kumesine giriyordu. Yani "pasif site kiyasa girmez" kurali
+        # tam da kuralin en sik gecerli oldugu durumda uygulanmiyordu.
+        $passiveServers = @($Context.Topology.Servers | Where-Object { $_.IsPassiveSite } | ForEach-Object { $_.Name })
         $comparable = @{}
         foreach ($server in @($numericP95.Keys)) {
-            if ($cellStatus.ContainsKey($server) -and $cellStatus[$server] -eq 'PASSIVE') { continue }
+            if ($server -in $passiveServers) { continue }
             # ORNEK SAYISI ESIGI: tek teslimden persentil cikmaz. n=1 iken
             # PercentileEngine her persentil icin o tek degeri dondurur, yani
             # az kullanilan bir sunucudaki TEK bir NDR "150x yavas" iddiasina
@@ -321,7 +327,13 @@ Register-EDModule @{
         # birakilirsa "yetkili sayi" gibi okunurlar.
         $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
         $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p50' -Values $p50 -Unit 'sn' -Status 'OK' -Note $partialTag
-        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p99' -Values $p99 -Unit 'sn' -Status 'OK' -Note ($partialTag + $p99Note)
+        # ORGU P6 metni bu satirdaydi ama satirin durumu sabit 'OK' idi ve
+        # Report.ps1 bulgu tablosuna yalnizca WARN/FAIL/ERROR/TIMEOUT satirlarini
+        # alir: yani P6 bulgusu tabloya HIC giremiyor, sadece detay notunda
+        # kaliyordu. Ortalamanin tail'i gizledigi bir ortam tam da operatorun
+        # gormesi gereken seydir.
+        $p99Status = $(if ($tailNotes.Count -gt 0) { 'WARN' } else { 'OK' })
+        $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p99' -Values $p99 -Unit 'sn' -Status $p99Status -Patterns @('P6') -Note ($partialTag + $p99Note)
         $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi max' -Values $maxValues -Unit 'sn' -Status 'OK' -Note $partialTag
         $rows += New-EDRow -Module 'M10' -Check 'Ortalama (tek basina YANILTIR)' -Values $meanValues -Unit 'sn' -Status 'OK' `
             -Note ($partialTag + 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.')

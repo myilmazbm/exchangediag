@@ -170,12 +170,22 @@ Register-EDModule @{
         }
 
         # --- P5 degerlendirmesi ---
+        # $sharedCellStatus burada DOLDURULUR. Tanimlaniyor ama hicbir zaman
+        # atanmiyordu: P5 satiri bos bir CellStatus tablosuyla gidiyor ve
+        # hangi sunucuda paylasim oldugu hucre renginden HIC anlasilmiyordu.
+        # Satir WARN, ama okuyucu suclunun hangi sunucu oldugunu satirin
+        # metninden tek tek cikarmak zorunda kaliyordu.
         $p5Findings = @()
         foreach ($entry in $evidence) {
             if ($entry.DbSayisi -le 1) { continue }
             if ($entry.DiskDurum -in @('WARN', 'FAIL')) {
                 $p5Findings += ('{0}/{1}: {2} DB ayni volume uzerinde ve volume yavas (okuma {3} sn, yazma {4} sn) -> {5}' -f `
                     $entry.Server, $entry.Volume, $entry.DbSayisi, $entry.OkumaP95Sn, $entry.YazmaP95Sn, $entry.Veritabanlari)
+                $sharedCellStatus[$entry.Server] = 'WARN'
+            }
+            elseif (-not $sharedCellStatus.ContainsKey($entry.Server)) {
+                # Paylasim var ama disk esigi asilmiyor: bulgu degil, bilgi.
+                $sharedCellStatus[$entry.Server] = 'OK'
             }
         }
 

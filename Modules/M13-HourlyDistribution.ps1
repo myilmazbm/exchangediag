@@ -48,7 +48,10 @@ Register-EDModule @{
         $anyData = $false
         $shortWindow = @()
         # Tek bir saatin tum trafigi tasidigi ortamlar: kiyas kurulamaz.
-        $noComparison = @()
+        # NOT: burada bir zamanlar "tek saat tum trafigi tasiyor, kiyas
+        # kurulamaz" dali vardi. Tepe secimi p95'e dondugunde o dalin
+        # tetikleyicisi ortadan kalkti; olu kod olarak birakmak yerine
+        # kaldirildi. Dusuk hacimli tepe artik $peakNotBusy ile bildiriliyor.
         # Gecikme tepesi DUSUK hacimli bir saatte olan sunucular: tepe
         # gercektir ama sebebi kapasite DEGILDIR.
         $peakNotBusy = @()
@@ -157,12 +160,15 @@ Register-EDModule @{
         else {
             $note = 'Yogun ve sakin saat arasinda 3x uzeri fark yok; gecikme gun icine yayilmis. Kapasite siniri gorunmuyor.'
         }
+        # YONTEM ANLATIMI KODLA AYNI OLMAK ZORUNDA.
+        # Burada bir sure "yogun saat TRAFIGE gore secilir" yaziyordu; o
+        # terk edilmis ilk denemenin metniydi ve kod p95'e gore seciyor.
+        # Kendi yontemini yanlis anlatan bir rapor, okuyucunun sayiyi
+        # dogrulamasini imkansiz kilar - duzeltilmek icin var olan kusur
+        # sinifinin ta kendisi.
         $note += " (Pencere $($Context.WindowHours) saat, saat basina en az $minimumSamples ornek arandi. "
-        $note += 'Yogun saat TRAFIGE gore secilir; kiyas saati ise yogun saatin en az dortte biri kadar teslim tasiyan '
-        $note += 'saatler arasindan secilir - aksi halde "yogun vs. neredeyse bos" kiyasi yapilmis olurdu.)'
-        if ($noComparison.Count -gt 0) {
-            $note += (" KIYAS KURULAMADI ({0}): trafigin tamami tek bir saatte toplandigi icin yogun/sakin karsilastirmasi yapilamadi." -f ($noComparison -join ', '))
-        }
+        $note += 'Tepe saat GECIKMEYE (p95) gore secilir; kapasite iddiasi ise ancak o saatin teslim hacmi '
+        $note += 'saatlik ortancanin uzerindeyse kurulur - dusuk hacimli bir tepe yuk kaynakli DEGILDIR.)'
 
         $rows = @()
         $rows += New-EDRow -Module 'M13' -Check 'Yogun/sakin p95 orani' -Values $ratioValues -CellStatus $cellStatus `

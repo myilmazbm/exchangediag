@@ -94,7 +94,10 @@ Register-EDModule @{
                 # "Exchange surumu = OK" diyordu. M40 ayni durumu N/A yapar.
                 $cellText = $(if ($result.Succeeded) { 'N/A' } else { $result.State })
                 $editionValues[$server] = $cellText; $trialValues[$server] = $cellText
-                $trialCellStatus[$server] = $result.State
+                # Hucre DURUMU da ayni seyi soylemeli. Metin 'N/A' iken
+                # durumu $result.State ('OK') birakmak, hucreyi olculmus
+                # gibi renklendirir: yukaridaki duzeltmenin yarisi.
+                $trialCellStatus[$server] = $cellText
                 if (-not $result.Succeeded) { $log.Warn("M44/$server : $($result.State) - $($result.Error)") }
                 continue
             }
