@@ -555,6 +555,46 @@ function Save-EDEvidence {
     return $path
 }
 
+function Test-EDIgnoredFinding {
+<#
+    .SYNOPSIS
+        Satir, aktif profilin ignoreFindings listesiyle bastirilmis mi?
+
+    .DESCRIPTION
+        ignoreFindings config'de, profiles.json'da ve brief'te belgeliydi
+        ama HICBIR YERDE OKUNMUYORDU: lab profilinin NoRecentBackup
+        bastirmasi hicbir sey yapmiyor, M45 yine FAIL veriyor ve calistirma
+        2 ile cikiyordu. Kullanicinin "bunu bastirdim" sandigi ayar sessizce
+        yok sayilan bir ayardi.
+
+        Desen, satirin Modul, Kontrol ve Not alanlarina karsi denenir;
+        'M45:NoRecentBackup' bicimi modulu de sinirlar.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Row,
+        [string[]]$IgnoreFindings
+    )
+
+    if (-not $IgnoreFindings -or $IgnoreFindings.Count -eq 0) { return $null }
+
+    foreach ($entry in $IgnoreFindings) {
+        $pattern = [string]$entry
+        if (-not $pattern) { continue }
+
+        # 'M45:NoRecentBackup' -> yalnizca M45 satirlarinda gecerli.
+        if ($pattern -match '^([A-Za-z]\d{2}):(.+)$') {
+            if ($Row.Module -ne $matches[1]) { continue }
+            $pattern = $matches[2]
+        }
+
+        foreach ($field in @([string]$Row.Check, [string]$Row.Note, [string]$Row.Module)) {
+            if ($field -and $field -match $pattern) { return $entry }
+        }
+    }
+    return $null
+}
+
 function Test-EDKnownIssue {
 <#
     .SYNOPSIS

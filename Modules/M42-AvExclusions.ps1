@@ -60,9 +60,14 @@ Register-EDModule @{
                 $expectedPaths += $value
             }
         }
+        # Get-EDTrackingLogLocation bir DIZI dondurur, hashtable degil.
+        # .Values cagrisi Set-StrictMode -Version Latest altinda istisna
+        # firlatiyordu; yani M42 her gercek kosuda ERROR satirina donuyordu
+        # ve message tracking klasoru beklenen dislama listesine hic
+        # eklenmiyordu (transport yavasliginin en bilinen sebeplerinden biri).
         $trackingLocation = $Context.Cache['TrackingLogLocation']
         if ($trackingLocation) {
-            foreach ($entry in @($trackingLocation.Values)) {
+            foreach ($entry in @($trackingLocation)) {
                 $path = [string](Get-EDProperty $entry 'LocalPath')
                 if ($path) { $expectedPaths += $path }
             }
@@ -70,86 +75,164 @@ Register-EDModule @{
         $expectedPaths = @($expectedPaths | Where-Object { $_ } | Select-Object -Unique)
 
         $scriptBlock = {
-            param($ExpectedPaths, $ExpectedProcesses, $ExpectedExtensions)
+            param($Server, $ExpectedPaths, $ExpectedProcesses, $ExpectedExtensions)
 
-            $result = [pscustomobject]@{
-                DefenderPresent   = $false
-                RealTimeEnabled   = $null
-                ThirdPartyAv      = @()
-                MissingPaths      = @()
-                MissingProcesses  = @()
-                MissingExtensions = @()
-                ExclusionCount    = 0
-                ReadError         = ''
-            }
+            # RunLocal gorevi YEREL havuzda kosar; hedefe gitmek icin
+            # Invoke-Command sart. Bu olmadan arac, uc sunuculu bir
+            # ortamda KENDI makinesini uc kez okuyup sonuclari sunucu
+            # adlariyla etiketliyordu.
+            Invoke-Command -ComputerName $Server -ErrorAction Stop -ArgumentList $ExpectedPaths, $ExpectedProcesses, $ExpectedExtensions -ScriptBlock {
+                param($ExpectedPaths, $ExpectedProcesses, $ExpectedExtensions)
 
-            # Ucuncu parti AV kayitli mi? (Sunucu SKU'larinda SecurityCenter2
-            # cogu zaman yoktur; yoklugu "AV yok" anlamina GELMEZ.)
-            try {
-                $products = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)
-                $result.ThirdPartyAv = @($products | Where-Object { $_.displayName -notmatch 'Defender' } | ForEach-Object { $_.displayName })
-            }
-            catch { }
+                $result = [pscustomobject]@{
+                    DefenderPresent   = $false
+                    RealTimeEnabled   = $null
+                    ThirdPartyAv      = @()
+                    MissingPaths      = @()
+                    MissingProcesses  = @()
+                    MissingExtensions = @()
+                    ExclusionCount    = 0
+                    RunningMode       = ''
+                    InstallPathUnread = $false
+                    ReadError         = ''
+                }
 
-            if (-not (Get-Command -Name Get-MpPreference -ErrorAction SilentlyContinue)) {
-                $result.ReadError = 'Get-MpPreference yok (Defender kurulu degil veya kaldirilmis).'
-                return $result
-            }
-            $result.DefenderPresent = $true
+                # Ucuncu parti AV kayitli mi? (Sunucu SKU'larinda SecurityCenter2
+                # cogu zaman yoktur; yoklugu "AV yok" anlamina GELMEZ.)
+                try {
+                    $products = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)
+                    $result.ThirdPartyAv = @($products | Where-Object { $_.displayName -notmatch 'Defender' } | ForEach-Object { $_.displayName })
+                }
+                catch { }
 
-            try {
-                $preference = Get-MpPreference -ErrorAction Stop
-                # Okunamazsa $null kalir: "kapali" ile "bilinmiyor" ayri seylerdir.
-                try { $result.RealTimeEnabled = [bool](Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled }
-                catch { $result.RealTimeEnabled = $null }
-            }
-            catch {
-                $result.ReadError = $_.Exception.Message
-                return $result
-            }
+                if (-not (Get-Command -Name Get-MpPreference -ErrorAction SilentlyContinue)) {
+                    $result.ReadError = 'Get-MpPreference yok (Defender kurulu degil veya kaldirilmis).'
+                    return $result
+                }
+                $result.DefenderPresent = $true
 
-            $paths = @($preference.ExclusionPath)
-            $processes = @($preference.ExclusionProcess)
-            $extensions = @($preference.ExclusionExtension)
-            $result.ExclusionCount = $paths.Count + $processes.Count + $extensions.Count
+                try {
+                    $preference = Get-MpPreference -ErrorAction Stop
+                    # Okunamazsa $null kalir: "kapali" ile "bilinmiyor" ayri seylerdir.
+                    try {
+                        $status = Get-MpComputerStatus -ErrorAction Stop
+                        $result.RealTimeEnabled = [bool]$status.RealTimeProtectionEnabled
+                        # PASIF MOD: ucuncu parti bir AV devraldiginda Defender
+                        # gercek zamanli korumayi birakir. Bunu "tarama yok,
+                        # zararsiz" diye okumak, Symantec .edb'yi tararken
+                        # sunucuyu temiz gostermek demektir. root\SecurityCenter2
+                        # Server SKU'larinda cogu zaman bos dondugu icin tek
+                        # guvenilir isaret budur.
+                        $result.RunningMode = [string]$status.AMRunningMode
+                    }
+                    catch { $result.RealTimeEnabled = $null }
+                }
+                catch {
+                    $result.ReadError = $_.Exception.Message
+                    return $result
+                }
 
-            # Yol karsilastirmasi: bir ust klasorun dislanmasi alt klasoru de kapsar.
-            foreach ($expected in @($ExpectedPaths)) {
-                $normalized = $expected.TrimEnd('\')
-                $covered = $false
-                foreach ($excluded in $paths) {
-                    if (-not $excluded) { continue }
-                    $candidate = ([string]$excluded).TrimEnd('\')
-                    if ($normalized -eq $candidate -or $normalized.StartsWith($candidate + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-                        $covered = $true; break
+                # KURULUMDAN TURETILEN YOLLAR.
+                # En onemlisi TRANSPORT KUYRUGUDUR (mail.que): Exchange'in her
+                # mesaji diske yazdigi yer. Beklenen listede hic yoktu, yani
+                # Defender mail.que'yu tararken modul "0 eksik dislama, OK"
+                # diyordu - tam da bulmasi gereken senaryoda. Modul basligi ve
+                # notu ise .que kapsamini vaat ediyordu.
+                #
+                # Yol HEDEF sunucudan okunur; kurulum surucusu her sunucuda
+                # farkli olabilir.
+                $expectedFromInstall = @()
+                try {
+                    $setupKey = 'HKLM:\SOFTWARE\Microsoft\ExchangeServer\v15\Setup'
+                    if (Test-Path $setupKey) {
+                        $installRoot = [string](Get-ItemProperty $setupKey).MsiInstallPath
+                        if ($installRoot) {
+                            $installRoot = $installRoot.TrimEnd('\')
+                            $expectedFromInstall += (Join-Path $installRoot 'TransportRoles\data\Queue')
+                            $expectedFromInstall += (Join-Path $installRoot 'TransportRoles\data')
+                            $expectedFromInstall += (Join-Path $installRoot 'Logging')
+                        }
                     }
                 }
-                if (-not $covered) { $result.MissingPaths += $expected }
-            }
-
-            foreach ($expected in @($ExpectedProcesses)) {
-                $found = $false
-                foreach ($excluded in $processes) {
-                    if (([string]$excluded) -match [regex]::Escape($expected)) { $found = $true; break }
+                catch { }
+                if ($expectedFromInstall.Count -eq 0) {
+                    # Kurulum yolu okunamadi: bunlari "dislanmamis" saymak
+                    # yanlis sucalama olur, sessizce atlamak da kapsam yalani.
+                    $result.InstallPathUnread = $true
                 }
-                if (-not $found) { $result.MissingProcesses += $expected }
-            }
+                $ExpectedPaths = @($ExpectedPaths) + $expectedFromInstall
 
-            foreach ($expected in @($ExpectedExtensions)) {
-                $normalized = $expected.TrimStart('.')
-                $found = $false
-                foreach ($excluded in $extensions) {
-                    if (([string]$excluded).TrimStart('.') -eq $normalized) { $found = $true; break }
+                $paths = @($preference.ExclusionPath)
+                $processes = @($preference.ExclusionProcess)
+                $extensions = @($preference.ExclusionExtension)
+                $result.ExclusionCount = $paths.Count + $processes.Count + $extensions.Count
+
+                # Yol karsilastirmasi: bir ust klasorun dislanmasi alt klasoru de kapsar.
+                #
+                # Duz metin karsilastirmasi YETMEZ. Defender iki bicimi daha
+                # kabul eder ve ikisi de yaygindir:
+                #   D:\ExchangeDatabases\*        (joker)
+                #   %ExchangeInstallPath%Mailbox  (ortam degiskeni)
+                # Bunlari "eksik" saymak, DOGRU yapilandirilmis bir sunucuya
+                # "AV yanlis yapilandirilmis, her I/O'ya gecikme ekliyor"
+                # demektir - modulun kacinmasi gereken sucalamanin ta kendisi.
+                $expandedExclusions = @()
+                foreach ($excluded in $paths) {
+                    if (-not $excluded) { continue }
+                    $text = [string]$excluded
+                    # Ortam degiskenleri HEDEF makinede cozulur (bu scriptblock
+                    # orada kosuyor), yani %ExchangeInstallPath% dogru genisler.
+                    $expanded = [System.Environment]::ExpandEnvironmentVariables($text)
+                    $expandedExclusions += $expanded.TrimEnd('\')
                 }
-                if (-not $found) { $result.MissingExtensions += $expected }
-            }
 
-            return $result
+                foreach ($expected in @($ExpectedPaths)) {
+                    $normalized = ([System.Environment]::ExpandEnvironmentVariables([string]$expected)).TrimEnd('\')
+                    $covered = $false
+                    foreach ($candidate in $expandedExclusions) {
+                        if ($candidate -match '[\*\?]') {
+                            # Joker: hem yolun kendisi hem alti eslesmeli.
+                            $pattern = $candidate.TrimEnd('*').TrimEnd('\')
+                            if ($normalized -like $candidate -or
+                                $normalized -eq $pattern -or
+                                $normalized.StartsWith($pattern + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                                $covered = $true; break
+                            }
+                            continue
+                        }
+                        if ($normalized -eq $candidate -or
+                            $normalized.StartsWith($candidate + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $covered = $true; break
+                        }
+                    }
+                    if (-not $covered) { $result.MissingPaths += $expected }
+                }
+
+                foreach ($expected in @($ExpectedProcesses)) {
+                    $found = $false
+                    foreach ($excluded in $processes) {
+                        if (([string]$excluded) -match [regex]::Escape($expected)) { $found = $true; break }
+                    }
+                    if (-not $found) { $result.MissingProcesses += $expected }
+                }
+
+                foreach ($expected in @($ExpectedExtensions)) {
+                    $normalized = $expected.TrimStart('.')
+                    $found = $false
+                    foreach ($excluded in $extensions) {
+                        if (([string]$excluded).TrimStart('.') -eq $normalized) { $found = $true; break }
+                    }
+                    if (-not $found) { $result.MissingExtensions += $expected }
+                }
+
+                return $result
+            }
         }
 
         $tasks = @(foreach ($server in $servers) {
             New-EDLocalTask -Key $server.Name -Script $scriptBlock -TimeoutSeconds 180 `
                 -Parameters @{
+                    Server = $server.Name
                     ExpectedPaths = $expectedPaths
                     ExpectedProcesses = $expectedProcesses
                     ExpectedExtensions = $expectedExtensions
@@ -183,6 +266,8 @@ Register-EDModule @{
             $thirdParty = @(Get-EDProperty $data 'ThirdPartyAv' @())
             $defenderPresent = [bool](Get-EDProperty $data 'DefenderPresent' $false)
             $realTime = Get-EDProperty $data 'RealTimeEnabled'
+            $runningMode = [string](Get-EDProperty $data 'RunningMode')
+            $installUnread = [bool](Get-EDProperty $data 'InstallPathUnread' $false)
             $readError = [string](Get-EDProperty $data 'ReadError')
 
             if (-not $defenderPresent) {
@@ -223,13 +308,26 @@ Register-EDModule @{
             if ($totalMissing -eq 0) {
                 $cellStatus[$server] = 'OK'
             }
+            elseif ($realTime -eq $false -and $runningMode -match 'Passive') {
+                # PASIF MOD: Defender korumayi birakti cunku BASKA bir AV
+                # devraldi. "Tarama yapilmiyor" demek, Symantec .edb'yi
+                # tararken sunucuyu temiz gostermek olur. Defender'in
+                # dislamalari da artik gecerli degildir: hukum verilemez.
+                $cellStatus[$server] = 'N/A'
+                $pathValues[$server] = 'N/A'; $processValues[$server] = 'N/A'; $extensionValues[$server] = 'N/A'
+                $notes += ("{0}: Defender PASIF MODDA ({1}) - gercek tarayici baska bir AV urunudur ve onun dislamalari bu aractan GORULEMEZ. Eksik gorunen {2} dislama hukum icin kullanilamaz." -f $server, $runningMode, $totalMissing)
+            }
             elseif ($realTime -eq $false) {
-                # Gercek zamanli koruma kapali: eksik dislama zararsizdir.
+                # Gercek zamanli koruma kapali VE pasif mod degil: Defender
+                # gercekten taramiyor, eksik dislama zararsizdir.
                 $cellStatus[$server] = 'OK'
                 $notes += ("{0}: {1} dislama eksik ama Defender gercek zamanli korumasi KAPALI; tarama yapilmadigi icin gecikmeye sebep olmaz." -f $server, $totalMissing)
             }
             else {
                 $cellStatus[$server] = 'WARN'
+                if ($installUnread) {
+                    $notes += ("{0}: Exchange kurulum yolu okunamadi; transport kuyrugu (mail.que) ve Logging klasoru KONTROL EDILEMEDI." -f $server)
+                }
                 $detail = @()
                 if ($missingPaths.Count -gt 0) { $detail += "$($missingPaths.Count) yol" }
                 if ($missingProcesses.Count -gt 0) { $detail += "$($missingProcesses.Count) islem" }

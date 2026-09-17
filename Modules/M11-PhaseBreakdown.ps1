@@ -55,6 +55,10 @@ Register-EDModule @{
             return @(New-EDRow -Module 'M11' -Check 'Faz kirilimi' -Status 'N/A' -Note $note)
         }
 
+        # ED-LOCAL-OK: bu gorev hedef sunucuda DEGIL, aracin kostugu makinede
+        # calismalidir. C# ayristirici log dosyalarini SMB uzerinden (UNC yolu)
+        # okur; uzak runspace acmak hem gereksiz hem de Exchange sunucusuna
+        # ayristirma yuku bindirmek olurdu.
         $analyze = {
             param($Server, $UncPath, $StartUtc, $EndUtc, $MaxMessages, $InnerParallelism, [int]$BudgetSeconds = 0)
             # Butce is basladiktan sonra hesaplanir; ayrintili gerekce icin

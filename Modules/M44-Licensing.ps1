@@ -43,26 +43,35 @@ Register-EDModule @{
 
         # --- Windows tarafi (yerel havuz; Exchange throttling'ine tabi degil) ---
         $windowsScript = {
-            # Yalnizca Windows isletim sistemi urunu; digerleri (Office vb.) elenir.
-            $product = @(Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue |
-                Where-Object { $_.PartialProductKey -and $_.Name -match 'Windows' }) | Select-Object -First 1
-            if (-not $product) {
-                return [pscustomobject]@{ Found = $false; Status = 'bilinmiyor'; Description = ''; GraceMinutes = 0 }
-            }
-            # LicenseStatus: 0 Unlicensed, 1 Licensed, 2 OOBGrace, 3 OOTGrace,
-            #                4 NonGenuineGrace, 5 Notification, 6 ExtendedGrace
-            $map = @{ 0 = 'Lisanssiz'; 1 = 'Lisansli'; 2 = 'OOB deneme'; 3 = 'OOT deneme'; 4 = 'Orijinal degil'; 5 = 'Bildirim'; 6 = 'Uzatilmis deneme' }
-            $code = [int]$product.LicenseStatus
-            return [pscustomobject]@{
-                Found        = $true
-                Status       = $(if ($map.ContainsKey($code)) { $map[$code] } else { "kod $code" })
-                Code         = $code
-                Description  = [string]$product.Description
-                GraceMinutes = [int]$product.GracePeriodRemaining
+            param($Server)
+
+            # RunLocal gorevi YEREL havuzda kosar; hedefe gitmek icin
+            # Invoke-Command sart. Bu olmadan arac, uc sunuculu bir
+            # ortamda KENDI makinesini uc kez okuyup sonuclari sunucu
+            # adlariyla etiketliyordu.
+            Invoke-Command -ComputerName $Server -ErrorAction Stop -ScriptBlock {
+                # Yalnizca Windows isletim sistemi urunu; digerleri (Office vb.) elenir.
+                $product = @(Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue |
+                    Where-Object { $_.PartialProductKey -and $_.Name -match 'Windows' }) | Select-Object -First 1
+                if (-not $product) {
+                    return [pscustomobject]@{ Found = $false; Status = 'bilinmiyor'; Description = ''; GraceMinutes = 0 }
+                }
+                # LicenseStatus: 0 Unlicensed, 1 Licensed, 2 OOBGrace, 3 OOTGrace,
+                #                4 NonGenuineGrace, 5 Notification, 6 ExtendedGrace
+                $map = @{ 0 = 'Lisanssiz'; 1 = 'Lisansli'; 2 = 'OOB deneme'; 3 = 'OOT deneme'; 4 = 'Orijinal degil'; 5 = 'Bildirim'; 6 = 'Uzatilmis deneme' }
+                $code = [int]$product.LicenseStatus
+                return [pscustomobject]@{
+                    Found        = $true
+                    Status       = $(if ($map.ContainsKey($code)) { $map[$code] } else { "kod $code" })
+                    Code         = $code
+                    Description  = [string]$product.Description
+                    GraceMinutes = [int]$product.GracePeriodRemaining
+                }
             }
         }
         $windowsTasks = @(foreach ($server in $servers) {
-            New-EDLocalTask -Key $server.Name -Script $windowsScript -TimeoutSeconds 120
+            New-EDLocalTask -Key $server.Name -Script $windowsScript -TimeoutSeconds 120 `
+                -Parameters @{ Server = $server.Name }
         })
 
         $exchangeResults = $Context.Executor.RunExchange([ExchangeDiag.ExecTask[]]$exchangeTasks)

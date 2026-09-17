@@ -347,6 +347,8 @@ function Get-EDDeliveryAnalysis {
     }
 
     if ($smbTargets.Count -gt 0) {
+        # ED-LOCAL-OK: ayristirici, log dosyalarini SMB uzerinden (UNC yolu)
+        # aracin kostugu makineden okur; hedefte runspace acilmaz.
         $analyze = {
             param($Server, $UncPath, $StartUtc, $EndUtc, $SlowThreshold, $TopSlowCount, $InnerParallelism, [int]$BudgetSeconds = 0)
             # C# tipleri ayni AppDomain'de yuklu oldugu icin yerel runspace'ten

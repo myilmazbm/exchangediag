@@ -39,67 +39,76 @@ Register-EDModule @{
         }
 
         $scriptBlock = {
-            $result = [pscustomobject]@{
-                TotalMemoryMb   = $null
-                FreeMemoryMb    = $null
-                LogicalCpus     = $null
-                UptimeHours     = $null
-                PageFileTotalMb = $null
-                PageFileUsedMb  = $null
-                PageFilePeakMb  = $null
-                OsCaption       = ''
-                NetRelease      = $null
-                NetVersion      = ''
-                ReadError       = ''
-            }
+            param($Server)
 
-            try {
-                $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-                # TotalVisibleMemorySize ve FreePhysicalMemory KILOBAYTTIR.
-                $result.TotalMemoryMb = [math]::Round($os.TotalVisibleMemorySize / 1024.0, 0)
-                $result.FreeMemoryMb = [math]::Round($os.FreePhysicalMemory / 1024.0, 0)
-                $result.OsCaption = [string]$os.Caption
-                if ($os.LastBootUpTime) {
-                    $result.UptimeHours = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
+            # RunLocal gorevi YEREL havuzda kosar. Bu olmadan modul, her
+            # sunucu icin ARACIN KOSTUGU makinenin bellegini, CPU sayisini,
+            # uptime'ini ve pagefile'ini okuyup sonuclari sunucu adlariyla
+            # etiketliyordu.
+            Invoke-Command -ComputerName $Server -ErrorAction Stop -ScriptBlock {
+                $result = [pscustomobject]@{
+                    TotalMemoryMb   = $null
+                    FreeMemoryMb    = $null
+                    LogicalCpus     = $null
+                    UptimeHours     = $null
+                    PageFileTotalMb = $null
+                    PageFileUsedMb  = $null
+                    PageFilePeakMb  = $null
+                    OsCaption       = ''
+                    NetRelease      = $null
+                    NetVersion      = ''
+                    ReadError       = ''
                 }
-            }
-            catch { $result.ReadError = $_.Exception.Message }
 
-            try {
-                $system = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-                $result.LogicalCpus = [int]$system.NumberOfLogicalProcessors
-            }
-            catch { }
-
-            try {
-                # Birden fazla pagefile olabilir; hepsi toplanir.
-                $pageFiles = @(Get-CimInstance -ClassName Win32_PageFileUsage -ErrorAction Stop)
-                if ($pageFiles.Count -gt 0) {
-                    $total = 0; $used = 0; $peak = 0
-                    foreach ($pageFile in $pageFiles) {
-                        $total += [int]$pageFile.AllocatedBaseSize
-                        $used += [int]$pageFile.CurrentUsage
-                        $peak += [int]$pageFile.PeakUsage
+                try {
+                    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+                    # TotalVisibleMemorySize ve FreePhysicalMemory KILOBAYTTIR.
+                    $result.TotalMemoryMb = [math]::Round($os.TotalVisibleMemorySize / 1024.0, 0)
+                    $result.FreeMemoryMb = [math]::Round($os.FreePhysicalMemory / 1024.0, 0)
+                    $result.OsCaption = [string]$os.Caption
+                    if ($os.LastBootUpTime) {
+                        $result.UptimeHours = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
                     }
-                    $result.PageFileTotalMb = $total
-                    $result.PageFileUsedMb = $used
-                    $result.PageFilePeakMb = $peak
                 }
-            }
-            catch { }
+                catch { $result.ReadError = $_.Exception.Message }
 
-            try {
-                $net = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -ErrorAction Stop
-                $result.NetRelease = [int]$net.Release
-                $result.NetVersion = [string]$net.Version
-            }
-            catch { }
+                try {
+                    $system = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+                    $result.LogicalCpus = [int]$system.NumberOfLogicalProcessors
+                }
+                catch { }
 
-            return $result
+                try {
+                    # Birden fazla pagefile olabilir; hepsi toplanir.
+                    $pageFiles = @(Get-CimInstance -ClassName Win32_PageFileUsage -ErrorAction Stop)
+                    if ($pageFiles.Count -gt 0) {
+                        $total = 0; $used = 0; $peak = 0
+                        foreach ($pageFile in $pageFiles) {
+                            $total += [int]$pageFile.AllocatedBaseSize
+                            $used += [int]$pageFile.CurrentUsage
+                            $peak += [int]$pageFile.PeakUsage
+                        }
+                        $result.PageFileTotalMb = $total
+                        $result.PageFileUsedMb = $used
+                        $result.PageFilePeakMb = $peak
+                    }
+                }
+                catch { }
+
+                try {
+                    $net = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -ErrorAction Stop
+                    $result.NetRelease = [int]$net.Release
+                    $result.NetVersion = [string]$net.Version
+                }
+                catch { }
+
+                return $result
+            }
         }
 
         $tasks = @(foreach ($server in $servers) {
-            New-EDLocalTask -Key $server.Name -Script $scriptBlock -TimeoutSeconds 180
+            New-EDLocalTask -Key $server.Name -Script $scriptBlock -TimeoutSeconds 180 `
+                -Parameters @{ Server = $server.Name }
         })
         $results = $Context.Executor.RunLocal([ExchangeDiag.ExecTask[]]$tasks)
 

@@ -44,67 +44,75 @@ Register-EDModule @{
         $maxEvents = 4000        # sunucu basina tavan; gruplama zaten ozetliyor
 
         $scriptBlock = {
-            param($Hours, $MaxEvents)
+            param($Server, $Hours, $MaxEvents)
 
-            $startTime = (Get-Date).AddHours(-1 * $Hours)
-            $relevant = '^(MSExchange|ESE$|ExchangeStore|Microsoft-Exchange)'
-            $storage = '^(disk|Disk|Ntfs|volsnap|storahci|iScsiPrt|partmgr)$'
+            # RunLocal gorevi YEREL havuzda kosar; hedefe gitmek icin
+            # Invoke-Command sart. Bu olmadan arac, uc sunuculu bir
+            # ortamda KENDI makinesini uc kez okuyup sonuclari sunucu
+            # adlariyla etiketliyordu.
+            Invoke-Command -ComputerName $Server -ErrorAction Stop -ArgumentList $Hours, $MaxEvents -ScriptBlock {
+                param($Hours, $MaxEvents)
 
-            $events = @()
-            foreach ($logName in @('Application', 'System')) {
-                try {
-                    # Level 1=Critical 2=Error 3=Warning. Filtreleme sunucu tarafinda.
-                    $found = Get-WinEvent -FilterHashtable @{
-                        LogName   = $logName
-                        Level     = @(1, 2, 3)
-                        StartTime = $startTime
-                    } -MaxEvents $MaxEvents -ErrorAction Stop
-                    $events += $found
-                }
-                catch [System.Exception] {
-                    # "No events were found" bir HATA DEGILDIR - temiz gunluk demektir.
-                    if ($_.Exception.Message -notmatch 'No events were found|Belirtilen sorguyla eslesen') {
-                        Write-Output ([pscustomobject]@{ Kind = 'error'; LogName = $logName; Message = $_.Exception.Message })
+                $startTime = (Get-Date).AddHours(-1 * $Hours)
+                $relevant = '^(MSExchange|ESE$|ExchangeStore|Microsoft-Exchange)'
+                $storage = '^(disk|Disk|Ntfs|volsnap|storahci|iScsiPrt|partmgr)$'
+
+                $events = @()
+                foreach ($logName in @('Application', 'System')) {
+                    try {
+                        # Level 1=Critical 2=Error 3=Warning. Filtreleme sunucu tarafinda.
+                        $found = Get-WinEvent -FilterHashtable @{
+                            LogName   = $logName
+                            Level     = @(1, 2, 3)
+                            StartTime = $startTime
+                        } -MaxEvents $MaxEvents -ErrorAction Stop
+                        $events += $found
+                    }
+                    catch [System.Exception] {
+                        # "No events were found" bir HATA DEGILDIR - temiz gunluk demektir.
+                        if ($_.Exception.Message -notmatch 'No events were found|Belirtilen sorguyla eslesen') {
+                            Write-Output ([pscustomobject]@{ Kind = 'error'; LogName = $logName; Message = $_.Exception.Message })
+                        }
                     }
                 }
-            }
 
-            $groups = @{}
-            $totalScanned = 0
-            foreach ($event in $events) {
-                $totalScanned++
-                $provider = [string]$event.ProviderName
-                if ($provider -notmatch $relevant -and $provider -notmatch $storage) { continue }
+                $groups = @{}
+                $totalScanned = 0
+                foreach ($event in $events) {
+                    $totalScanned++
+                    $provider = [string]$event.ProviderName
+                    if ($provider -notmatch $relevant -and $provider -notmatch $storage) { continue }
 
-                $key = "$provider|$($event.Id)|$($event.LevelDisplayName)"
-                if (-not $groups.ContainsKey($key)) {
-                    $message = [string]$event.Message
-                    if ($message.Length -gt 300) { $message = $message.Substring(0, 300) + '...' }
-                    $groups[$key] = [pscustomobject]@{
-                        Kind      = 'group'
-                        Provider  = $provider
-                        EventId   = $event.Id
-                        Level     = [string]$event.LevelDisplayName
-                        Count     = 0
-                        FirstSeen = $event.TimeCreated
-                        LastSeen  = $event.TimeCreated
-                        Message   = ($message -replace '\s+', ' ')
-                        IsStorage = ($provider -match $storage)
+                    $key = "$provider|$($event.Id)|$($event.LevelDisplayName)"
+                    if (-not $groups.ContainsKey($key)) {
+                        $message = [string]$event.Message
+                        if ($message.Length -gt 300) { $message = $message.Substring(0, 300) + '...' }
+                        $groups[$key] = [pscustomobject]@{
+                            Kind      = 'group'
+                            Provider  = $provider
+                            EventId   = $event.Id
+                            Level     = [string]$event.LevelDisplayName
+                            Count     = 0
+                            FirstSeen = $event.TimeCreated
+                            LastSeen  = $event.TimeCreated
+                            Message   = ($message -replace '\s+', ' ')
+                            IsStorage = ($provider -match $storage)
+                        }
                     }
+                    $group = $groups[$key]
+                    $group.Count++
+                    if ($event.TimeCreated -lt $group.FirstSeen) { $group.FirstSeen = $event.TimeCreated }
+                    if ($event.TimeCreated -gt $group.LastSeen) { $group.LastSeen = $event.TimeCreated }
                 }
-                $group = $groups[$key]
-                $group.Count++
-                if ($event.TimeCreated -lt $group.FirstSeen) { $group.FirstSeen = $event.TimeCreated }
-                if ($event.TimeCreated -gt $group.LastSeen) { $group.LastSeen = $event.TimeCreated }
-            }
 
-            Write-Output ([pscustomobject]@{ Kind = 'summary'; TotalScanned = $totalScanned; Truncated = ($totalScanned -ge ($MaxEvents * 2)) })
-            foreach ($group in $groups.Values) { Write-Output $group }
+                Write-Output ([pscustomobject]@{ Kind = 'summary'; TotalScanned = $totalScanned; Truncated = ($totalScanned -ge ($MaxEvents * 2)) })
+                foreach ($group in $groups.Values) { Write-Output $group }
+            }
         }
 
         $tasks = @(foreach ($server in $servers) {
             New-EDLocalTask -Key $server.Name -Script $scriptBlock -TimeoutSeconds 300 `
-                -Parameters @{ Hours = $windowHours; MaxEvents = $maxEvents }
+                -Parameters @{ Server = $server.Name; Hours = $windowHours; MaxEvents = $maxEvents }
         })
         $results = $Context.Executor.RunLocal([ExchangeDiag.ExecTask[]]$tasks)
 

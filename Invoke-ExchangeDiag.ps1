@@ -179,6 +179,8 @@ try {
     # -----------------------------------------------------------------------
     $activeProfile = Get-EDActiveProfile -Config $config
     $skipModules = @($activeProfile['skipModules'])
+    $ignoreFindings = @($activeProfile['ignoreFindings'])
+    $suppressed = @()
 
     $selected = switch ($PSCmdlet.ParameterSetName) {
         'Module' { @(Get-EDModules -Id $Module) }
@@ -278,6 +280,21 @@ try {
         }
         $watch.Stop()
 
+        # Profil bastirmasi. SESSIZ OLMAZ: hukum N/A'e cekilir ama hem satirin
+        # notuna hem de raporun sonuna hangi desenin neyi bastirdigi yazilir.
+        # Gorunmeyen bastirma, yanlis negatifle aynidir.
+        if ($ignoreFindings.Count -gt 0) {
+            foreach ($row in $rows) {
+                if ($row.Status -notin @('WARN', 'FAIL')) { continue }
+                $match = Test-EDIgnoredFinding -Row $row -IgnoreFindings $ignoreFindings
+                if (-not $match) { continue }
+                $suppressed += ("{0}/{1} ({2} -> N/A, desen: {3})" -f $row.Module, $row.Check, $row.Status, $match)
+                $log.Warn("$($row.Module)/$($row.Check): bulgu profil '$($config.Environment.profile)' tarafindan bastirildi (ignoreFindings: $match). Hukum N/A'e cekildi.")
+                $row.Status = 'N/A'
+                $row.Note = ("[BASTIRILDI: profil '{0}', desen '{1}'] {2}" -f $config.Environment.profile, $match, $row.Note)
+            }
+        }
+
         $allRows += $rows
         $timings += [pscustomobject]@{
             Id = $moduleInfo.Id; Name = $moduleInfo.Name
@@ -292,6 +309,13 @@ try {
     # runspace'lerini havuza geri vermez. Havuz tavani telafi edilse bile
     # operator bunu BILMELI: sonraki modullerin TIMEOUT'lari kendi
     # yavasliklarindan degil, kapasite daralmasindan olabilir.
+    if ($suppressed.Count -gt 0) {
+        $suppressNote = ("Profil '{0}' {1} bulguyu bastirdi: {2}. Bastirma bir COZUM DEGILDIR; " -f `
+            $config.Environment.profile, $suppressed.Count, ($suppressed -join ' | '))
+        $suppressNote += 'Config\profiles.json -> ignoreFindings listesini gozden gecirin.'
+        $allRows += New-EDRow -Module 'CORE' -Check 'Bastirilan bulgu' -Status 'WARN' -Note $suppressNote
+    }
+
     if ($context.Executor.AbandonedPipelines -gt 0) {
         $abandonNote = "$($context.Executor.AbandonedPipelines) is zaman asimina ugradi ve TERK EDILDI (arka planda suruyor olabilir). "
         $abandonNote += 'PowerShell.Stop() yerel kodda calisan bir isi durduramaz. Sayiya kuyrukta beklerken zaman asan isler de '
