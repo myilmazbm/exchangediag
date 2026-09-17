@@ -75,7 +75,12 @@ Araç bu tipik teşhis örüntülerini **otomatik olarak** yüzeye çıkarabilme
 6. **Ortalama yasak, persentil zorunlu.** Süre/gecikme ölçen her yerde min / p50 / p90 / p95 / p99 / max.
 7. **Zaman damgalı arşiv.** Her çalıştırma `output\yyyyMMdd-HHmmss\` altına yazılır → yoğun/sakin saat karşılaştırması mümkün olur.
 8. **Baseline karşılaştırma.** `-CompareWith <klasör>` ile önceki çalıştırmaya göre delta.
-9. **Her modülde timeout.** Yanıt vermeyen sunucu aracı kilitlemez; hücre `TIMEOUT` yazar.
+9. **Her modülde timeout — iki katmanlı.** Yanıt vermeyen sunucu aracı kilitlemez; hücre `TIMEOUT` yazar.
+   Ama `PowerShell.Stop()` **senkrondur** ve yerel kodda (ham log ayrıştırma) çalışan bir iş durma isteğini görmez;
+   yürütücü o işi **terk eder** ve devam eder. Bu yüzden uzun süren yerel işler ayrıca **kooperatif bir bütçe** alır
+   (`BudgetSeconds = 840` < `TimeoutSeconds = 900`): bütçe dolunca ayrıştırıcı kendi durur ve **kısmi sonuç** döndürür.
+   Kısmi sonuç sessiz kalmaz — M10/M11 satırı `WARN` olur ve notta "PENCERE KISMI" yazar. Terk edilen her iş için
+   havuz tavanı bir artırılır, aksi halde sonraki modüller kendi bütçelerini harcamadan sıra bekleyip `TIMEOUT` olurdu.
 10. **Maliyet bilinci.** Ağır modüller (geniş aralıklı log taramaları) `-Heavy` bayrağı arkasında, varsayılan kapalı.
 11. **Kanıt sakla.** Her `WARN`/`FAIL` için ham veri CSV olarak diske yazılır; sonradan tartışılabilsin.
 12. **Sürüm duyarlı.** Bir cmdlet/sayaç o sürümde yoksa modül `N/A` döner, hata vermez.
@@ -360,7 +365,7 @@ M21    Disk sec/Write        0.003   0.002   0.004    0.003   OK
 | Tek sunucu | `-Server <ad>` | Derin inceleme |
 | Kuru çalıştırma | `-ListModules` | Hangi modüller bu ortamda geçerli |
 | Log erişim modu | `-LogAccess Auto\|Smb\|Cmdlet` | Ham dosya okuma vs cmdlet (Bölüm 14) |
-| Parser doğrulama | `-VerifyParser` | Ham parse sonucunu cmdlet'e karşı doğrular |
+| Parser doğrulama | `-VerifyParser` | Ham parse sonucunu cmdlet'e karşı doğrular. **M10 içinden çalışır — `-Heavy` gerekir**, yoksa rapora `N/A` satırı düşer |
 
 ---
 
@@ -547,6 +552,10 @@ Araç saf PowerShell 5.1 ile yazılırsa kullanılamayacak kadar yavaş kalır. 
 
 **Kritik kural:** Modüller kendileri `Invoke-Command` çağırmaz. Her modül *bildirir*: hedef sunucular + scriptblock + timeout. `ParallelExecutor` bunları tek bir paylaşılan havuzda, tek bir timeout politikasıyla koşturur.
 
+> **Timeout'un sınırı.** Bir iş yerel koda girdikten sonra dışarıdan durdurulamaz (bkz. Bölüm 2, madde 9).
+> `TIMEOUT` hücresi "iş durduruldu" değil, **"iş terk edildi, arka planda sürüyor olabilir"** demektir.
+> Gerçek sınır, ayrıştırıcıya verilen kooperatif bütçedir; o da bloke bir SMB okumasını kesemez.
+
 ### Teslimat ve derleme
 
 Teslimat **`.ps1` dosyalarıdır** — imzasız `.exe` güven sorunu yoktur, tüm kaynak okunabilir ve denetlenebilir. C# çekirdek çalışma anında derlenir:
@@ -557,7 +566,7 @@ Teslimat **`.ps1` dosyalarıdır** — imzasız `.exe` güven sorunu yoktur, tü
 - ⚠️ **Dil sürümü C# 5 ile sınırlıdır.** `Add-Type`, PS 5.1'de .NET Framework'ün `csc.exe`'sini kullanır. String interpolation, `?.`, `nameof`, tuple, pattern matching **kullanılamaz**. Generics, LINQ, `async/await`, `Parallel.ForEach` kullanılabilir.
 - **.NET SDK ve xunit test projesi KURULMADI — bilinçli karar.** Planda `Tests\ExchangeDiag.Core.Tests.csproj` (`<LangVersion>5</LangVersion>`) öngörülmüştü; gerekçesi iki maddeydi ve ikisi de başka yoldan karşılandığı için vazgeçildi:
   - *C# 5 kısıtını derleme anında zorlamak:* `Add-Type` zaten .NET Framework `csc.exe`'sini kullanıyor. Ölçülerek doğrulandı — C# 6 string interpolation içeren bir kaynak `Unexpected character '$'` ile **reddedildi**. `CoreLoader` her SHA256 değişiminde yeniden derlediği için ihlal ilk test çalıştırmasında görünür. `LangVersion 5` bu garantiyi tekrarlar, eklemez.
-  - *C# birim testleri:* Parser 44 testle sınanıyor ve bunlar **Add-Type'ın ürettiği gerçek assembly** üzerinden koşuyor — yani üretimde çalışan ikilinin ta kendisi. xunit ayrı bir derleme çıktısını test ederdi; mevcut düzen bu açıdan daha yakındır.
+  - *C# birim testleri:* Parser 56 testle sınanıyor ve bunlar **Add-Type'ın ürettiği gerçek assembly** üzerinden koşuyor — yani üretimde çalışan ikilinin ta kendisi. xunit ayrı bir derleme çıktısını test ederdi; mevcut düzen bu açıdan daha yakındır.
   - Teslimat zaten SDK gerektirmez; müşteri tarafında yalnızca `.ps1` dosyaları çalışır.
   - **Ne zaman yeniden değerlendirilmeli:** C# tarafı bugün üç dosya. On dosyaya çıkarsa PowerShell üzerinden test etmek hantallaşır ve gerçek bir debugger gerekir; o noktada `dotnet test` kurulumu kendini amorti eder.
 

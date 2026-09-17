@@ -53,6 +53,9 @@ namespace ExchangeDiag
         {
             _line = line;
             _count = 0;
+            // Literal tablosu da sifirlanmali: kacisli tirnak iceren her satir
+            // buraya bir string ekler ve temizlenmezse dosya boyunca birikir.
+            if (_literals != null) _literals.Clear();
 
             int i = 0;
             int n = line.Length;
@@ -144,12 +147,6 @@ namespace ExchangeDiag
             Array.Resize(ref _length, _length.Length * 2);
         }
 
-        public void Reset()
-        {
-            _count = 0;
-            if (_literals != null) _literals.Clear();
-        }
-
         public string GetField(int index)
         {
             if (index < 0 || index >= _count) return null;
@@ -222,7 +219,9 @@ namespace ExchangeDiag
     {
         public string Server;
         public string Via;                  // "smb" | "cmdlet"
-        public long FilesScanned;
+        public long FilesScanned;          // pencereyle kesisen dosya sayisi
+        public long FilesProcessed;        // gercekten islenen dosya sayisi
+        public bool Truncated;             // zaman siniri kesti: SONUC KISMI
         public long LinesScanned;
         public long DeliverEvents;
         public long LatencyComputed;
@@ -282,7 +281,9 @@ namespace ExchangeDiag
         public long MessagesSeen;
         public long MessagesComplete;       // ucu de olcuulebilen mesajlar
         public long SkewedSamples;          // sunucular arasi saat kaymasi -> negatif faz
-        public bool TruncatedByLimit;
+        public bool TruncatedByLimit;      // maxMessages siniri
+        public bool Truncated;             // zaman siniri kesti: KIRILIM KISMI
+        public long FilesProcessed;
 
         public Stats Total;                 // DELIVER - gonderim (uctan uca)
         public Stats Ingress;               // Transport RECEIVE - gonderim
@@ -306,6 +307,17 @@ namespace ExchangeDiag
 
     public static class TrackingLogParser
     {
+        // Saat anahtarlari StatsAccumulator string bekledigi icin onceden
+        // uretilir; aksi halde her satir icin bir ToString() ayrilir.
+        private static readonly string[] HourKeys = BuildHourKeys();
+
+        private static string[] BuildHourKeys()
+        {
+            string[] keys = new string[24];
+            for (int h = 0; h < 24; h++) keys[h] = h.ToString(CultureInfo.InvariantCulture);
+            return keys;
+        }
+
         // Tracking log kolon adlari. #Fields: satirindan dinamik haritalanir.
         private const string ColDateTime = "date-time";
         private const string ColEventId = "event-id";
@@ -495,6 +507,22 @@ namespace ExchangeDiag
             DateTime startUtc, DateTime endUtc, int topSlowCount, int maxDegreeOfParallelism,
             double slowThresholdSeconds)
         {
+            return AnalyzeDeliveryLatency(server, directory, filePrefix, startUtc, endUtc,
+                                          topSlowCount, maxDegreeOfParallelism, slowThresholdSeconds,
+                                          DateTime.MaxValue);
+        }
+
+        /// <summary>
+        /// deadlineUtc: bu an gecildiginde taranmamis dosyalar atlanir ve sonuc
+        /// KISMI doner (uyari eklenir). Yurutucunun TimeoutSeconds'i bu cagri
+        /// basladiktan sonra fiilen uygulanamaz - PowerShell.Stop() senkrondur
+        /// ve buradaki Parallel.ForEach durma istegini gormez. Gercek sinir budur.
+        /// </summary>
+        public static DeliveryLatencyAnalysis AnalyzeDeliveryLatency(
+            string server, string directory, string filePrefix,
+            DateTime startUtc, DateTime endUtc, int topSlowCount, int maxDegreeOfParallelism,
+            double slowThresholdSeconds, DateTime deadlineUtc)
+        {
             DeliveryLatencyAnalysis analysis = new DeliveryLatencyAnalysis();
             analysis.Server = server;
             analysis.SlowThresholdSeconds = slowThresholdSeconds;
@@ -522,6 +550,17 @@ namespace ExchangeDiag
                 return analysis;
             }
 
+            // FindLogFiles yavas bir SMB payinda dakikalar surebilir; bu noktada
+            // butce bitmis olabilir ve o zaman tek dogru sey hemen donmektir.
+            if (DateTime.UtcNow > deadlineUtc)
+            {
+                analysis.Truncated = true;
+                analysis.Warnings.Add("Zaman siniri dosya listesi cikarilirken doldu; hicbir dosya okunmadi. SONUC YOK.");
+                watch.Stop();
+                analysis.ElapsedMs = watch.Elapsed.TotalMilliseconds;
+                return analysis;
+            }
+
             if (topSlowCount < 1) topSlowCount = 50;
             if (maxDegreeOfParallelism < 1) maxDegreeOfParallelism = Environment.ProcessorCount;
 
@@ -536,11 +575,33 @@ namespace ExchangeDiag
             ParallelOptions options = new ParallelOptions();
             options.MaxDegreeOfParallelism = maxDegreeOfParallelism;
 
-            Parallel.ForEach(files, options, delegate(string path)
+            long filesProcessed = 0;
+            bool deadlineHit = false;
+            Parallel.ForEach(files, options, delegate(string path, ParallelLoopState state)
             {
-                FileAnalysis partial = AnalyzeFile(path, startUtc, endUtc, topSlowCount, localZone, slowThresholdSeconds);
+                // Butce dolduysa kalan dosyalara hic baslanmaz: elde olan kismi
+                // sonucla donmek, hic donmemekten iyidir.
+                if (DateTime.UtcNow > deadlineUtc) { state.Stop(); return; }
+
+                FileAnalysis partial = AnalyzeFile(path, startUtc, endUtc, topSlowCount, localZone, slowThresholdSeconds, deadlineUtc);
+
+                // Saat kovalari kilit DISINDA hazirlanir; kritik bolgede satir
+                // basina degil kova basina tek cagri kalir.
+                List<double>[] hourBuckets = new List<double>[24];
+                for (int i = 0; i < partial.Latencies.Count; i++)
+                {
+                    int hour = partial.Hours[i];
+                    if (hour < 0 || hour > 23) continue;
+                    if (hourBuckets[hour] == null) hourBuckets[hour] = new List<double>();
+                    hourBuckets[hour].Add(partial.Latencies[i]);
+                }
+
                 lock (sync)
                 {
+                    filesProcessed++;
+                    // Dosya SAYISI yetmez: son dosyanin ortasinda kesilmek de
+                    // kismi sonuctur ve o durumda sayilar esitlenir.
+                    if (partial.DeadlineHit) deadlineHit = true;
                     analysis.LinesScanned += partial.LinesScanned;
                     analysis.DeliverEvents += partial.DeliverEvents;
                     analysis.LatencyComputed += partial.Latencies.Count;
@@ -548,8 +609,8 @@ namespace ExchangeDiag
                     analysis.NegativeLatency += partial.NegativeLatency;
                     analysis.SlowDeliveryCount += partial.SlowDeliveryCount;
                     allLatencies.AddRange(partial.Latencies);
-                    for (int i = 0; i < partial.Latencies.Count; i++)
-                        byHour.Add(partial.Hours[i].ToString(CultureInfo.InvariantCulture), partial.Latencies[i]);
+                    for (int hour = 0; hour < 24; hour++)
+                        byHour.AddRange(HourKeys[hour], hourBuckets[hour]);
                     slowest.AddRange(partial.Slowest);
 
                     foreach (KeyValuePair<string, RecipientLatency> pair in partial.SlowRecipients)
@@ -567,9 +628,17 @@ namespace ExchangeDiag
                         }
                     }
 
-                    if (partial.Warning != null) analysis.Warnings.Add(partial.Warning);
+                    analysis.Warnings.AddRange(partial.Warnings);
                 }
             });
+
+            analysis.FilesProcessed = filesProcessed;
+            if (deadlineHit || filesProcessed < files.Length)
+            {
+                analysis.Truncated = true;
+                analysis.Warnings.Add("Zaman siniri asildi: " + files.Length + " dosyanin " +
+                    filesProcessed + " tanesi islendi. SONUC KISMI - persentiller tam pencereyi temsil etmez.");
+            }
 
             analysis.Overall = PercentileEngine.Compute(allLatencies);
 
@@ -610,12 +679,15 @@ namespace ExchangeDiag
             public List<SlowDelivery> Slowest = new List<SlowDelivery>();
             public Dictionary<string, RecipientLatency> SlowRecipients =
                 new Dictionary<string, RecipientLatency>(StringComparer.OrdinalIgnoreCase);
-            public string Warning;
+            public bool DeadlineHit;
+            // Tek string DEGIL: bir dosyada once sema hatasi, sonra bir istisna
+            // olusabilir; ikincisi birincisini ezerse kok neden kaybolur.
+            public List<string> Warnings = new List<string>();
         }
 
         private static FileAnalysis AnalyzeFile(string path, DateTime startUtc, DateTime endUtc,
                                                 int topSlowCount, TimeZoneInfo localZone,
-                                                double slowThresholdSeconds)
+                                                double slowThresholdSeconds, DateTime deadlineUtc)
         {
             FileAnalysis result = new FileAnalysis();
             double slowestThreshold = 0d;
@@ -634,8 +706,19 @@ namespace ExchangeDiag
                     bool haveFields = false;
 
                     string line;
+                    long rawLines = 0;
                     while ((line = reader.ReadLine()) != null)
                     {
+                        // Kontrol HER satir icin gecerli olmali. Asagi tarafa
+                        // konursa semasi uymayan (haveFields == false) bir dosya
+                        // butceye hic bakilmadan sonuna kadar okunur.
+                        if ((rawLines++ & 0xFFFF) == 0 && DateTime.UtcNow > deadlineUtc)
+                        {
+                            result.DeadlineHit = true;
+                            result.Warnings.Add(Path.GetFileName(path) + ": zaman siniri asildi, dosya kismen okundu.");
+                            break;
+                        }
+
                         if (line.Length == 0) continue;
 
                         if (line[0] == '#')
@@ -657,7 +740,7 @@ namespace ExchangeDiag
                                 idxServer = IndexOf(names, ColServer);
                                 haveFields = idxDateTime >= 0 && idxEvent >= 0;
                                 if (!haveFields)
-                                    result.Warning = Path.GetFileName(path) + ": #Fields satirinda date-time/event-id yok.";
+                                    result.Warnings.Add(Path.GetFileName(path) + ": #Fields satirinda date-time/event-id yok.");
                             }
                             continue;
                         }
@@ -732,7 +815,7 @@ namespace ExchangeDiag
             }
             catch (Exception ex)
             {
-                result.Warning = Path.GetFileName(path) + ": " + ex.GetType().Name + " - " + ex.Message;
+                result.Warnings.Add(Path.GetFileName(path) + ": " + ex.GetType().Name + " - " + ex.Message);
             }
 
             return result;
@@ -824,6 +907,18 @@ namespace ExchangeDiag
             string server, string directory, DateTime startUtc, DateTime endUtc,
             int maxMessages, int maxDegreeOfParallelism)
         {
+            return AnalyzePhaseBreakdown(server, directory, startUtc, endUtc,
+                                         maxMessages, maxDegreeOfParallelism, DateTime.MaxValue);
+        }
+
+        /// <summary>
+        /// deadlineUtc: AnalyzeDeliveryLatency ile ayni kooperatif sinir.
+        /// Butce dolunca kalan dosyalar atlanir ve kirilim KISMI doner.
+        /// </summary>
+        public static PhaseBreakdown AnalyzePhaseBreakdown(
+            string server, string directory, DateTime startUtc, DateTime endUtc,
+            int maxMessages, int maxDegreeOfParallelism, DateTime deadlineUtc)
+        {
             PhaseBreakdown breakdown = new PhaseBreakdown();
             breakdown.Server = server;
             Stopwatch watch = Stopwatch.StartNew();
@@ -858,20 +953,37 @@ namespace ExchangeDiag
                 new ConcurrentDictionary<string, MessageTrace>(StringComparer.OrdinalIgnoreCase);
             long linesScanned = 0;
             bool truncated = false;
+            long filesProcessed = 0;
             object sync = new object();
 
             ParallelOptions options = new ParallelOptions();
             options.MaxDegreeOfParallelism = maxDegreeOfParallelism;
 
-            Parallel.ForEach(files, options, delegate(string path)
+            bool deadlineHit = false;
+            Parallel.ForEach(files, options, delegate(string path, ParallelLoopState state)
             {
+                if (DateTime.UtcNow > deadlineUtc)
+                {
+                    lock (sync) { deadlineHit = true; }
+                    state.Stop();
+                    return;
+                }
+
                 long localLines = 0;
                 bool localTruncated = false;
-                string warning = null;
+                bool localDeadline = false;
+                // Tek uyari alani yerine liste: sema hatasi sonrasi gelen bir
+                // istisna ilk mesaji ezmemeli.
+                List<string> localWarnings = new List<string>();
                 TrackingLogKind kind = ClassifyLogFile(path);
 
                 // Submission ve moderasyon log'lari bu kirilimda kullanilmaz.
-                if (kind == TrackingLogKind.MailboxSubmission || kind == TrackingLogKind.Approval) return;
+                // Islenmis sayilir: aksi halde "kismi sonuc" sayimi yanilir.
+                if (kind == TrackingLogKind.MailboxSubmission || kind == TrackingLogKind.Approval)
+                {
+                    lock (sync) { filesProcessed++; }
+                    return;
+                }
 
                 try
                 {
@@ -884,8 +996,17 @@ namespace ExchangeDiag
                         bool haveFields = false;
 
                         string line;
+                        long rawLines = 0;
                         while ((line = reader.ReadLine()) != null)
                         {
+                            // Semadan bagimsiz kontrol; gerekce icin AnalyzeFile'a bakin.
+                            if ((rawLines++ & 0xFFFF) == 0 && DateTime.UtcNow > deadlineUtc)
+                            {
+                                localDeadline = true;
+                                localWarnings.Add(Path.GetFileName(path) + ": zaman siniri asildi, dosya kismen okundu.");
+                                break;
+                            }
+
                             if (line.Length == 0) continue;
 
                             if (line[0] == '#')
@@ -899,7 +1020,7 @@ namespace ExchangeDiag
                                     idxNetworkId = IndexOf(names, ColNetworkId);
                                     haveFields = idxDateTime >= 0 && idxEvent >= 0 && idxNetworkId >= 0;
                                     if (!haveFields)
-                                        warning = Path.GetFileName(path) + ": faz kirilimi icin network-message-id/date-time/event-id gerekli, bulunamadi.";
+                                        localWarnings.Add(Path.GetFileName(path) + ": faz kirilimi icin network-message-id/date-time/event-id gerekli, bulunamadi.");
                                 }
                                 continue;
                             }
@@ -972,16 +1093,26 @@ namespace ExchangeDiag
                 }
                 catch (Exception ex)
                 {
-                    warning = Path.GetFileName(path) + ": " + ex.GetType().Name + " - " + ex.Message;
+                    localWarnings.Add(Path.GetFileName(path) + ": " + ex.GetType().Name + " - " + ex.Message);
                 }
 
                 lock (sync)
                 {
+                    filesProcessed++;
                     linesScanned += localLines;
                     if (localTruncated) truncated = true;
-                    if (warning != null) breakdown.Warnings.Add(warning);
+                    if (localDeadline) deadlineHit = true;
+                    breakdown.Warnings.AddRange(localWarnings);
                 }
             });
+
+            breakdown.FilesProcessed = filesProcessed;
+            if (deadlineHit || filesProcessed < files.Length)
+            {
+                breakdown.Truncated = true;
+                breakdown.Warnings.Add("Zaman siniri asildi: " + files.Length + " dosyanin " + filesProcessed +
+                    " tanesi islendi. FAZ KIRILIMI KISMI - tum dosyalar okunmadi.");
+            }
 
             breakdown.LinesScanned = linesScanned;
             breakdown.MessagesSeen = traces.Count;

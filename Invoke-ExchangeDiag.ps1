@@ -213,6 +213,19 @@ try {
     }
     $plan = @($plan)
 
+    # -VerifyParser yalnizca M10 icinden calisir. M10 planda yoksa hicbir sey
+    # dogrulanmaz; sessiz kalmak "parser dogrulandi" izlenimi verir ki bu,
+    # aracin sattigi tek gercek sigortayi gorunmez sekilde iptal eder.
+    $verifyParserBlocked = $null
+    if ($VerifyParser) {
+        $m10Plan = @($plan | Where-Object { $_.Module.Id -eq 'M10' })
+        if ($m10Plan.Count -eq 0) { $verifyParserBlocked = 'M10 secili moduller arasinda yok' }
+        elseif ($m10Plan[0].SkipReason) { $verifyParserBlocked = $m10Plan[0].SkipReason }
+        if ($verifyParserBlocked) {
+            $log.Warn("-VerifyParser verildi ama parser dogrulamasi CALISMAYACAK: $verifyParserBlocked. Dogrulama M10 icinden yapilir; -Heavy ile calistirin.")
+        }
+    }
+
     if ($ListModules) {
         $log.Info('Modul listesi (kuru calistirma - hicbir kontrol yapilmadi):')
         $listing = foreach ($item in (@([pscustomobject]@{ Module = $topologyModule[0]; SkipReason = $null }) + $plan)) {
@@ -233,6 +246,11 @@ try {
     # Modulleri calistir
     # -----------------------------------------------------------------------
     $allRows += $topologyRows
+
+    if ($verifyParserBlocked) {
+        $allRows += New-EDRow -Module 'M10' -Check 'Parser dogrulama (-VerifyParser)' -Status 'N/A' `
+            -Note "-VerifyParser verildi ama calistirilamadi: $verifyParserBlocked. Gecikme turetimi DOGRULANMIS SAYILMAZ; -Heavy ile tekrar calistirin."
+    }
 
     foreach ($item in $plan) {
         $moduleInfo = $item.Module
@@ -265,6 +283,18 @@ try {
             Status = $status
         }
         $log.Info("$($moduleInfo.Id) tamamlandi: $status ($([math]::Round($watch.Elapsed.TotalSeconds,2)) sn, $($rows.Count) satir)")
+    }
+
+    # Zaman asiminda terk edilen isler arka planda surmeye devam eder ve
+    # runspace'lerini havuza geri vermez. Havuz tavani telafi edilse bile
+    # operator bunu BILMELI: sonraki modullerin TIMEOUT'lari kendi
+    # yavasliklarindan degil, kapasite daralmasindan olabilir.
+    if ($context.Executor.AbandonedPipelines -gt 0) {
+        $abandonNote = "$($context.Executor.AbandonedPipelines) is zaman asimina ugradi ve TERK EDILDI (arka planda suruyor olabilir). "
+        $abandonNote += 'PowerShell.Stop() yerel kodda calisan bir isi durduramaz. Bu calistirmadaki diger TIMEOUT hucreleri '
+        $abandonNote += 'kapasite daralmasindan kaynaklanmis olabilir; -Parallelism degerini artirin veya pencereyi daraltin.'
+        $log.Warn($abandonNote)
+        $allRows += New-EDRow -Module 'CORE' -Check 'Terk edilen is' -Status 'WARN' -Note $abandonNote
     }
 
     # -----------------------------------------------------------------------

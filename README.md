@@ -87,7 +87,7 @@ Ham tracking log okuma (`-LogAccess Smb`) yönetim paylaşımına (`\\sunucu\D$`
 | `-Server <ad>` | Tek sunucu. Kıyas kaybolacağı için derin inceleme dışında önerilmez |
 | `-WindowHours <n>` | Tracking log penceresi |
 | `-LogAccess Auto\|Smb\|Cmdlet` | Ham dosya okuma vs cmdlet |
-| `-VerifyParser` | Ham ayrıştırıcıyı `Get-MessageTrackingLog`'a karşı doğrular (%1 tolerans) |
+| `-VerifyParser` | Ham ayrıştırıcıyı `Get-MessageTrackingLog`'a karşı doğrular (%1 tolerans). **`-Heavy` ile kullanılmalı** — doğrulama M10 içinden çalışır. Ham yol hiç veri üretemediyse karşılaştırma yapılamaz ve kök nedene göre hüküm verilir: ayrıştırıcı regresyonu `FAIL`, saat kayması `WARN`, zaman sınırı `N/A` |
 | `-CompareWith <klasör>` | Önceki çalıştırmayla delta |
 | `-Parallelism <n>` | Eşzamanlılık (throttling tavanından türetilir) |
 | `-Credential` | Alternatif kimlik |

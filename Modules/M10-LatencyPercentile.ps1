@@ -39,6 +39,12 @@ Register-EDModule @{
         $evidence = @()
         $slowEvidence = @()
         $noDataServers = @()
+        # Zaman siniri kesen sunucular: persentilleri EKSIK bir pencereden
+        # hesaplanmistir ve bu, rapora cikmadan yalnizca log'a yazilirsa
+        # aracin uretebilecegi en tehlikeli ciktidir (yanlis sunucuyu suclar).
+        $partialServers = @()
+        $coverageValues = @{}
+        $coverageStatus = @{}
         $anyData = $false
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
@@ -47,6 +53,17 @@ Register-EDModule @{
             $viaValues[$server] = $analysis.Via
 
             foreach ($warning in $analysis.Warnings) { $log.Info("M10/$server : $warning") }
+
+            if ($analysis.Truncated) {
+                $partialServers += $server
+                $coverageValues[$server] = "KISMI $($analysis.FilesProcessed)/$($analysis.FilesScanned) dosya"
+                $coverageStatus[$server] = 'WARN'
+                $log.Warn("M10/$server : zaman siniri kesti; persentiller EKSIK pencereden hesaplandi.")
+            }
+            else {
+                $coverageValues[$server] = "tam $($analysis.FilesScanned) dosya"
+                $coverageStatus[$server] = 'OK'
+            }
 
             if ($stats.Count -eq 0) {
                 $p50[$server] = 'N/A'; $p95[$server] = 'N/A'; $p99[$server] = 'N/A'
@@ -87,6 +104,9 @@ Register-EDModule @{
                 Max              = [math]::Round($stats.Max, 3)
                 Ortalama         = [math]::Round($stats.Mean, 3)
                 P99OrtalamaOrani = [math]::Round($stats.P99 / [math]::Max($stats.Mean, 0.001), 1)
+                Kismi            = $analysis.Truncated
+                DosyaBulunan     = $analysis.FilesScanned
+                DosyaIslenen     = $analysis.FilesProcessed
                 DeliverOlayi     = $analysis.DeliverEvents
                 GecikmeYok       = $analysis.LatencyMissing
                 SaatKaymasi      = $analysis.NegativeLatency
@@ -104,7 +124,8 @@ Register-EDModule @{
                     Gonderen  = $slow.Sender
                     Konu      = $slow.Subject
                     Kaynak    = $slow.Source
-                    MesajId   = $slow.NetworkMessageId
+                    NetworkMesajId = $slow.NetworkMessageId
+                    SmtpMesajId    = $slow.MessageId
                 }
             }
         }
@@ -160,9 +181,20 @@ Register-EDModule @{
         }
 
         $overallStatus = Get-EDWorstStatus @($cellStatus.Values)
+        if ($partialServers.Count -gt 0) {
+            # Kismi pencere hukmu gecersiz kilmaz ama en az WARN olmalidir:
+            # aksi halde OK satiri raporun bulgu tablosuna hic girmez.
+            $overallStatus = Get-EDWorstStatus @($overallStatus, 'WARN')
+        }
 
         $rows = @()
-        $p95Note = (@($outlierNote, $windowNote) | Where-Object { $_ }) -join ' '
+        $partialNote = ''
+        if ($partialServers.Count -gt 0) {
+            $partialNote = "PENCERE KISMI: $($partialServers -join ', ') sunucusunda zaman siniri okumayi kesti; "
+            $partialNote += 'bu sunucularin persentilleri pencerenin TAMAMINI temsil etmez ve sunucular arasi '
+            $partialNote += 'kiyas (ORGU P1) yaniltici olabilir. Pencereyi daraltin (-WindowHours) ve tekrar calistirin.'
+        }
+        $p95Note = (@($partialNote, $outlierNote, $windowNote) | Where-Object { $_ }) -join ' '
         $p99Note = ''
         if ($tailNotes.Count -gt 0) {
             $p99Note = 'ORGU P6 - ortalama tail gizliyor: ' + ($tailNotes -join ' | ')
@@ -177,6 +209,10 @@ Register-EDModule @{
             -Note 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.'
         $rows += New-EDRow -Module 'M10' -Check 'Olculen teslim sayisi' -Values $counts -Unit 'adet' -Status 'OK'
         $rows += New-EDRow -Module 'M10' -Check 'Okuma yolu' -Values $viaValues -Status 'OK'
+        if ($partialServers.Count -gt 0) {
+            $rows += New-EDRow -Module 'M10' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
+                -Status 'WARN' -Note 'Zaman siniri okumayi kesti; isaretli sunucularda persentiller eksik pencereden hesaplandi.'
+        }
 
         # --- Parser dogrulama ---
         if ($Context.VerifyParser) {

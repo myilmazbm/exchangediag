@@ -56,9 +56,12 @@ Register-EDModule @{
         }
 
         $analyze = {
-            param($Server, $UncPath, $StartUtc, $EndUtc, $MaxMessages, $InnerParallelism)
+            param($Server, $UncPath, $StartUtc, $EndUtc, $MaxMessages, $InnerParallelism, [int]$BudgetSeconds = 0)
+            # Butce is basladiktan sonra hesaplanir; ayrintili gerekce icin
+            # Core\TrackingLog.ps1 icindeki ayni desene bakin.
+            $deadlineUtc = if ($BudgetSeconds -gt 0) { [datetime]::UtcNow.AddSeconds($BudgetSeconds) } else { [datetime]::MaxValue }
             [ExchangeDiag.TrackingLogParser]::AnalyzePhaseBreakdown(
-                $Server, $UncPath, $StartUtc, $EndUtc, $MaxMessages, $InnerParallelism)
+                $Server, $UncPath, $StartUtc, $EndUtc, $MaxMessages, $InnerParallelism, $deadlineUtc)
         }
 
         $tasks = foreach ($location in $targets) {
@@ -69,6 +72,7 @@ Register-EDModule @{
                 EndUtc           = $endUtc
                 MaxMessages      = 2000000
                 InnerParallelism = 2
+                BudgetSeconds    = 840
             }
         }
 
@@ -77,6 +81,7 @@ Register-EDModule @{
         $cellStatus = @{}
         $evidence = @()
         $storeDominant = @()
+        $partialServers = @()
         $anyData = $false
 
         foreach ($result in $Context.Executor.RunLocal([ExchangeDiag.ExecTask[]]@($tasks))) {
@@ -95,6 +100,11 @@ Register-EDModule @{
 
             $breakdown = $result.Output[0]
             foreach ($warning in $breakdown.Warnings) { $log.Info("M11/$server : $warning") }
+
+            if ($breakdown.Truncated) {
+                $partialServers += $server
+                $log.Warn("M11/$server : zaman siniri kesti; faz kirilimi EKSIK pencereden hesaplandi.")
+            }
 
             $messageCounts[$server] = $breakdown.MessagesComplete
 
@@ -135,6 +145,9 @@ Register-EDModule @{
                 StoreP99         = [math]::Round($breakdown.Store.P99, 3)
                 BaskinFaz        = $breakdown.DominantPhase
                 OrneklemKirpildi = $breakdown.TruncatedByLimit
+                ZamanSiniriKesti = $breakdown.Truncated
+                DosyaBulunan     = $breakdown.FilesScanned
+                DosyaIslenen     = $breakdown.FilesProcessed
                 TarananSatir     = $breakdown.LinesScanned
                 SureMs           = [math]::Round($breakdown.ElapsedMs)
             }
@@ -160,9 +173,17 @@ Register-EDModule @{
             $note = 'Baskin faz Store disinda; transport tarafi icin M14 (kuyruklar) ve M16 (teslim paralelligi) bakilmali.'
         }
 
+        $phaseStatus = Get-EDWorstStatus @($cellStatus.Values)
+        if ($partialServers.Count -gt 0) {
+            # Baskin faz hukmu eksik ornekten cikmis olabilir; en az WARN.
+            $note = "PENCERE KISMI: $($partialServers -join ', ') sunucusunda zaman siniri okumayi kesti; " + `
+                    'baskin faz hukmu pencerenin tamamini temsil etmeyebilir. ' + $note
+            $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
+        }
+
         $rows = @()
         $rows += New-EDRow -Module 'M11' -Check 'Baskin faz' -Values $dominantValues -CellStatus $cellStatus `
-            -Status (Get-EDWorstStatus @($cellStatus.Values)) -Patterns @('P2') -Note $note
+            -Status $phaseStatus -Patterns @('P2') -Note $note
         $rows += New-EDRow -Module 'M11' -Check 'Store fazi p95 (DeliveryToMailbox)' -Values $storeValues -Unit 'sn' -Status 'OK' `
             -Note 'DELIVER ile Mailbox Transport Delivery RECEIVE arasi. Yuksekse sorun Store icinde.'
         $rows += New-EDRow -Module 'M11' -Check 'Transport fazi p95' -Values $transportValues -Unit 'sn' -Status 'OK' `

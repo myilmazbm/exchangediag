@@ -133,6 +133,8 @@ Assert-Equal 'Gecikmesi hesaplanan kayit' $fixture.ExpectedCount $analysis.Laten
 Assert-Equal 'message-info ayristirilamayan kayit' $fixture.ExpectedMissing $analysis.LatencyMissing
 Assert-Equal 'Saat kaymasi kaynakli atilan kayit' $fixture.ExpectedNegative $analysis.NegativeLatency
 Assert-Equal 'Toplam hesaplanamayan kayit' ($fixture.DeliverRows - $fixture.ExpectedCount) ($analysis.LatencyMissing + $analysis.NegativeLatency)
+Assert-Equal 'Kesilmemis analizde Truncated kapali' $false $analysis.Truncated
+Assert-Equal 'Kesilmemis analizde tum dosyalar islendi' $analysis.FilesScanned $analysis.FilesProcessed
 Assert-Close 'p50' $fixture.ExpectedP50 $analysis.Overall.P50
 Assert-Close 'p90' $fixture.ExpectedP90 $analysis.Overall.P90
 Assert-Close 'p95' $fixture.ExpectedP95 $analysis.Overall.P95
@@ -207,6 +209,48 @@ $brokenPath = Join-Path $emptyDir ('MSGTRKMD' + $endUtc.ToString('yyyyMMdd') + '
 $broken = [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency('EXC01', $emptyDir, 'MSGTRKMD', $endUtc.AddHours(-24), $endUtc.AddHours(1), 50, 2, $slowThreshold)
 Assert-True 'Bozuk satirlar cokmeye sebep olmadi' ($broken.Overall.Count -eq 0) ("gecikme sayisi = {0}" -f $broken.Overall.Count)
 Remove-Item -LiteralPath $brokenPath -Force
+
+# ---------------------------------------------------------------------------
+# Zaman siniri (butce) davranisi.
+#
+# Bu bolumun varlik sebebi: yurutucunun TimeoutSeconds'i bu cagri basladiktan
+# sonra fiilen uygulanamaz (PowerShell.Stop() senkrondur ve buradaki
+# Parallel.ForEach durma istegini gormez). Tek gercek sinir deadlineUtc'dir.
+# KRITIK NOKTA: kesilen sonuc SESSIZCE tam sonuc gibi donmemelidir - eksik
+# pencereden hesaplanmis bir persentil yanlis sunucuyu suclar.
+Write-Host "`n=== 8. Zaman siniri (kismi sonuc) ===" -ForegroundColor Cyan
+
+# (a) Butce dosya okumaya baslamadan dolmus: hicbir dosya islenmemeli.
+$pastDeadline = [datetime]::UtcNow.AddSeconds(-1)
+$expired = [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency(
+    'EXC01', $FixtureDir, 'MSGTRKMD',
+    $fixture.StartUtc.AddMinutes(-5), $endUtc.AddMinutes(5),
+    50, [Environment]::ProcessorCount, $slowThreshold, $pastDeadline)
+
+Assert-True 'Dolmus butce: Truncated isaretlendi' $expired.Truncated
+Assert-Equal 'Dolmus butce: hicbir dosya islenmedi' 0 $expired.FilesProcessed
+Assert-True 'Dolmus butce: dosya sayisi korundu (bulunan != islenen)' ($expired.FilesScanned -gt 0)
+Assert-True 'Dolmus butce: KISMI uyarisi uretildi' (@($expired.Warnings | Where-Object { $_ -match 'KISMI|SONUC YOK' }).Count -gt 0) `
+    (($expired.Warnings -join ' | '))
+
+# (b) Butce dosya ORTASINDA doluyor. Regresyon testi: dosya sayisi karsilastirmasi
+# (islenen < bulunan) bu durumu YAKALAMAZ, cunku dosya islenmis sayilir.
+# Tek dosyali fixture ile bu tam olarak o senaryodur.
+$midDeadline = [datetime]::UtcNow.AddMilliseconds(30)
+$midCut = [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency(
+    'EXC01', $FixtureDir, 'MSGTRKMD',
+    $fixture.StartUtc.AddMinutes(-5), $endUtc.AddMinutes(5),
+    50, 1, $slowThreshold, $midDeadline)
+
+Assert-True 'Dosya ortasinda kesilme: Truncated isaretlendi' $midCut.Truncated `
+    ("islenen={0}/{1}, satir={2}" -f $midCut.FilesProcessed, $midCut.FilesScanned, $midCut.LinesScanned)
+Assert-True 'Dosya ortasinda kesilme: KISMI uyarisi uretildi' (@($midCut.Warnings | Where-Object { $_ -match 'KISMI' }).Count -gt 0) `
+    (($midCut.Warnings -join ' | '))
+Assert-True 'Dosya ortasinda kesilme: tam taramadan az satir okundu' ($midCut.LinesScanned -lt $analysis.LinesScanned) `
+    ("{0} < {1}" -f $midCut.LinesScanned, $analysis.LinesScanned)
+
+# (c) Butce verilmeyen eski imza sinirsizdir; kesilme olmamali.
+Assert-Equal 'Butcesiz imza: Truncated kapali' $false $analysis.Truncated
 
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Sonuc ===" -ForegroundColor Cyan

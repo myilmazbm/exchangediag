@@ -23,6 +23,7 @@ using System.Diagnostics;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ExchangeDiag
@@ -147,6 +148,7 @@ namespace ExchangeDiag
         private int _parallelism;
         private bool _disposed;
         private bool _exchangeIsConstrained;
+        private int _abandonedPipelines;
 
         /// <summary>Exchange baglantisinin nasil kuruldugu - rapor basligina yazilir.</summary>
         public string ExchangeConnection = "none";
@@ -155,6 +157,16 @@ namespace ExchangeDiag
         {
             if (parallelism < 1) parallelism = 1;
             _parallelism = parallelism;
+        }
+
+        /// <summary>
+        /// Zaman asimi nedeniyle terk edilmis (hala arka planda calisan) boru
+        /// hatti sayisi. Sifirdan buyukse sonraki TIMEOUT'lar kapasite
+        /// daralmasindan kaynaklaniyor olabilir - rapor bunu soylemelidir.
+        /// </summary>
+        public int AbandonedPipelines
+        {
+            get { return _abandonedPipelines; }
         }
 
         public int Parallelism
@@ -339,8 +351,19 @@ namespace ExchangeDiag
                 if (!finished)
                 {
                     result.TimedOut = true;
-                    try { shell.Stop(); }
-                    catch (Exception) { /* durdurma basarisiz olsa da arac kilitlenmemeli */ }
+                    // PowerShell.Stop() SENKRONDUR: pipeline yonetilmeyen ya da
+                    // uzun suren yerel kod icindeyse (ornegin Parallel.ForEach ile
+                    // calisan parser) durma istegini gormez ve Stop() donmez.
+                    // O durumda TimeoutSeconds fiilen uygulanmamis olurdu.
+                    // Istek birakilir, temizlik arka plana devredilir; cagiran
+                    // TIMEOUT sonucuyla hemen devam eder.
+                    StopAndDisposeInBackground(shell);
+                    shell = null;
+                    // Terk edilen boru hatti runspace'i havuza GERI VERMEZ.
+                    // Tavan yukseltilmezse havuz her zaman asiminda bir kucuur
+                    // ve sonraki isler kendi butcelerini harcamadan, yalnizca
+                    // sira bekleyerek TIMEOUT olur (sessiz cig).
+                    CompensateAbandonedRunspace(pool);
                 }
                 else
                 {
@@ -362,13 +385,59 @@ namespace ExchangeDiag
             }
             finally
             {
-                try { shell.Dispose(); }
-                catch (Exception) { }
+                // shell == null: timeout yolunda sahiplik arka plana gecti.
+                if (shell != null)
+                {
+                    try { shell.Dispose(); }
+                    catch (Exception) { }
+                }
                 watch.Stop();
                 result.DurationMs = watch.Elapsed.TotalMilliseconds;
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Terk edilen runspace'in yerine havuzun yeni bir tane acmasina izin
+        /// verir. Ust sinir baslangic degerinin iki kati: bir kacak firtinasi
+        /// makineyi bogmamali, ama tek tuk terk arac genelini durdurmamali.
+        /// </summary>
+        private void CompensateAbandonedRunspace(RunspacePool pool)
+        {
+            Interlocked.Increment(ref _abandonedPipelines);
+            if (pool == null) return;
+            try
+            {
+                int max = pool.GetMaxRunspaces();
+                if (max < _parallelism * 2) pool.SetMaxRunspaces(max + 1);
+            }
+            catch (Exception) { }
+        }
+
+        /// <summary>
+        /// Zaman asan pipeline'i asenkron durdurur ve durma tamamlandiginda
+        /// serbest birakir. Dispose() da calisan bir pipeline'da bloklayabilir,
+        /// bu yuzden o da geri cagriya birakilir.
+        /// </summary>
+        private static void StopAndDisposeInBackground(PowerShell shell)
+        {
+            try
+            {
+                shell.BeginStop(delegate(IAsyncResult ar)
+                {
+                    try { shell.EndStop(ar); }
+                    catch (Exception) { }
+                    try { shell.Dispose(); }
+                    catch (Exception) { }
+                }, null);
+            }
+            catch (Exception)
+            {
+                // BeginStop bile basarisizsa elde kalan tek sey Dispose denemesidir.
+                try { shell.Dispose(); }
+                catch (Exception) { }
+            }
         }
 
         private static string JoinErrors(PSDataCollection<ErrorRecord> errors)
@@ -415,7 +484,15 @@ namespace ExchangeDiag
         private static void ClosePool(RunspacePool pool)
         {
             if (pool == null) return;
-            try { pool.Close(); }
+            try
+            {
+                // Close() terk edilmis bir boru hattinin runspace'ini bekler.
+                // Rapor zaten yazilmis olur; kullaniciyi "bitti" dedikten sonra
+                // dakikalarca bekletmek yerine sinirli beklenir ve birakilir.
+                IAsyncResult async = pool.BeginClose(null, null);
+                if (!async.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(10))) return;
+                pool.EndClose(async);
+            }
             catch (Exception) { }
             try { pool.Dispose(); }
             catch (Exception) { }

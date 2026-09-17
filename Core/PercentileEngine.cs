@@ -132,6 +132,24 @@ namespace ExchangeDiag
             bucket.Add(value);
         }
 
+        /// <summary>
+        /// Toplu ekleme. Cagiran taraf satir satir Add() cagirmak yerine
+        /// kovayi kendi tarafinda hazirlayip tek seferde verebilir; kilit
+        /// altinda calisiliyorsa kritik bolge N satir yerine 1 cagri olur.
+        /// </summary>
+        public void AddRange(string group, List<double> values)
+        {
+            if (values == null || values.Count == 0) return;
+            if (group == null) group = "";
+            List<double> bucket;
+            if (!_groups.TryGetValue(group, out bucket))
+            {
+                bucket = new List<double>(values.Count);
+                _groups[group] = bucket;
+            }
+            bucket.AddRange(values);
+        }
+
         public string[] Groups
         {
             get

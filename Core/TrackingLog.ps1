@@ -320,6 +320,9 @@ function Get-EDDeliveryAnalysis {
 
     $locations = Get-EDTrackingLogLocation -Context $Context
     $analyses = @{}
+    # Ham yol veri uretemeyen sunucular. -VerifyParser bunlari "karsilastirilacak
+    # sey yok" diye atlamamali; her biri kendi Status + Detail degerini tasir.
+    $rawPathIssues = @{}
 
     # --- SMB yolu: sunucular paralel, her biri kendi dosyalarini paralel okur ---
     $smbTargets = @()
@@ -342,11 +345,19 @@ function Get-EDDeliveryAnalysis {
 
     if ($smbTargets.Count -gt 0) {
         $analyze = {
-            param($Server, $UncPath, $StartUtc, $EndUtc, $SlowThreshold, $TopSlowCount, $InnerParallelism)
+            param($Server, $UncPath, $StartUtc, $EndUtc, $SlowThreshold, $TopSlowCount, $InnerParallelism, [int]$BudgetSeconds = 0)
             # C# tipleri ayni AppDomain'de yuklu oldugu icin yerel runspace'ten
             # dogrudan cagrilabilir; nesne serilestirilmeden geri doner.
+            #
+            # Butce burada, is BASLADIKTAN sonra hesaplanir: kuyrukta bekleme
+            # suresi butceyi yemez. Yurutucunun TimeoutSeconds'i tek basina
+            # yetmez; PowerShell.Stop() bu yerel cagriyi durduramaz.
+            # Butce yoksa SINIRSIZ. Aksi halde eksik/0 bir deger sessizce
+            # gecmiste bir son teslim ani uretir, tum dosyalar atlanir ve
+            # sonuc "bos pencere" gibi gorunur - en kotu hata bicimi.
+            $deadlineUtc = if ($BudgetSeconds -gt 0) { [datetime]::UtcNow.AddSeconds($BudgetSeconds) } else { [datetime]::MaxValue }
             [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency(
-                $Server, $UncPath, 'MSGTRKMD', $StartUtc, $EndUtc, $TopSlowCount, $InnerParallelism, $SlowThreshold)
+                $Server, $UncPath, 'MSGTRKMD', $StartUtc, $EndUtc, $TopSlowCount, $InnerParallelism, $SlowThreshold, $deadlineUtc)
         }
 
         $tasks = foreach ($location in $smbTargets) {
@@ -358,6 +369,7 @@ function Get-EDDeliveryAnalysis {
                 SlowThreshold    = $slowThreshold
                 TopSlowCount     = 100
                 InnerParallelism = 2
+                BudgetSeconds    = 840
             }
         }
 
@@ -370,10 +382,47 @@ function Get-EDDeliveryAnalysis {
                 $log.Info("$($result.Key): ham log okundu - $($analysis.LinesScanned) satir, $($analysis.DeliverEvents) DELIVER, $([math]::Round($analysis.ElapsedMs)) ms")
 
                 # Veri cikmadiysa ve auto modundaysak cmdlet'i denemeye deger.
-                if ($analysis.Overall.Count -eq 0 -and $Context.LogAccess -eq 'auto') {
-                    $log.Info("$($result.Key): ham log bos sonuc verdi; cmdlet yolu denenecek.")
-                    $cmdletTargets += ($locations | Where-Object { $_.Server -eq $result.Key })
-                    $analyses.Remove($result.Key)
+                # Veri cikmadi. KOK NEDEN AYRIMI sart: dort ayri neden ayni
+                # belirtiyi verir ama her biri baska yere bakmayi gerektirir.
+                # Tespit LogAccess'ten BAGIMSIZ yapilir - Smb modu tam da ham
+                # parser'i zorlamak icin secilir, orada kor kalmak anlamsizdir.
+                if ($analysis.Overall.Count -eq 0) {
+                    if ($analysis.Truncated) {
+                        $detail = "Ham log okumasi zaman sinirina takildi "
+                        $detail += "($($analysis.FilesProcessed)/$($analysis.FilesScanned) dosya islendi); gecikme uretilemedi. "
+                        $detail += "Ayristirici hatasi DEGIL - pencereyi daraltin (-WindowHours)."
+                        $log.Warn("$($result.Key): $detail")
+                        $rawPathIssues[$result.Key] = [pscustomobject]@{ Status = 'N/A'; Detail = $detail }
+                    }
+                    elseif ($analysis.DeliverEvents -eq 0) {
+                        $log.Info("$($result.Key): pencerede DELIVER olayi yok; ham log bos sonuc verdi.")
+                    }
+                    elseif ($analysis.NegativeLatency -gt $analysis.LatencyMissing) {
+                        # Baskin neden saat kaymasi. Bu bir AYRISTIRICI hatasi
+                        # degildir, zaman senkronizasyonu bulgusudur ve oyle
+                        # raporlanmalidir. Sayaclar tam bu ayrim icin ayrildi.
+                        $detail = "$($analysis.DeliverEvents) DELIVER olayinin $($analysis.NegativeLatency) tanesinde gonderim zamani teslimden SONRA. "
+                        $detail += "Bu ayristirici hatasi degil SAAT KAYMASIDIR - once zaman senkronizasyonunu duzeltin; "
+                        $detail += "duzelene kadar gecikme persentilleri guvenilmez."
+                        $log.Warn("$($result.Key): $detail")
+                        $rawPathIssues[$result.Key] = [pscustomobject]@{ Status = 'WARN'; Detail = $detail }
+                    }
+                    else {
+                        # Geriye tek aciklama kaliyor: olaylar okundu ama zaman
+                        # cikarilamadi. -VerifyParser'in yakalamasi gereken
+                        # regresyon sinifi budur; cmdlet'e sessizce dusulurse
+                        # "ham log yolu kullanilmadi" diye atlanip kaybolur.
+                        $detail = "Ham ayristirici $($analysis.DeliverEvents) DELIVER olayi okudu ama hicbirinden gecikme uretemedi "
+                        $detail += "(LatencyMissing=$($analysis.LatencyMissing), NegativeLatency=$($analysis.NegativeLatency)). "
+                        $detail += "message-info bicimi degismis olabilir - AYRISTIRICI REGRESYONU suphesi."
+                        $log.Warn("$($result.Key): $detail")
+                        $rawPathIssues[$result.Key] = [pscustomobject]@{ Status = 'FAIL'; Detail = $detail }
+                    }
+
+                    if ($Context.LogAccess -eq 'auto') {
+                        $cmdletTargets += ($locations | Where-Object { $_.Server -eq $result.Key })
+                        $analyses.Remove($result.Key)
+                    }
                 }
             }
             else {
@@ -406,6 +455,7 @@ function Get-EDDeliveryAnalysis {
     }
 
     $Context.Cache['DeliveryAnalysis'] = $analyses
+    $Context.Cache['RawPathIssues'] = $rawPathIssues
     $Context.Cache['AnalysisWindow'] = [pscustomobject]@{ StartUtc = $startUtc; EndUtc = $endUtc; SlowThresholdSeconds = $slowThreshold }
     return $analyses
 }
@@ -429,10 +479,24 @@ function Test-EDParserAgreement {
 
     $analyses = Get-EDDeliveryAnalysis -Context $Context
     $window = $Context.Cache['AnalysisWindow']
+    $rawIssues = $Context.Cache['RawPathIssues']
+    if (-not $rawIssues) { $rawIssues = @{} }
     $findings = @()
 
     foreach ($server in @($analyses.Keys)) {
         $smb = $analyses[$server]
+
+        # Ham yol denendi ama veri uretemediyse bu "karsilastirilacak sey yok"
+        # degildir. Kok nedene gore ayri hukum: ayristirici regresyonu FAIL,
+        # saat kaymasi WARN, zaman siniri N/A.
+        if ($rawIssues.ContainsKey($server)) {
+            $findings += [pscustomobject]@{
+                Server = $server; Status = $rawIssues[$server].Status
+                Detail = $rawIssues[$server].Detail
+            }
+            continue
+        }
+
         if ($smb.Via -ne 'smb') {
             $findings += [pscustomobject]@{
                 Server = $server; Status = 'N/A'
