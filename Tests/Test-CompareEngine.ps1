@@ -46,12 +46,26 @@ function New-PreviousRun {
         # Eski surumle uretilmis bir run-meta.json'i taklit etmek icin:
         # adi verilen alanlar dosyaya HIC yazilmaz (bos yazilmaz - yok).
         [string[]]$OmitMetaFields = @(),
+        # Ayni sey SUMMARY.csv icin: adi verilen KOLONLAR basliktan silinir.
+        # Import-Csv boyle bir kolonu satir nesnesine hic eklemez (olculdu),
+        # yani erisim StrictMode altinda istisna firlatir.
+        [string[]]$DropCsvColumns = @(),
         [switch]$NoMeta
     )
 
     $folder = Join-Path $script:Root ([guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
-    Export-EDSummaryCsv -Rows $Rows -Columns $Columns -Path (Join-Path $folder 'SUMMARY.csv') | Out-Null
+    $csvPath = Join-Path $folder 'SUMMARY.csv'
+    Export-EDSummaryCsv -Rows $Rows -Columns $Columns -Path $csvPath | Out-Null
+
+    if ($DropCsvColumns.Count -gt 0) {
+        $written = @(Import-Csv -LiteralPath $csvPath -Encoding UTF8)
+        if ($written.Count -gt 0) {
+            $keep = @($written[0].PSObject.Properties.Name | Where-Object { $_ -notin $DropCsvColumns })
+            $written | Select-Object -Property $keep |
+                Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        }
+    }
 
     if (-not $NoMeta) {
         $defaults = [ordered]@{
@@ -409,6 +423,116 @@ else {
 $previous = New-PreviousRun -Rows $rows -OmitMetaFields @('runId')
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext)
 Assert-Equal 'runId yoksa klasor adi kullanilir' (Split-Path -Leaf $previous) "$($comparison.PreviousRunId)"
+
+# ===========================================================================
+Write-Host "`n=== 4C. Onceki SUMMARY.csv'nin SEKLI ===" -ForegroundColor Cyan
+
+# Meta alanlarindaki kusurun kardesi: Compare-EDRuns onceki kosumun
+# SUMMARY.csv'sinden Modul / Kontrol / Durum alanlarini korumasiz okuyordu.
+# Import-Csv olculdu: BASLIKTA olmayan bir kolon satir nesnesine hic eklenmez
+# (ozellik yoktur, degeri $null da degildir), yani StrictMode altinda erisim
+# PropertyNotFoundException firlatir ve delta raporunun tamami duser.
+#
+# Ama ayrim meta'dakiyle AYNI DEGIL: eksik bir kolon BUTUN satirlarda
+# eksiktir, yani tek bir boyut degil DOSYANIN BICIMI sorunludur. Bu yuzden
+# satir basina uyari beklenmez; tek ve net bir sinyal beklenir.
+
+$shapePrevRow = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+
+# 4C-a. Durum kolonu YOK: cokmez, tek bir Blocking verir, hukum uydurmaz.
+$previous = New-PreviousRun -Rows $shapePrevRow -DropCsvColumns @('Durum')
+$shapeComparison = $null
+$shapeThrew = $false
+$shapeError = ''
+try {
+    $shapeComparison = Compare-EDRuns -PreviousFolder $previous `
+        -CurrentRows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'FAIL')) `
+        -Context (New-CompareContext)
+}
+catch { $shapeThrew = $true; $shapeError = "$_" }
+Assert-True 'Durum kolonu olmayan CSV delta motorunu COKERTMEZ' (-not $shapeThrew) $shapeError
+
+if ($null -ne $shapeComparison) {
+    $shapeNotes = @(@($shapeComparison.Scope.Blocking) | Where-Object { $_ -like "*'Durum' kolonu YOK*" })
+    Assert-Equal 'Bicim uyarisi TEK BIR kez verildi' 1 $shapeNotes.Count
+    Assert-True 'Hukum okunamayan kiyas guvenilir SAYILMADI' (-not $shapeComparison.Scope.Comparable) 'blocking var'
+    Assert-True 'Sayilarin guvenilmez oldugu yazildi' ((@($shapeNotes) -join ' ') -like '*GUVENILIR DEGILDIR*') `
+        (Get-EDDetailSnippet (@($shapeNotes) -join ' '))
+
+    # Eksik hukum 'OK' ya da "degismedi" SAYILMADI: ne sahte bir gerileme
+    # ne de sahte bir iyilesme uretildi. (Gercekte OK -> FAIL vardi ama
+    # onceki hukum okunamadigi icin bu BILINEMEZ; uydurulmaz.)
+    $shapeHighlights = Get-EDDeltaHighlights -Comparison $shapeComparison
+    Assert-Equal 'Okunamayan hukumden gerileme uretilmedi' 0 (Get-EDHighlightCount $shapeHighlights 'Regressions')
+    Assert-Equal 'Okunamayan hukumden iyilesme uretilmedi' 0 (Get-EDHighlightCount $shapeHighlights 'Improvements')
+
+    # Satir basina TEKRARLAYAN uyari yok: 500 satirin her birinde ayni
+    # cumleyi gormek uyariyi okunmaz hale getirirdi.
+    $shapeNoteText = @(@($shapeComparison.Deltas) | ForEach-Object { $_.Aciklama }) -join ' '
+    Assert-True 'Satir basina tekrarlayan bicim uyarisi yok' ($shapeNoteText -notlike '*kolonu YOK*') 'satirlar temiz'
+
+    $shapePath = Join-Path $script:Root 'DELTA-bicim.html'
+    Export-EDDeltaHtml -Comparison $shapeComparison -Path $shapePath -Context (New-CompareContext) | Out-Null
+    $shapeHtml = Get-Content $shapePath -Raw -Encoding UTF8
+    Assert-True 'Bicim uyarisi raporun EN USTUNDE' ($shapeHtml -like '*KIYAS GUVENILIR DEGIL*') 'blocking blogu basildi'
+}
+else {
+    Assert-True 'Durum kolonu olmadan kiyas kuruldu' $false 'sonuc yok'
+}
+
+# 4C-b. Hukum okunamasa da DEGER farklari gecerlidir ve gizlenmez.
+$previous = New-PreviousRun -Rows $shapePrevRow -DropCsvColumns @('Durum')
+$shapeComparison = Compare-EDRuns -PreviousFolder $previous `
+    -CurrentRows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 25 } -Unit 'sn' -Status 'FAIL')) `
+    -Context (New-CompareContext)
+$valueDeltas = @(@($shapeComparison.Deltas) | Where-Object { $_.Yon -eq 'ARTTI' })
+Assert-Equal 'Deger farki yine de raporlandi' 1 $valueDeltas.Count
+# Gecis metni uydurulmaz: 'N/A -> FAIL' yazmak, okunamayan hukmu okunmus
+# gibi gosterip satiri OLCUM kovasina sokardi.
+Assert-Equal 'Okunamayan hukumden gecis metni uydurulmadi' '' (Get-EDFirstField $valueDeltas 'Durum')
+
+# 4C-c. Kaybolan kontrolun okunamayan hukmu bos degil N/A yazilir
+# (brief: okunamayan deger 0 ya da bos degil, N/A'dir).
+$previous = New-PreviousRun -Rows @(
+    New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'
+    New-EDRow -Module 'M12' -Check 'Yogunlasma' -Values @{ MBX1 = 5 } -Status 'FAIL'
+) -DropCsvColumns @('Durum')
+$shapeComparison = Compare-EDRuns -PreviousFolder $previous `
+    -CurrentRows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')) `
+    -Context (New-CompareContext)
+$lostRows = @(@($shapeComparison.Deltas) | Where-Object { $_.Yon -eq 'KAYBOLDU' })
+Assert-Equal 'Kaybolan kontrolun okunamayan hukmu N/A' 'N/A' (Get-EDFirstField $lostRows 'Onceki')
+
+# 4C-d. ANAHTAR kolon (Modul / Kontrol) yoksa kiyas hic kurulmaz: acik hata.
+# Bu ikisi olmadan hicbir satir eslenemez; her kontrol 'YENI' ve karsiligi
+# 'KAYBOLDU' gorunurdu - yani tamamen uydurma bir rapor.
+foreach ($keyColumn in @('Modul', 'Kontrol')) {
+    $previous = New-PreviousRun -Rows $shapePrevRow -DropCsvColumns @($keyColumn)
+    $keyThrew = $false
+    $keyMessage = ''
+    try {
+        Compare-EDRuns -PreviousFolder $previous -CurrentRows $shapePrevRow -Context (New-CompareContext) | Out-Null
+    }
+    catch { $keyThrew = $true; $keyMessage = "$_" }
+    Assert-True ("Anahtar kolon '$keyColumn' yoksa acik hata") $keyThrew 'istisna firlatildi'
+    Assert-True ("Hata eksik kolonu adlandiriyor ($keyColumn)") ($keyMessage -like "*$keyColumn*") (Get-EDDetailSnippet $keyMessage)
+    Assert-True ("Degisim degil DOSYA BICIMI farki dendi ($keyColumn)") ($keyMessage -like '*DOSYA BICIMI*') (Get-EDDetailSnippet $keyMessage)
+}
+
+# 4C-e. Satirsiz (bos) bir onceki SUMMARY.csv bicim hatasi DEGILDIR: hicbir
+# kontrolu olmayan mesru bir kosum boyle gorunur ve her kontrol 'YENI' olur.
+$emptyFolder = Join-Path $script:Root ([guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $emptyFolder -Force | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $emptyFolder 'SUMMARY.csv'), '', (New-Object System.Text.UTF8Encoding($false)))
+$emptyThrew = $false
+$emptyError = ''
+$emptyComparison = $null
+try { $emptyComparison = Compare-EDRuns -PreviousFolder $emptyFolder -CurrentRows $shapePrevRow -Context (New-CompareContext) }
+catch { $emptyThrew = $true; $emptyError = "$_" }
+Assert-True 'Bos onceki CSV bicim hatasi sayilmadi' (-not $emptyThrew) $emptyError
+if ($null -ne $emptyComparison) {
+    Assert-Equal 'Bos onceki kosumda kontrol YENI gorunur' 'YENI' (Get-EDFirstField @($emptyComparison.Deltas) 'Yon')
+}
 
 # ===========================================================================
 Write-Host "`n=== 5. Yeni / kaybolan kontroller ===" -ForegroundColor Cyan
