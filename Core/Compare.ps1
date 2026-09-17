@@ -334,6 +334,15 @@ function Test-EDRunComparable {
     # Liste bos ise "hicbir modul kosmadi" degil "kaydedilmemis" demektir
     # (eski meta, ya da timing verilmeden cagrilmis kiyas). Okunamayan
     # bilgiden fark UYDURULMAZ.
+    #
+    # BILEREK BOYLE: burada eksik alan icin ayrica "denetlenemedi" notu
+    # URETILMEZ ve bu bir eksiklik degildir. Sebep: bu dal, iki liste de
+    # dolu olmadikca hicbir IDDIA kurmuyor - ne "modul kumesi farkli" ne de
+    # "ayni" diyor. serverFilter'da durum farkliydi: orada bos iki liste
+    # esitlenip "filtre ayni" iddiasi kuruluyordu, o yuzden orada eksiklik
+    # bildiriliyor. Sessizlik ile yanlis iddia ayni sey degildir; burayi
+    # "eksik kalmis" sanip uyari eklemek, her eski meta icin bir satir daha
+    # gurultu uretir ve gercek Blocking'leri gomer.
     if ($previousModules.Count -gt 0 -and $currentModules.Count -gt 0) {
         $missingModules = @($previousModules | Where-Object { $_ -notin $currentModules })
         $extraModules = @($currentModules | Where-Object { $_ -notin $previousModules })
@@ -420,6 +429,165 @@ function Get-EDDeltaKind {
     return 'text'
 }
 
+function Get-EDPreviousStatusText {
+    <#
+        Onceki SUMMARY.csv satirinin HUKMUNU okur.
+
+        Durum kolonu hic yoksa ($Readable = $false) deger UYDURULMAZ: brief'in
+        temel kurali geregi okunamayan deger 'N/A'dir - bos ya da 'OK' degil.
+        Bos yazmak "hukum yoktu", 'OK' yazmak "sorun yoktu" demek olurdu;
+        ikisi de okunamamis bir hukmu okunmus gibi gosterir.
+
+        Satir ragged ise (basliktan az alan) kolon vardir ama deger $null'dur;
+        Get-EDProperty bu durumu da ayni sekilde 'N/A'e cevirir.
+    #>
+    param($Row, [bool]$Readable)
+
+    if (-not $Readable) { return 'N/A' }
+    return [string](Get-EDProperty -InputObject $Row -Name 'Durum' -Default 'N/A')
+}
+
+function Test-EDPreviousCsvShape {
+<#
+    .SYNOPSIS
+        Onceki calistirmanin SUMMARY.csv'si bu motorun okuyabilecegi bicimde mi?
+
+    .DESCRIPTION
+        Import-Csv, BASLIKTA olmayan bir kolonu satir nesnesine hic eklemez
+        (olculdu: ozellik yok, degeri $null da degil). StrictMode altinda
+        $row.Durum bu durumda PropertyNotFoundException firlatir ve delta
+        raporunun tamami duser.
+
+        Ama bu, meta alanlarindaki eksiklikten FARKLI bir seydir ve farkli
+        muamele gerektirir: eksik bir KOLON butun satirlarda eksiktir. Yani
+        "su boyut denetlenemedi" degil, "bu cikti bu motorun okuyabilecegi
+        bicimde degil" demektir. Bu yuzden satir basina uyari URETILMEZ -
+        500 satirin her birine ayni cumleyi yazmak uyariyi okunmaz hale
+        getirir ve gercek bulgulari gomer. Tek ve net bir sinyal verilir:
+
+          Modul / Kontrol yoksa  -> ISTISNA. Bu ikisi eslestirme ANAHTARIDIR;
+            onlarsiz hicbir satir eslenemez, her kontrol "YENI" ve karsiligi
+            "KAYBOLDU" gorunur. Bu bir degisim degil tamamen uydurma bir
+            rapordur; uretmektense kiyasi hic kurmamak dogrudur. Fonksiyon
+            SUMMARY.csv hic yokken de ayni sekilde istisna firlatiyor.
+
+          Durum yoksa -> TEK bir Blocking. Satir eslestirmesi ve DEGER
+            farklari hala gecerlidir (onlar gercektir, gizlenmez); kaybedilen
+            sey hukum gecisleridir. Gerileme/iyilesme sayaclari bu kosumda
+            GUVENILIR DEGILDIR ve bu, sayilarin yaninda degil raporun
+            basinda soylenir.
+
+    .OUTPUTS
+        StatusReadable : Durum kolonu okunabiliyor mu
+        BlockingNote   : Durum okunamiyorsa kapsam uyarisi, aksi halde $null
+#>
+    [CmdletBinding()]
+    param($PreviousRows, [string]$PreviousCsvPath)
+
+    $rows = @($PreviousRows)
+    # Satir yoksa kolon denetlenemez - ve denetlenecek bir sey de yoktur:
+    # bos bir onceki kosum zaten "her kontrol YENI" olarak raporlanir.
+    # Bos dosyayi bicim hatasi saymak, hic satiri olmayan mesru bir kosumu
+    # reddetmek olurdu.
+    if ($rows.Count -eq 0) {
+        return [pscustomobject]@{ StatusReadable = $true; BlockingNote = $null }
+    }
+
+    # Import-Csv tum satirlara AYNI ozellik kumesini (basligi) verir; bu
+    # yuzden ilk satiri denetlemek dosyayi denetlemektir.
+    $names = @($rows[0].PSObject.Properties.Name)
+
+    $missingKeys = @(@('Modul', 'Kontrol') | Where-Object { $_ -notin $names })
+    if ($missingKeys.Count -gt 0) {
+        throw ("Onceki calistirmanin SUMMARY.csv dosyasi bu motorun okuyabilecegi bicimde degil: {0} kolonu yok. Satirlar eslestirilemez; her kontrol 'YENI'/'KAYBOLDU' gorunurdu ve bu bir DEGISIM degil DOSYA BICIMI farki olurdu. Dosya: {1}" -f `
+            ($missingKeys -join ', '), $PreviousCsvPath)
+    }
+
+    if ('Durum' -notin $names) {
+        return [pscustomobject]@{
+            StatusReadable = $false
+            BlockingNote   = "Onceki calistirmanin SUMMARY.csv dosyasinda 'Durum' kolonu YOK: hicbir kontrolun onceki HUKMU okunamadi. Gerileme/iyilesme sayilari bu kiyasta GUVENILIR DEGILDIR (eksik hukum 'OK' ya da 'degismedi' SAYILMAZ, bu yuzden gecisler hic uretilmedi). Asagidaki deger farklari gecerlidir."
+        }
+    }
+
+    return [pscustomobject]@{ StatusReadable = $true; BlockingNote = $null }
+}
+
+function Get-EDPreviousColumnScan {
+<#
+    .SYNOPSIS
+        Onceki SUMMARY.csv'nin sutunlarini ust veri / sunucu / TANIMSIZ diye ayirir.
+
+    .DESCRIPTION
+        Sunucu sutunu artik TAHMIN EDILMEZ. Eskiden kural "sabit bir ust veri
+        listesinde olmayan her sutun sunucudur" idi; yani CSV'ye eklenen her
+        yeni ust veri sutunu sessizce bir sunucuya donusuyordu. Boyle bir
+        sutun onceki kosumda olup simdikinde olmayinca "bu sunucu simdiki
+        calistirmada olculmedi" diyen UYDURMA bir KAYBOLDU deltasi
+        uretiliyordu: hic var olmamis bir sunucu adina, hic yapilmamis bir
+        olcum hakkinda.
+
+        Iki yanlisin agirligi esit degildir. Bir sunucuyu ust veri sanmak
+        yalnizca bir olcumu gozden kacirir (ve bu, kapsam notuyla soylenir);
+        ust veriyi sunucu sanmak ise olmayan bir sey hakkinda hukum uretir -
+        aracin "okunamayan degeri uydurma" ilkesinin dogrudan ihlali. O yuzden
+        siniflandirma POZITIF tarafta yapilir: sutun, adi BILINEN bir
+        sunucuyla eslesiyorsa sunucudur.
+
+        Bilinen ad kaynaklarinin ikisi de tahmin degildir:
+          - simdiki kosumun topolojisi (Context'ten gelir, kesindir),
+          - onceki kosumun run-meta.json'indaki servers alani.
+
+        Hicbirine uymayan sutun TANIMSIZDIR: kiyasa sokulmaz ama SUSULMAZ.
+        run-meta'da servers alani eksikse tahmine GERI DONULMEZ; siniflamanin
+        dogrulanamadigi notta acikca yazar.
+
+    .OUTPUTS
+        ServerColumns  : kiyasa girecek sunucu sutunlari
+        UnknownColumns : tanimlanamayan sutunlar (kiyasa GIRMEZ)
+        AdvisoryNote   : tanimsiz sutun varsa kapsam notu, yoksa $null
+#>
+    [CmdletBinding()]
+    param($PreviousRows, $PreviousMeta, $CurrentServers)
+
+    $rows = @($PreviousRows)
+    if ($rows.Count -eq 0) {
+        return [pscustomobject]@{ ServerColumns = @(); UnknownColumns = @(); AdvisoryNote = $null }
+    }
+
+    # Ust veri listesi Framework'te, YAZAN tarafla ortak tanimlanir.
+    $columns = @($rows[0].PSObject.Properties.Name | Where-Object { $_ -notin $script:EDSummaryMetaColumns })
+
+    $metaServers = Get-EDMetaFieldState -Meta $PreviousMeta -Name 'servers'
+    $knownServers = @(@($CurrentServers) | Where-Object { "$_" -ne '' })
+    if ($metaServers.Present) {
+        $knownServers += @(@($metaServers.Value) | Where-Object { "$_" -ne '' })
+    }
+    $knownServers = @($knownServers | Select-Object -Unique)
+
+    $serverColumns = @($columns | Where-Object { $_ -in $knownServers })
+    $unknownColumns = @($columns | Where-Object { $_ -notin $knownServers })
+
+    $note = $null
+    if ($unknownColumns.Count -gt 0) {
+        # Eksik servers alani "sunucu degil" demek degildir; sadece
+        # dogrulayamadigimiz anlamina gelir ve bu ayrim yazilir.
+        $verification = $(if ($metaServers.Present) {
+            ''
+        } else {
+            " Onceki meta'da 'servers' alani YOK, bu yuzden siniflandirma DOGRULANAMADI."
+        })
+        $note = ("Onceki SUMMARY.csv'de TANIMSIZ sutun var: {0}. Bu sutunlar ne ust veri listesinde ne de bilinen sunucu adlari arasinda; kiyasa GIRMEDILER. Sunucu iseler o sunucularin degerleri karsilastirilmamistir; yeni bir ust veri sutunu iseler dislanmalari dogrudur. Sunucu OLDUKLARI VARSAYILMADI: olmayan bir sunucu adina 'olculmedi' kaydi uretmek uydurma olurdu.{1}" -f `
+            ($unknownColumns -join ', '), $verification)
+    }
+
+    return [pscustomobject]@{
+        ServerColumns  = $serverColumns
+        UnknownColumns = $unknownColumns
+        AdvisoryNote   = $note
+    }
+}
+
 function Compare-EDRuns {
 <#
     .SYNOPSIS
@@ -442,6 +610,11 @@ function Compare-EDRuns {
     }
 
     $previousRows = @(Import-Csv -LiteralPath $previousCsv -Encoding UTF8)
+    # Satirlar okunmadan ONCE dosyanin sekli denetlenir: eksik bir anahtar
+    # kolonu (Modul/Kontrol) kesfetmenin yeri, ona dayanan indeks kurulduktan
+    # sonrasi degildir.
+    $csvShape = Test-EDPreviousCsvShape -PreviousRows $previousRows -PreviousCsvPath $previousCsv
+    $previousStatusReadable = [bool]$csvShape.StatusReadable
     $previousMeta = Read-EDRunMeta -Folder $PreviousFolder
 
     $currentMeta = [pscustomobject]@{
@@ -458,13 +631,38 @@ function Compare-EDRuns {
     }
     $scope = Test-EDRunComparable -Previous $previousMeta -Current $currentMeta
 
+    # Sutunlarin siniflandirmasi: hangisi sunucu, hangisi ust veri, hangisi
+    # TANIMSIZ. Tahmin yok - gerekcesi Get-EDPreviousColumnScan'ta.
+    $columnScan = Get-EDPreviousColumnScan -PreviousRows $previousRows -PreviousMeta $previousMeta `
+        -CurrentServers $currentMeta.servers
+
+    # CSV'den gelen notlar kapsam denetiminin sonucuna EKLENIR, ayri bir
+    # kanaldan verilmez: operator "kiyas guvenilir mi?" sorusunun cevabini
+    # tek listede okumalidir.
+    #
+    # Kova ayrimi: Durum kolonu yoksa BLOCKING - hukum gecisleri raporun ilk
+    # okunan kismidir ve hepsi kaybolmustur. Tanimsiz sutun ise ADVISORY:
+    # raporlanan hicbir sey yanlis olmaz, yalnizca o sutun kiyasa girmez;
+    # satirin kendi DURUMU hala kiyaslandigi icin gercek bir gerileme yine
+    # de yuzeye cikar.
+    $extraBlocking = @()
+    $extraAdvisory = @()
+    if ($csvShape.BlockingNote) { $extraBlocking += $csvShape.BlockingNote }
+    if ($columnScan.AdvisoryNote) { $extraAdvisory += $columnScan.AdvisoryNote }
+    if ($extraBlocking.Count -gt 0 -or $extraAdvisory.Count -gt 0) {
+        $scope = [pscustomobject]@{
+            Blocking   = @(@($scope.Blocking) + $extraBlocking)
+            Advisory   = @(@($scope.Advisory) + $extraAdvisory)
+            Comparable = ([bool]$scope.Comparable -and $extraBlocking.Count -eq 0)
+        }
+    }
+
     # --- Onceki satirlari (Modul, Kontrol) ile indeksle ---
     $previousIndex = @{}
-    $previousColumns = @()
-    if ($previousRows.Count -gt 0) {
-        $previousColumns = @($previousRows[0].PSObject.Properties.Name |
-            Where-Object { $_ -notin @('Modul', 'Kontrol', 'Birim', 'Durum', 'Not') })
-    }
+    $previousColumns = @($columnScan.ServerColumns)
+    # Modul/Kontrol burada korumasiz okunabilir: Test-EDPreviousCsvShape
+    # bu iki kolon yoksa YUKARIDA istisna firlatti. Anahtari olmayan bir
+    # dosyadan indeks kurmak zaten anlamsizdi.
     foreach ($row in $previousRows) {
         $previousIndex["$($row.Modul)|$($row.Kontrol)"] = $row
     }
@@ -492,7 +690,12 @@ function Compare-EDRuns {
             continue
         }
 
-        $statusChanged = ([string]$previous.Durum -ne [string]$row.Status)
+        # Durum kolonu YOKSA hukum gecisi URETILMEZ. Eksik hukmu 'OK' ya da
+        # "degismedi" saymak gerileme sayisini oldugundan AZ gosterirdi -
+        # motorun engellemek icin var oldugu yanlisin ta kendisi. Kayip
+        # rapordan dusmez, raporun BASINDA tek bir Blocking olarak durur.
+        $previousStatus = Get-EDPreviousStatusText -Row $previous -Readable $previousStatusReadable
+        $statusChanged = ($previousStatusReadable -and ($previousStatus -ne [string]$row.Status))
         # Durum gecisi EN AZ BIR satirda yazildi mi? Gecis yalnizca deger
         # satirlarina yaziliyordu; o satirlarin hicbiri uretilmezse (butun
         # degerler N/A, ya da butun sutunlar degismis) gercek bir gerileme
@@ -510,7 +713,7 @@ function Compare-EDRuns {
                     # da verilmis bir hukumdur. Burayi bos birakmak, sunucularin
                     # degistigi bir ortamda OK -> FAIL gecisinin gerileme
                     # listesine hic ulasmamasi demekti.
-                    Yon = 'YENI'; Durum = $(if ($statusChanged) { "$($previous.Durum) -> $($row.Status)" } else { '' })
+                    Yon = 'YENI'; Durum = $(if ($statusChanged) { "$previousStatus -> $($row.Status)" } else { '' })
                     Aciklama = 'Bu sutun onceki calistirmada yoktu; kiyas kurulamaz.'
                 }
                 if ($statusChanged) { $statusReported = $true }
@@ -531,7 +734,7 @@ function Compare-EDRuns {
                 Simdiki = "$currentValue"
                 Fark    = ''
                 Yon     = ''
-                Durum   = $(if ($statusChanged) { "$($previous.Durum) -> $($row.Status)" } else { '' })
+                Durum   = $(if ($statusChanged) { "$previousStatus -> $($row.Status)" } else { '' })
                 Aciklama = ''
             }
 
@@ -625,7 +828,7 @@ function Compare-EDRuns {
             $deltas += [pscustomobject]@{
                 Modul = $row.Module; Kontrol = $row.Check; Sunucu = $column
                 Onceki = "$previousValue"; Simdiki = '(sutun yok)'; Fark = '-'
-                Yon = 'KAYBOLDU'; Durum = $(if ($statusChanged) { "$($previous.Durum) -> $($row.Status)" } else { '' })
+                Yon = 'KAYBOLDU'; Durum = $(if ($statusChanged) { "$previousStatus -> $($row.Status)" } else { '' })
                 Aciklama = 'Bu sunucu simdiki calistirmada olculmedi. Satirin durumu iyilesmis gorunuyorsa sebep bu eksik olcum olabilir; sorunun gectigi anlamina GELMEZ.'
             }
             if ($statusChanged) { $statusReported = $true }
@@ -638,8 +841,8 @@ function Compare-EDRuns {
         if ($statusChanged -and -not $statusReported) {
             $deltas += [pscustomobject]@{
                 Modul = $row.Module; Kontrol = $row.Check; Sunucu = '-'
-                Onceki = "$($previous.Durum)"; Simdiki = "$($row.Status)"; Fark = '-'
-                Yon = 'DURUM'; Durum = "$($previous.Durum) -> $($row.Status)"
+                Onceki = "$previousStatus"; Simdiki = "$($row.Status)"; Fark = '-'
+                Yon = 'DURUM'; Durum = "$previousStatus -> $($row.Status)"
                 Aciklama = $(if ($currentColumns.Count -eq 0) {
                     'Deger yok, yalnizca durum degisti.'
                 } else {
@@ -655,7 +858,8 @@ function Compare-EDRuns {
         $previous = $previousIndex[$key]
         $deltas += [pscustomobject]@{
             Modul = $previous.Modul; Kontrol = $previous.Kontrol; Sunucu = '-'
-            Onceki = "$($previous.Durum)"; Simdiki = '(yok)'; Fark = '-'
+            # Durum kolonu yoksa burada da uydurma yapilmaz: 'N/A' yazilir.
+            Onceki = (Get-EDPreviousStatusText -Row $previous -Readable $previousStatusReadable); Simdiki = '(yok)'; Fark = '-'
             Yon = 'KAYBOLDU'; Durum = ''
             Aciklama = 'Bu kontrol simdiki calistirmada yok. Modul atlanmis veya kapsam degismis olabilir - sorunun gectigi anlamina GELMEZ.'
         }

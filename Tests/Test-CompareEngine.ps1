@@ -46,18 +46,52 @@ function New-PreviousRun {
         # Eski surumle uretilmis bir run-meta.json'i taklit etmek icin:
         # adi verilen alanlar dosyaya HIC yazilmaz (bos yazilmaz - yok).
         [string[]]$OmitMetaFields = @(),
+        # Ayni sey SUMMARY.csv icin: adi verilen KOLONLAR basliktan silinir.
+        # Import-Csv boyle bir kolonu satir nesnesine hic eklemez (olculdu),
+        # yani erisim StrictMode altinda istisna firlatir.
+        [string[]]$DropCsvColumns = @(),
+        # SUMMARY.csv'ye fazladan sutun ekler (ad -> her satirdaki deger).
+        # Yeni bir ust veri sutununu ya da tanimadigimiz bir cikti bicimini
+        # taklit etmek icin.
+        [hashtable]$ExtraCsvColumns = @{},
         [switch]$NoMeta
     )
 
     $folder = Join-Path $script:Root ([guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
-    Export-EDSummaryCsv -Rows $Rows -Columns $Columns -Path (Join-Path $folder 'SUMMARY.csv') | Out-Null
+    $csvPath = Join-Path $folder 'SUMMARY.csv'
+    Export-EDSummaryCsv -Rows $Rows -Columns $Columns -Path $csvPath | Out-Null
+
+    if ($DropCsvColumns.Count -gt 0) {
+        $written = @(Import-Csv -LiteralPath $csvPath -Encoding UTF8)
+        if ($written.Count -gt 0) {
+            $keep = @($written[0].PSObject.Properties.Name | Where-Object { $_ -notin $DropCsvColumns })
+            $written | Select-Object -Property $keep |
+                Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        }
+    }
+
+    if ($ExtraCsvColumns.Count -gt 0) {
+        $written = @(Import-Csv -LiteralPath $csvPath -Encoding UTF8)
+        foreach ($item in $written) {
+            foreach ($name in $ExtraCsvColumns.Keys) {
+                $item | Add-Member -NotePropertyName $name -NotePropertyValue $ExtraCsvColumns[$name] -Force
+            }
+        }
+        if ($written.Count -gt 0) {
+            $written | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        }
+    }
 
     if (-not $NoMeta) {
+        # servers VARSAYILANI sutunlarla ayni: gercek kosumda da ikisi ayni
+        # topolojiden uretilir (Save-EDRunMeta topolojiyi, Export-EDSummaryCsv
+        # ayni sunucu listesini yazar). Fixture'in bunlari ayirmasi, gercekte
+        # olmayan bir durumu test etmek olurdu.
         $defaults = [ordered]@{
             runId = 'onceki'; startedLocal = '2026-09-17 03:00:00'; startedHour = 3
             utcOffsetHours = 3; windowHours = 1; heavy = $true; logAccess = 'smb'
-            serverFilter = @(); servers = @('MBX1'); profile = 'production'; modules = @('M10')
+            serverFilter = @(); servers = @($Columns); profile = 'production'; modules = @('M10')
         }
         foreach ($key in $Meta.Keys) { $defaults[$key] = $Meta[$key] }
         foreach ($field in $OmitMetaFields) { $defaults.Remove($field) }
@@ -409,6 +443,187 @@ else {
 $previous = New-PreviousRun -Rows $rows -OmitMetaFields @('runId')
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext)
 Assert-Equal 'runId yoksa klasor adi kullanilir' (Split-Path -Leaf $previous) "$($comparison.PreviousRunId)"
+
+# ===========================================================================
+Write-Host "`n=== 4C. Onceki SUMMARY.csv'nin SEKLI ===" -ForegroundColor Cyan
+
+# Meta alanlarindaki kusurun kardesi: Compare-EDRuns onceki kosumun
+# SUMMARY.csv'sinden Modul / Kontrol / Durum alanlarini korumasiz okuyordu.
+# Import-Csv olculdu: BASLIKTA olmayan bir kolon satir nesnesine hic eklenmez
+# (ozellik yoktur, degeri $null da degildir), yani StrictMode altinda erisim
+# PropertyNotFoundException firlatir ve delta raporunun tamami duser.
+#
+# Ama ayrim meta'dakiyle AYNI DEGIL: eksik bir kolon BUTUN satirlarda
+# eksiktir, yani tek bir boyut degil DOSYANIN BICIMI sorunludur. Bu yuzden
+# satir basina uyari beklenmez; tek ve net bir sinyal beklenir.
+
+$shapePrevRow = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+
+# 4C-a. Durum kolonu YOK: cokmez, tek bir Blocking verir, hukum uydurmaz.
+$previous = New-PreviousRun -Rows $shapePrevRow -DropCsvColumns @('Durum')
+$shapeComparison = $null
+$shapeThrew = $false
+$shapeError = ''
+try {
+    $shapeComparison = Compare-EDRuns -PreviousFolder $previous `
+        -CurrentRows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'FAIL')) `
+        -Context (New-CompareContext)
+}
+catch { $shapeThrew = $true; $shapeError = "$_" }
+Assert-True 'Durum kolonu olmayan CSV delta motorunu COKERTMEZ' (-not $shapeThrew) $shapeError
+
+if ($null -ne $shapeComparison) {
+    $shapeNotes = @(@($shapeComparison.Scope.Blocking) | Where-Object { $_ -like "*'Durum' kolonu YOK*" })
+    Assert-Equal 'Bicim uyarisi TEK BIR kez verildi' 1 $shapeNotes.Count
+    Assert-True 'Hukum okunamayan kiyas guvenilir SAYILMADI' (-not $shapeComparison.Scope.Comparable) 'blocking var'
+    Assert-True 'Sayilarin guvenilmez oldugu yazildi' ((@($shapeNotes) -join ' ') -like '*GUVENILIR DEGILDIR*') `
+        (Get-EDDetailSnippet (@($shapeNotes) -join ' '))
+
+    # Eksik hukum 'OK' ya da "degismedi" SAYILMADI: ne sahte bir gerileme
+    # ne de sahte bir iyilesme uretildi. (Gercekte OK -> FAIL vardi ama
+    # onceki hukum okunamadigi icin bu BILINEMEZ; uydurulmaz.)
+    $shapeHighlights = Get-EDDeltaHighlights -Comparison $shapeComparison
+    Assert-Equal 'Okunamayan hukumden gerileme uretilmedi' 0 (Get-EDHighlightCount $shapeHighlights 'Regressions')
+    Assert-Equal 'Okunamayan hukumden iyilesme uretilmedi' 0 (Get-EDHighlightCount $shapeHighlights 'Improvements')
+
+    # Satir basina TEKRARLAYAN uyari yok: 500 satirin her birinde ayni
+    # cumleyi gormek uyariyi okunmaz hale getirirdi.
+    $shapeNoteText = @(@($shapeComparison.Deltas) | ForEach-Object { $_.Aciklama }) -join ' '
+    Assert-True 'Satir basina tekrarlayan bicim uyarisi yok' ($shapeNoteText -notlike '*kolonu YOK*') 'satirlar temiz'
+
+    $shapePath = Join-Path $script:Root 'DELTA-bicim.html'
+    Export-EDDeltaHtml -Comparison $shapeComparison -Path $shapePath -Context (New-CompareContext) | Out-Null
+    $shapeHtml = Get-Content $shapePath -Raw -Encoding UTF8
+    Assert-True 'Bicim uyarisi raporun EN USTUNDE' ($shapeHtml -like '*KIYAS GUVENILIR DEGIL*') 'blocking blogu basildi'
+}
+else {
+    Assert-True 'Durum kolonu olmadan kiyas kuruldu' $false 'sonuc yok'
+}
+
+# 4C-b. Hukum okunamasa da DEGER farklari gecerlidir ve gizlenmez.
+$previous = New-PreviousRun -Rows $shapePrevRow -DropCsvColumns @('Durum')
+$shapeComparison = Compare-EDRuns -PreviousFolder $previous `
+    -CurrentRows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 25 } -Unit 'sn' -Status 'FAIL')) `
+    -Context (New-CompareContext)
+$valueDeltas = @(@($shapeComparison.Deltas) | Where-Object { $_.Yon -eq 'ARTTI' })
+Assert-Equal 'Deger farki yine de raporlandi' 1 $valueDeltas.Count
+# Gecis metni uydurulmaz: 'N/A -> FAIL' yazmak, okunamayan hukmu okunmus
+# gibi gosterip satiri OLCUM kovasina sokardi.
+Assert-Equal 'Okunamayan hukumden gecis metni uydurulmadi' '' (Get-EDFirstField $valueDeltas 'Durum')
+
+# 4C-c. Kaybolan kontrolun okunamayan hukmu bos degil N/A yazilir
+# (brief: okunamayan deger 0 ya da bos degil, N/A'dir).
+$previous = New-PreviousRun -Rows @(
+    New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'
+    New-EDRow -Module 'M12' -Check 'Yogunlasma' -Values @{ MBX1 = 5 } -Status 'FAIL'
+) -DropCsvColumns @('Durum')
+$shapeComparison = Compare-EDRuns -PreviousFolder $previous `
+    -CurrentRows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')) `
+    -Context (New-CompareContext)
+$lostRows = @(@($shapeComparison.Deltas) | Where-Object { $_.Yon -eq 'KAYBOLDU' })
+Assert-Equal 'Kaybolan kontrolun okunamayan hukmu N/A' 'N/A' (Get-EDFirstField $lostRows 'Onceki')
+
+# 4C-d. ANAHTAR kolon (Modul / Kontrol) yoksa kiyas hic kurulmaz: acik hata.
+# Bu ikisi olmadan hicbir satir eslenemez; her kontrol 'YENI' ve karsiligi
+# 'KAYBOLDU' gorunurdu - yani tamamen uydurma bir rapor.
+foreach ($keyColumn in @('Modul', 'Kontrol')) {
+    $previous = New-PreviousRun -Rows $shapePrevRow -DropCsvColumns @($keyColumn)
+    $keyThrew = $false
+    $keyMessage = ''
+    try {
+        Compare-EDRuns -PreviousFolder $previous -CurrentRows $shapePrevRow -Context (New-CompareContext) | Out-Null
+    }
+    catch { $keyThrew = $true; $keyMessage = "$_" }
+    Assert-True ("Anahtar kolon '$keyColumn' yoksa acik hata") $keyThrew 'istisna firlatildi'
+    Assert-True ("Hata eksik kolonu adlandiriyor ($keyColumn)") ($keyMessage -like "*$keyColumn*") (Get-EDDetailSnippet $keyMessage)
+    Assert-True ("Degisim degil DOSYA BICIMI farki dendi ($keyColumn)") ($keyMessage -like '*DOSYA BICIMI*') (Get-EDDetailSnippet $keyMessage)
+}
+
+# 4C-e. Satirsiz (bos) bir onceki SUMMARY.csv bicim hatasi DEGILDIR: hicbir
+# kontrolu olmayan mesru bir kosum boyle gorunur ve her kontrol 'YENI' olur.
+$emptyFolder = Join-Path $script:Root ([guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $emptyFolder -Force | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $emptyFolder 'SUMMARY.csv'), '', (New-Object System.Text.UTF8Encoding($false)))
+$emptyThrew = $false
+$emptyError = ''
+$emptyComparison = $null
+try { $emptyComparison = Compare-EDRuns -PreviousFolder $emptyFolder -CurrentRows $shapePrevRow -Context (New-CompareContext) }
+catch { $emptyThrew = $true; $emptyError = "$_" }
+Assert-True 'Bos onceki CSV bicim hatasi sayilmadi' (-not $emptyThrew) $emptyError
+if ($null -ne $emptyComparison) {
+    Assert-Equal 'Bos onceki kosumda kontrol YENI gorunur' 'YENI' (Get-EDFirstField @($emptyComparison.Deltas) 'Yon')
+}
+
+# ===========================================================================
+Write-Host "`n=== 4D. Sunucu sutunu TAHMIN EDILMEZ ===" -ForegroundColor Cyan
+
+# Kiyas motoru sunucu sutununu "sabit listede olmamak" ile tanimliyordu:
+# CSV'ye eklenen her yeni ust veri sutunu sessizce bir SUNUCU sayiliyordu ve
+# onceki kosumda olup simdikinde olmadiginda "bu sunucu simdiki calistirmada
+# olculmedi" diyen UYDURMA bir KAYBOLDU deltasi uretiliyordu. Bu teorik
+# degildi: rapor katmani gercek bir 'Orgu' sutunu acmaktan bu yuzden
+# vazgecmisti.
+
+$columnRow = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+$columnCurrent = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+
+# 4D-a. Paylasilan ust veri listesindeki bir sutun ('Orgu') SUNUCU SAYILMAZ.
+$previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Orgu = 'P1' }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
+$fabricated = @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Orgu' })
+Assert-Equal "Ust veri sutunundan uydurma sunucu deltasi uretilmedi" 0 $fabricated.Count
+Assert-Equal 'Ust veri sutunu hic delta uretmedi' 0 @($comparison.Deltas).Count
+Assert-True 'Taninan ust veri sutunu icin uyari da cikmaz' `
+    ((@($comparison.Scope.Advisory) -join ' ') -notlike '*TANIMSIZ*') (Get-EDDetailSnippet (@($comparison.Scope.Advisory) -join ' '))
+
+# 4D-b. TANIMADIGI bir sutun: ne ust veridir ne de bilinen bir sunucu adi.
+# Sunucu SAYILMAZ (uydurma delta yok) ama SUSULMAZ da.
+$previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Tuhaf = 'deger' }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
+Assert-Equal 'Tanimsiz sutundan uydurma sunucu deltasi uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
+$columnAdvisory = @($comparison.Scope.Advisory) -join ' '
+Assert-True 'Tanimsiz sutun ADIYLA bildirildi' ($columnAdvisory -like '*Tuhaf*') (Get-EDDetailSnippet $columnAdvisory)
+Assert-True 'Sunucu oldugu VARSAYILMADI denildi' ($columnAdvisory -like '*VARSAYILMADI*') (Get-EDDetailSnippet $columnAdvisory)
+# Tanimsiz sutun raporlanan hicbir seyi yanlislamaz; kiyas gecerli kalir.
+Assert-True 'Tanimsiz sutun kiyasi gecersiz KILMAZ' ($comparison.Scope.Comparable) 'blocking yok'
+
+# 4D-c. run-meta'da servers alani yoksa TAHMINE geri donulmez; siniflamanin
+# dogrulanamadigi acikca yazilir.
+$previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Tuhaf = 'deger' } -OmitMetaFields @('servers')
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
+# Iddia SUTUN notunun kendisine yapilir: meta'nin ayri "servers alani yok"
+# uyarisiyla karisirsa test, olcmedigi bir seyi gecmis sayar.
+$columnNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
+Assert-True 'Servers yoksa siniflamanin dogrulanamadigi yazildi' ($columnNote -like '*DOGRULANAMADI*') (Get-EDDetailSnippet $columnNote)
+Assert-Equal 'Servers yoksa da uydurma sunucu deltasi yok' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
+
+# 4D-d. GERCEK bir sunucunun kaybolmasi hala raporlanir - tahmin kaldirilirken
+# olculmus bir degerin kaybi da susturulmus olmamali.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10; MBX2 = 999 } -Status 'FAIL')
+) -Columns @('MBX1', 'MBX2')
+$comparison = Compare-EDRuns -PreviousFolder $previous `
+    -CurrentRows @((New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10 } -Status 'OK')) `
+    -Context (New-CompareContext)
+Assert-Equal 'Kaybolan GERCEK sunucu hala raporlaniyor' 1 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'MBX2' }).Count
+
+# 4D-e. YAZAN ile OKUYAN ayni kaynaga bakiyor mu? Export-EDSummaryCsv'nin
+# urettigi her baslik ya bir sunucu adi ya da paylasilan ust veri
+# listesindedir. Bu iddia, rapor katmani yeni bir sutun ekleyip listeyi
+# guncellemedigi gun KALIR - kusur sessizce delta motoruna sizmadan once.
+$contractPath = Join-Path $script:Root 'SUMMARY-sozlesme.csv'
+Export-EDSummaryCsv -Rows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')) `
+    -Columns @('MBX1') -Path $contractPath | Out-Null
+$contractHeaders = @(@(Import-Csv -LiteralPath $contractPath -Encoding UTF8)[0].PSObject.Properties.Name)
+$unlisted = @($contractHeaders | Where-Object { $_ -ne 'MBX1' -and $_ -notin $script:EDSummaryMetaColumns })
+Assert-Equal 'CSV yazicisinin ust veri sutunlari paylasilan listede' 0 $unlisted.Count
+Assert-True "Paylasilan liste 'Orgu' sutununun onunu aciyor" ('Orgu' -in $script:EDSummaryMetaColumns) 'rapor katmani sutunu acabilir'
+
+# 4D-f. Okuyan taraf listeyi KENDI kopyasindan okumasin: tek kaynak kurali
+# yorumla degil, kodla korunur.
+$compareText = Get-Content -LiteralPath (Join-Path $projectRoot 'Core\Compare.ps1') -Raw -Encoding UTF8
+Assert-True 'Compare.ps1 paylasilan listeyi kullaniyor' ($compareText -like '*$script:EDSummaryMetaColumns*') 'referans var'
+Assert-True 'Compare.ps1 kendi sutun kopyasini tasimiyor' ($compareText -notlike "*'Modul', 'Kontrol', 'Birim'*") 'yerel kopya yok'
 
 # ===========================================================================
 Write-Host "`n=== 5. Yeni / kaybolan kontroller ===" -ForegroundColor Cyan
