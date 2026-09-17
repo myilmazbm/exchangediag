@@ -491,27 +491,80 @@ $script:EDStatusRank = @{ 'OK' = 0; 'N/A' = 1; 'PASSIVE' = 1; 'TIMEOUT' = 2; 'WA
 $script:EDNonVerdict = @('N/A', 'PASSIVE')
 
 function Get-EDWorstStatus {
+<#
+    .SYNOPSIS
+        Bir hucre/satir kumesinin en kotu hukmunu dondurur.
+
+    .DESCRIPTION
+        IKI SESSIZ "OK" BURADAN CIKIYORDU:
+
+        1. BOS GIRDI. Get-EDWorstStatus @() 'OK' donuyordu. Hicbir sey
+           olcmemis bir modul boylece sure tablosunda "0 satir / OK" diye
+           goruluyordu - operatorun okudugu cumle "kontrol edildi, sorun yok"
+           olur. Olcum YOKLUGU bir saglik beyani degildir; dogru cevap N/A'dir.
+
+        2. TANIMSIZ DURUM. Siralama tablosunda olmayan bir durum ('KRITIK',
+           yazim hatasi, ya da hucre degeriyle karistirilmis bir metin)
+           sessizce ATILIYORDU; geriye tek hukum kalmayinca sonuc yine 'OK'
+           oluyordu. Burada throw EDILMEZ: bu islev rapor asamasinda, her
+           modul kostuktan SONRA ve modullerin try/catch'i disinda da
+           cagrilir - patlamak tum ciktiyi yok eder. Bunun yerine hukum
+           verilemedigi ERROR olarak gorunur kilinir.
+#>
     [CmdletBinding()]
     param([string[]]$Status)
 
     $worst = $null
     $nonVerdict = $null
+    $anyItem = $false
     foreach ($item in $Status) {
         if (-not $item) { continue }
+        $anyItem = $true
         if ($item -in $script:EDNonVerdict) {
             # N/A, PASSIVE'i bastirir: "olculemedi" bilgisi daha degerlidir.
             if ($null -eq $nonVerdict -or $item -eq 'N/A') { $nonVerdict = $item }
             continue
         }
         $rank = $script:EDStatusRank[$item]
-        if ($null -eq $rank) { continue }
+        if ($null -eq $rank) {
+            # Anlasilmayan hukum, hukumsuzluk degildir.
+            $rank = $script:EDStatusRank['ERROR']
+            $item = 'ERROR'
+        }
         if ($null -eq $worst -or $rank -gt $script:EDStatusRank[$worst]) { $worst = $item }
     }
 
     # Gercek bir hukum varsa o kazanir; hicbiri yoksa satir olculememis demektir.
     if ($null -ne $worst) { return $worst }
     if ($null -ne $nonVerdict) { return $nonVerdict }
+    if (-not $anyItem) { return 'N/A' }
     return 'OK'
+}
+
+function Get-EDUnknownModuleIds {
+<#
+    .SYNOPSIS
+        Istenen modul kimliklerinden kayitli olmayanlari dondurur.
+
+    .DESCRIPTION
+        Ayni soru iki yerden soruluyor ve iki farkli cevap aliyordu: komut
+        satirindaki '-Module M99' UYARI uretiyor, profilin skipModules
+        listesindeki 'M99' ise SESSIZCE yok sayiliyordu. Sessiz olani daha
+        tehlikelidir: atlanmak istenen modul calisir, kullanici onu atladigini
+        sanir ve bulgulari "zaten kapsam disi" diye okur. Tek kaynak, iki
+        cagri yeri - boylece ikisi ayrisamaz.
+#>
+    [CmdletBinding()]
+    param([string[]]$Requested, [string[]]$Known)
+
+    $unknown = @()
+    foreach ($id in $Requested) {
+        if (-not $id) { continue }
+        if ($id -in $Known) { continue }
+        if ($id -in $unknown) { continue }
+        $unknown += $id
+    }
+    return $unknown
 }
 
 # ---------------------------------------------------------------------------
@@ -525,6 +578,16 @@ function New-EDRow {
 
     .PARAMETER Values
         Sunucu adi -> deger esleme tablosu. Deger $null ise hucre 'N/A' yazilir.
+
+    .NOTES
+        [hashtable]$Values = @{} yazimi ACIKCA verilen $null'u REDDETMEZ:
+        varsayilan yalnizca parametre hic verilmediginde isler. Bir modul
+        -Values $null gecince satir sessizce kabul ediliyor, kaza ise rapor
+        asamasinda - yani TUM moduller kostuktan sonra ve hicbir catch'in
+        icinde olmayan bir yerde - "The property 'Keys' cannot be found"
+        ile patliyordu: SUMMARY yok, kanit dizini yok, cikis kodu yok.
+        Bu yuzden hata satirin URETILDIGI yerde verilir; orada modulun kendi
+        try/catch'i devralir ve yalnizca o modul ERROR olur.
 #>
     [CmdletBinding()]
     param(
@@ -538,6 +601,13 @@ function New-EDRow {
         [hashtable]$CellStatus = @{}
     )
 
+    if ($null -eq $Values) {
+        throw "$Module/$Check : New-EDRow -Values `$null olamaz. Olculemeyen sunucu icin anahtari `$null degerle ekleyin (@{ SRV1 = `$null }); hucre zaten N/A yazilir."
+    }
+    if ($null -eq $CellStatus) {
+        throw "$Module/$Check : New-EDRow -CellStatus `$null olamaz. Hucre hukmu yoksa bos tablo (@{}) gecin."
+    }
+
     return [pscustomobject]@{
         Module     = $Module
         Check      = $Check
@@ -548,6 +618,73 @@ function New-EDRow {
         Note       = $Note
         Patterns   = $Patterns
     }
+}
+
+function Get-EDModuleResultRows {
+<#
+    .SYNOPSIS
+        Bir modulun donusunu rapora girmeden once dogrular; bos donusu
+        olculmemis satira cevirir.
+
+    .DESCRIPTION
+        Modulun Run blogu ile rapor arasindaki tek gecit. Iki sessiz hatayi
+        burada durdurur:
+
+        1. HIC SATIR YOK. Bos donus "sorun bulunamadi" gibi okunuyordu: modul
+           SUMMARY.csv'de HIC gorunmuyor, modul sureleri tablosunda ise
+           "0 satir / OK" yaziyordu. Operatorun cikardigi sonuc "bu kontrol
+           yapildi ve temiz" oluyordu; oysa yapilmamisti. Yerine N/A satiri
+           konur - N/A bir hukum degil, "olculemedi" beyanidir.
+
+        2. SATIR OLMAYAN DEGER. Run blogunun ciktisina sizan bir string,
+           hashtable ya da ara nesne (cogu zaman unutulmus bir Out-Null)
+           rapor asamasina kadar fark edilmiyordu. Orada, her modul
+           kostuktan SONRA ve hicbir catch'in icinde olmayan bir yerde
+           "The property 'Keys' cannot be found" ile patliyor; SUMMARY,
+           kanit dizini ve cikis kodu birlikte kayboluyordu. Burada patlarsa
+           modulun kendi try/catch'i devralir: yalnizca o modul ERROR olur,
+           rapor yine uretilir.
+
+    .OUTPUTS
+        Dogrulanmis satir dizisi (hic degilse tek bir N/A satiri).
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ModuleId,
+        [Parameter(Mandatory)][string]$ModuleName,
+        [AllowNull()][AllowEmptyCollection()]$Rows
+    )
+
+    $list = @($Rows)
+    $index = 0
+    foreach ($row in $list) {
+        $index++
+        $problem = $null
+        if ($null -eq $row) {
+            $problem = 'deger $null'
+        }
+        else {
+            foreach ($field in @('Module', 'Check', 'Values', 'CellStatus', 'Status')) {
+                if ($null -eq $row.PSObject.Properties[$field]) { $problem = "'$field' alani yok"; break }
+            }
+            if (-not $problem -and -not ($row.Values -is [System.Collections.IDictionary])) {
+                $problem = 'Values bir hashtable degil'
+            }
+            if (-not $problem -and -not ($row.CellStatus -is [System.Collections.IDictionary])) {
+                $problem = 'CellStatus bir hashtable degil'
+            }
+        }
+        if ($problem) {
+            throw ("{0}: {1}. satir gecerli bir sonuc satiri degil ({2}, tip: {3}). Moduller satirlarini New-EDRow ile uretmelidir; Run blogunun ciktisina sizan ara deger rapor asamasinda TUM calistirmayi ciktisiz dusurur." -f `
+                $ModuleId, $index, $problem, $(if ($null -eq $row) { 'null' } else { $row.GetType().Name }))
+        }
+    }
+
+    if ($list.Count -eq 0) {
+        return New-EDRow -Module $ModuleId -Check $ModuleName -Status 'N/A' `
+            -Note 'Modul hicbir satir uretmedi; bu calistirmada hicbir sey OLCULMEDI. Bos cikti "sorun yok" DEMEK DEGILDIR - modulun neden veri bulamadigini run.log uzerinden dogrulayin.'
+    }
+    return $list
 }
 
 # ---------------------------------------------------------------------------

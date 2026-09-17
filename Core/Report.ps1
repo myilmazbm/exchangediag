@@ -7,19 +7,120 @@
 #>
 
 function Get-EDReportColumns {
-    <# Sutun sirasi: once topolojideki sunucular, sonra satirlarda gecen digerleri. #>
+<#
+    .SYNOPSIS
+        Sutun sirasi: once topolojideki sunucular, sonra satirlarda gecen
+        digerleri.
+
+    .DESCRIPTION
+        CELLSTATUS ANAHTARLARI DA SUTUN URETIR. Eskiden yalnizca Values'a
+        bakiliyordu; CellStatus'ta olup Values'ta olmayan bir anahtar hic
+        sutun almiyor ve ISARETLENMIS SAPAN HUCRE RAPORDAN SESSIZCE
+        DUSUYORDU - modul "SRV2 farkli" demis, rapor SRV2'yi hic yazmamis
+        oluyordu. Bu aracin tek isi sapani gostermek oldugu icin, kaybolan
+        isaret kabul edilebilir bir sonuc degildir.
+
+        Satir kurulumunda GURULTULU DOGRULAMA (throw) bilerek secilmedi:
+        anahtar kumeleri uyusmuyorsa bu bir modul hatasidir, ama karsiligi
+        modulun DOGRU olan diger satirlarini da ERROR'a cevirip yok etmek
+        olmamalidir. Sutun uretilince hucre zaten 'N/A' + vurgu ile cikar:
+        "isaretlendi ama degeri okunamadi" dogru ve okunabilir bir ifadedir.
+#>
     param($Rows, [string[]]$PreferredOrder)
 
     $columns = [System.Collections.Generic.List[string]]::new()
     foreach ($name in $PreferredOrder) {
         if ($name -and -not $columns.Contains($name)) { [void]$columns.Add($name) }
     }
+    $index = 0
     foreach ($row in $Rows) {
+        $index++
+        # Bozuk satir buraya ulasmamalidir (bkz. Get-EDModuleResultRows), ama
+        # ulasirsa kripto bir "The property 'Keys' cannot be found" yerine
+        # hangi satirin sucli oldugunu soyleyen bir hata verilir.
+        if ($null -eq $row -or $null -eq $row.PSObject.Properties['Values'] -or
+            -not ($row.Values -is [System.Collections.IDictionary])) {
+            $label = if ($null -ne $row -and $null -ne $row.PSObject.Properties['Module']) { [string]$row.Module } else { '(bilinmiyor)' }
+            throw "Rapor satiri bozuk: $index. satir (modul: $label) Values tablosu tasimiyor. Moduller satirlarini New-EDRow ile uretmelidir."
+        }
         foreach ($key in $row.Values.Keys) {
             if (-not $columns.Contains($key)) { [void]$columns.Add($key) }
         }
+        if ($null -ne $row.PSObject.Properties['CellStatus'] -and
+            ($row.CellStatus -is [System.Collections.IDictionary])) {
+            foreach ($key in $row.CellStatus.Keys) {
+                if (-not $columns.Contains($key)) { [void]$columns.Add($key) }
+            }
+        }
     }
     return $columns.ToArray()
+}
+
+function ConvertTo-EDCsvSafeText {
+<#
+    .SYNOPSIS
+        Excel'in FORMUL sanabilecegi hucre metnini etkisizlestirir.
+
+    .DESCRIPTION
+        SUMMARY.csv'nin okuyucusu Excel'dir. Excel bir hucre '=', '+', '-',
+        '@' ya da sekme/satirbasi ile basliyorsa onu formul sayar; "=cmd|'
+        /C calc'!A1" bicimindeki bir deger DDE ile komut calistirir. Bu
+        metinler bizim degil, EXCHANGE'in uretimidir: kuyruk LastError,
+        ContentIndexErrorMessage, mesaj konusu. Kanit toplayan salt okunur
+        bir arac, kanitini acan kisiyi vurmamalidir.
+
+        Tek tirnak on eki Excel'in "bu hucre metindir" isaretidir: hucre
+        ekranda AYNEN gorunur ama degerlendirilmez - yani kanit da kaybolmaz.
+
+        NEGATIF SAYILAR KACIRILMAZ. '-' ile baslayan her sey kacirilirsa
+        "-3.5" -> "'-3.5" olur; SUMMARY.csv makine tarafindan da okunur
+        (-CompareWith) ve delta motoru sayiyi kaybederdi. Bu yuzden once
+        "bu bir sayi mi" diye bakilir: sayilar ve siradan metinler
+        dokunulmadan gecer, yalnizca formul gibi baslayan METIN kacirilir.
+
+        HTML tarafi ayri bir sorundur ve zaten HtmlEncode ile cozuludur;
+        orada kacirma YAPILMAZ, cunku rapor metni oldugu gibi gostermelidir.
+#>
+    param([AllowNull()]$Value)
+
+    if ($null -eq $Value) { return $Value }
+    $text = [string]$Value
+    if ($text.Length -eq 0) { return $Value }
+    if ($text[0] -notin @('=', '+', '-', '@', "`t", "`r", "`n")) { return $Value }
+    if ($null -ne (ConvertTo-EDNumber $text)) { return $Value }
+    return "'" + $text
+}
+
+$script:EDStatusClassPattern = '[^A-Za-z0-9_-]'
+
+function ConvertTo-EDStatusClass {
+<#
+    .SYNOPSIS
+        Durum adini CSS SINIF ADINA cevirir.
+
+    .DESCRIPTION
+        'N/A' TEK bir sinif jetonudur ve icindeki '/' yuzunden '.NA'
+        seciciyle ESLESMEZ: class="num N/A" yazan hucre hicbir kural
+        yakalamaz ve olculmus bir hucreyle ayni gorunur. Raporun "neyin
+        olculemedigi ilk bakista gorulsun" vaadi tam burada kiriliyordu -
+        hem de her satirda sessizce.
+
+        Sinif adi jetonlastirilir: bosluk iceren bir durum adi ikinci bir
+        sinif jetonuna bolunur ve ayni sekilde kaybolurdu.
+
+        -creplace ZORUNLUDUR. -replace buyuk/kucuk harf duyarsizdir ve .NET
+        bu karsilastirmayi GECERLI KULTURLE yapar: tr-TR'de 'I' harfinin
+        kucugu 'ı'dir, yani 'I' [A-Za-z] araligiyla eslesmez ve elenir.
+        Turkce bir Exchange sunucusunda PASSIVE -> 'PASSVE', FAIL -> 'FAL'
+        olur; iki sinif da stil sayfasinda yoktur ve hucreler yine renksiz
+        kalirdi - duzeltilen hatanin Turkce ortamda aynen geri gelmesi.
+#>
+    param([AllowNull()][string]$Status)
+
+    $token = ([string]$Status) -creplace $script:EDStatusClassPattern, ''
+    # Durumsuz hucre de olculmemis hucredir; renksiz birakilmaz.
+    if (-not $token) { return 'NA' }
+    return $token
 }
 
 function Export-EDSummaryCsv {
@@ -32,9 +133,9 @@ function Export-EDSummaryCsv {
 
     $records = foreach ($row in $Rows) {
         $record = [ordered]@{
-            Modul   = $row.Module
-            Kontrol = $row.Check
-            Birim   = $row.Unit
+            Modul   = ConvertTo-EDCsvSafeText $row.Module
+            Kontrol = ConvertTo-EDCsvSafeText $row.Check
+            Birim   = ConvertTo-EDCsvSafeText $row.Unit
         }
         foreach ($column in $Columns) {
             # SUMMARY.csv makine tarafindan da okunur (-CompareWith). Sayilar
@@ -44,10 +145,14 @@ function Export-EDSummaryCsv {
             if ($cell -is [double] -or $cell -is [single] -or $cell -is [decimal]) {
                 $cell = ([double]$cell).ToString([System.Globalization.CultureInfo]::InvariantCulture)
             }
-            $record[$column] = $cell
+            # Kacirma sayiya cevirmeden SONRA yapilir: invariant bicimdeki
+            # "-3.5" sayi olarak taninir ve dokunulmadan gecer.
+            $record[$column] = ConvertTo-EDCsvSafeText $cell
         }
-        $record['Durum'] = $row.Status
-        $record['Not']   = $row.Note
+        $record['Durum'] = ConvertTo-EDCsvSafeText $row.Status
+        # Not alani Exchange metnini en sik tasiyan alandir (LastError,
+        # ContentIndexErrorMessage, mesaj konusu).
+        $record['Not']   = ConvertTo-EDCsvSafeText $row.Note
         [pscustomobject]$record
     }
 
@@ -103,6 +208,7 @@ function Export-EDSummaryHtml {
  .FAIL  { background:#fde3e3 !important; color:#a51414; }
  .ERROR { background:#f0e2fb !important; color:#63278f; }
  .TIMEOUT { background:#e6e9f5 !important; color:#3a4a8a; }
+ /* .NA = 'N/A' durumunun sinif adi; jetonlastirma ConvertTo-EDStatusClass'tadir. */
  .NA, .PASSIVE { background:#f0f0f4 !important; color:#777; }
  .outlier { outline: 2px solid #d43b3b; outline-offset: -2px; font-weight: 700; }
  .note { color:#666; font-size: 12px; white-space: normal; max-width: 420px; }
@@ -133,7 +239,7 @@ function Export-EDSummaryHtml {
     else {
         [void]$builder.AppendLine('<table><tr><th>Durum</th><th>Modul</th><th>Kontrol</th><th>Aciklama</th></tr>')
         foreach ($row in ($findings | Sort-Object @{ e = { @{FAIL=0;ERROR=1;TIMEOUT=2;WARN=3}[$_.Status] } }, Module)) {
-            [void]$builder.AppendLine("<tr><td class=""st $($row.Status)"">$($row.Status)</td><td>$(ConvertTo-EDHtmlEncoded $row.Module)</td><td>$(ConvertTo-EDHtmlEncoded $row.Check)</td><td class=""note"">$(ConvertTo-EDHtmlEncoded $row.Note)</td></tr>")
+            [void]$builder.AppendLine("<tr><td class=""st $(ConvertTo-EDStatusClass $row.Status)"">$($row.Status)</td><td>$(ConvertTo-EDHtmlEncoded $row.Module)</td><td>$(ConvertTo-EDHtmlEncoded $row.Check)</td><td class=""note"">$(ConvertTo-EDHtmlEncoded $row.Note)</td></tr>")
         }
         [void]$builder.AppendLine('</table>')
     }
@@ -153,12 +259,14 @@ function Export-EDSummaryHtml {
             if ($text -eq 'N/A') { $class = 'num NA' }
             if ($row.CellStatus.ContainsKey($column)) {
                 $cellStatus = $row.CellStatus[$column]
-                $class = "num $cellStatus"
+                # Durum adi degil, SINIF adi yazilir: 'N/A' bir sinif jetonu
+                # olarak '.NA' ile eslesmez ve hucre renksiz kalirdi.
+                $class = "num $(ConvertTo-EDStatusClass $cellStatus)"
                 if ($cellStatus -in @('WARN', 'FAIL')) { $class += ' outlier' }
             }
             [void]$builder.Append("<td class=""$class"">$(ConvertTo-EDHtmlEncoded $text)</td>")
         }
-        [void]$builder.AppendLine("<td class=""st $($row.Status)"">$($row.Status)</td><td class=""note"">$(ConvertTo-EDHtmlEncoded $row.Note)</td></tr>")
+        [void]$builder.AppendLine("<td class=""st $(ConvertTo-EDStatusClass $row.Status)"">$($row.Status)</td><td class=""note"">$(ConvertTo-EDHtmlEncoded $row.Note)</td></tr>")
     }
     [void]$builder.AppendLine('</table>')
 
@@ -167,7 +275,7 @@ function Export-EDSummaryHtml {
         [void]$builder.AppendLine('<h2>Modul sureleri</h2>')
         [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Ad</th><th>Sure (sn)</th><th>Satir</th><th>Durum</th></tr>')
         foreach ($timing in ($ModuleTimings | Sort-Object -Property Seconds -Descending)) {
-            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $timing.Id)</td><td>$(ConvertTo-EDHtmlEncoded $timing.Name)</td><td class=""num"">$($timing.Seconds)</td><td class=""num"">$($timing.RowCount)</td><td class=""st $($timing.Status)"">$($timing.Status)</td></tr>")
+            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $timing.Id)</td><td>$(ConvertTo-EDHtmlEncoded $timing.Name)</td><td class=""num"">$($timing.Seconds)</td><td class=""num"">$($timing.RowCount)</td><td class=""st $(ConvertTo-EDStatusClass $timing.Status)"">$($timing.Status)</td></tr>")
         }
         [void]$builder.AppendLine('</table>')
     }

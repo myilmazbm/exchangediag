@@ -31,7 +31,8 @@
     disinda onerilmez.
 
 .PARAMETER WindowHours
-    Tracking log penceresi (saat). Varsayilan environment.json'dan gelir.
+    Tracking log penceresi (saat). POZITIF olmalidir; verilmezse
+    environment.json'daki trackingWindowHours kullanilir.
 
 .PARAMETER LogAccess
     Auto  : once SMB uzerinden ham log, olmazsa cmdlet (varsayilan)
@@ -55,6 +56,22 @@
 .EXAMPLE
     .\Invoke-ExchangeDiag.ps1 -Module M10,M11,M12,M13,M20,M21,M22,M23 -Heavy
     Gecikme avi: asil teshis senaryosu. Yogun saatte calistirin.
+
+.NOTES
+    Cikis kodlari
+
+    0 - Tarama TAMAMLANDI, esikleri asan bulgu yok. Rapor uretildi.
+    1 - Tarama TAMAMLANDI, en kotu bulgu WARN/ERROR/TIMEOUT. Rapor uretildi.
+    2 - Tarama TAMAMLANDI, en az bir FAIL var. Rapor uretildi.
+    3 - ARAC CALISAMADI: tarama hic yapilamadi veya yarida kaldi.
+        SUMMARY.csv/SUMMARY.html ve run-meta.json URETILMEDI.
+        Tipik sebepler: bozuk Config\, Exchange'e baglanilamamasi, gecersiz
+        parametre, M01 topoloji kesfinin basarisiz olmasi. Gerekce run.log'un
+        sonundadir.
+
+    0/1/2 "rapora bak" demektir; 3 "bakacak rapor yok, once araci calisir
+    hale getir" demektir. Ikisi ayni kod olursa (eskiden ikisi de 1 idi)
+    zamanlanmis bir gorev, hic uretilmemis bir raporu bekler durur.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Quick')]
 param(
@@ -97,57 +114,81 @@ $projectRoot = $PSScriptRoot
 $runId = (Get-Date).ToString('yyyyMMdd-HHmmss')
 if (-not $OutputRoot) { $OutputRoot = Join-Path $projectRoot 'output' }
 $outputDir = Join-Path $OutputRoot $runId
-New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
-$log = New-EDLogger -LogPath (Join-Path $outputDir 'run.log') -Quiet:$Quiet
-$log.Info("ExchangeDiag calistirma $runId basliyor. Cikti: $outputDir")
-$log.Info('Bu arac SALT OKUNURDUR; ortamda hicbir degisiklik yapmaz.')
+# "ARAC CALISAMADI" ile "tarama uyariyla bitti" AYNI SEY DEGILDIR.
+#
+# Eskiden config hatasi, baglanti hatasi veya M01'in patlamasi hicbir catch'e
+# ugramadan sureci 1 ile dusuruyordu - yani WARN bulgusuyla BASARIYLA biten
+# bir taramayla ayni kod. 1'i "raporu incele" diye yorumlayan bir zamanlanmis
+# gorev, hic uretilmemis bir raporu arar ve sessizce hicbir sey yapmaz.
+# Asagidaki try/catch bu iki durumu ayirir; kodlarin tam listesi .NOTES'ta.
+$EDExitToolFailed = 3
 
-$coreLoad = Initialize-ExchangeDiagCore -CoreRoot (Join-Path $projectRoot 'Core')
-$log.Info("C# cekirdek yuklendi ($($coreLoad.Source), $($coreLoad.DurationMs) ms)")
-
-$config = Get-EDConfig -ProjectRoot $projectRoot
-if ($config.UsingSampleConfig) {
-    $log.Warn('Config\ klasoru yok; Config.sample\ veya varsayilan esikler kullaniliyor. Esikler ONERIDIR, ortaminiza gore ayarlayin.')
-}
-foreach ($expired in $config.ExpiredKnownIssues) {
-    $log.Warn("Suresi dolmus bastirma yok sayildi: modul $($expired['module']), kalip '$($expired['match'])', son gecerlilik $($expired['expires'])")
-}
-
-if (-not $WindowHours) { $WindowHours = [double]$config.Environment.trackingWindowHours }
-if (-not $LogAccess)   { $LogAccess   = [string]$config.Environment.logAccess }
-
-$executor = Connect-EDExchange -Config $config -Log $log -Credential $Credential -ParallelismOverride $Parallelism
-
-# NOT: $( ... ) icinde @() donen bir if, bos diziyi bosluga acar ve deger $null
-# olur. Bu yuzden once degiskene atanir.
-$serverFilter = @()
-if ($Server) { $serverFilter = @($Server) }
-
-$context = [pscustomobject]@{
-    Config       = $config
-    Executor     = $executor
-    Log          = $log
-    ProjectRoot  = $projectRoot
-    OutputDir    = $outputDir
-    RunId        = $runId
-    StartTime    = Get-Date
-    Topology     = $null
-    Heavy        = [bool]$Heavy
-    WindowHours  = $WindowHours
-    LogAccess    = $LogAccess.ToLowerInvariant()
-    VerifyParser = [bool]$VerifyParser
-    ServerFilter = $serverFilter
-    # Moduller arasi paylasilan onbellek: tracking log ayristirmasi pahalidir,
-    # M10/M11/M12/M13 ayni veriyi yeniden okumamali.
-    Cache        = @{}
-}
-
+$log = $null
+$executor = $null
 $allRows = @()
 $timings = @()
 $exitCode = 0
 
 try {
+    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+
+    $log = New-EDLogger -LogPath (Join-Path $outputDir 'run.log') -Quiet:$Quiet
+    $log.Info("ExchangeDiag calistirma $runId basliyor. Cikti: $outputDir")
+    $log.Info('Bu arac SALT OKUNURDUR; ortamda hicbir degisiklik yapmaz.')
+
+    $coreLoad = Initialize-ExchangeDiagCore -CoreRoot (Join-Path $projectRoot 'Core')
+    $log.Info("C# cekirdek yuklendi ($($coreLoad.Source), $($coreLoad.DurationMs) ms)")
+
+    $config = Get-EDConfig -ProjectRoot $projectRoot
+    if ($config.UsingSampleConfig) {
+        $log.Warn('Config\ klasoru yok; Config.sample\ veya varsayilan esikler kullaniliyor. Esikler ONERIDIR, ortaminiza gore ayarlayin.')
+    }
+    foreach ($expired in $config.ExpiredKnownIssues) {
+        $log.Warn("Suresi dolmus bastirma yok sayildi: modul $($expired['module']), kalip '$($expired['match'])', son gecerlilik $($expired['expires'])")
+    }
+
+    # -WindowHours 0 "sahte" oldugu icin SESSIZCE config degeriyle
+    # degistiriliyor, -1 ise hic denetlenmeden tracking log penceresine
+    # gidiyordu. Negatif pencere bos sonuc uretir ve bos sonuc "sorun yok"
+    # gibi okunur. Kural Config.ps1'deki trackingWindowHours kuraliyle AYNI:
+    # pencere pozitif olmak zorundadir.
+    if ($PSBoundParameters.ContainsKey('WindowHours')) {
+        if ($WindowHours -le 0) {
+            throw "-WindowHours pozitif olmali, verilen: $WindowHours (environment.trackingWindowHours ile ayni kural)."
+        }
+    }
+    else {
+        $WindowHours = [double]$config.Environment.trackingWindowHours
+    }
+    if (-not $LogAccess) { $LogAccess = [string]$config.Environment.logAccess }
+
+    $executor = Connect-EDExchange -Config $config -Log $log -Credential $Credential -ParallelismOverride $Parallelism
+
+    # NOT: $( ... ) icinde @() donen bir if, bos diziyi bosluga acar ve deger $null
+    # olur. Bu yuzden once degiskene atanir.
+    $serverFilter = @()
+    if ($Server) { $serverFilter = @($Server) }
+
+    $context = [pscustomobject]@{
+        Config       = $config
+        Executor     = $executor
+        Log          = $log
+        ProjectRoot  = $projectRoot
+        OutputDir    = $outputDir
+        RunId        = $runId
+        StartTime    = Get-Date
+        Topology     = $null
+        Heavy        = [bool]$Heavy
+        WindowHours  = $WindowHours
+        LogAccess    = $LogAccess.ToLowerInvariant()
+        VerifyParser = [bool]$VerifyParser
+        ServerFilter = $serverFilter
+        # Moduller arasi paylasilan onbellek: tracking log ayristirmasi pahalidir,
+        # M10/M11/M12/M13 ayni veriyi yeniden okumamali.
+        Cache        = @{}
+    }
+
     Reset-EDModuleRegistry
     Import-EDModules -ModuleRoot (Join-Path $projectRoot 'Modules')
     $registered = @(Get-EDModules)
@@ -160,7 +201,8 @@ try {
     if (-not $topologyModule) { throw 'M01 (topoloji kesfi) bulunamadi; arac topoloji olmadan calisamaz.' }
 
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $topologyRows = @(& $topologyModule[0].Run $context)
+    $topologyRows = @(Get-EDModuleResultRows -ModuleId 'M01' -ModuleName $topologyModule[0].Name `
+        -Rows (& $topologyModule[0].Run $context))
     $watch.Stop()
     $timings += [pscustomobject]@{
         Id = 'M01'; Name = $topologyModule[0].Name
@@ -182,6 +224,14 @@ try {
     $ignoreFindings = @($activeProfile['ignoreFindings'])
     $suppressed = @()
 
+    # Profildeki yazim hatasi SESSIZ kalirsa, atladigini sanan kullanicinin
+    # modulu calisir ve bulgulari "zaten kapsam disi" diye okunur. Komut
+    # satirindaki -Module M99 zaten uyariyor; ayni soru ayni cevabi vermeli.
+    $unknownSkip = @(Get-EDUnknownModuleIds -Requested $skipModules -Known $registered.Id)
+    if ($unknownSkip.Count -gt 0) {
+        $log.Warn("Profil '$($config.Environment.profile)' skipModules listesindeki su ID'ler kayitli degil: $($unknownSkip -join ', '). Bu ID'ler HICBIR modulu atlamiyor - yazim hatasiysa atlamak istediginiz modul calisiyor demektir (Config\profiles.json).")
+    }
+
     $selected = switch ($PSCmdlet.ParameterSetName) {
         'Module' { @(Get-EDModules -Id $Module) }
         'All'    { @(Get-EDModules) }
@@ -193,7 +243,7 @@ try {
     $selected = @($selected | Where-Object { $_.Id -ne 'M01' })
 
     if ($PSCmdlet.ParameterSetName -eq 'Module') {
-        $missing = @($Module | Where-Object { $_ -notin $registered.Id })
+        $missing = @(Get-EDUnknownModuleIds -Requested $Module -Known $registered.Id)
         if ($missing) { $log.Warn("Bilinmeyen modul ID'leri yok sayildi: $($missing -join ', ')") }
     }
 
@@ -276,7 +326,12 @@ try {
         $rows = @()
         $status = 'OK'
         try {
-            $rows = @(& $moduleInfo.Run $context)
+            # Get-EDModuleResultRows iki seyi burada, modulun kendi
+            # try/catch'i icinde yakalar: satir olmayan bir deger (rapor
+            # asamasinda tum calistirmayi dusururdu) ve HIC satir uretmemis
+            # bir modul (SUMMARY'de hic gorunmez, sure tablosunda "OK" cikardi).
+            $rows = @(Get-EDModuleResultRows -ModuleId $moduleInfo.Id -ModuleName $moduleInfo.Name `
+                -Rows (& $moduleInfo.Run $context))
             $status = Get-EDWorstStatus ($rows | ForEach-Object { $_.Status })
         }
         catch {
@@ -382,6 +437,24 @@ try {
 
     if ($worst -eq 'FAIL') { $exitCode = 2 }
     elseif ($worst -in @('WARN', 'ERROR', 'TIMEOUT')) { $exitCode = 1 }
+}
+catch {
+    # Buraya dusmek "tarama kotu sonuclandi" degil, "TARAMA YAPILAMADI"
+    # demektir: rapor, kanit dizini ve run-meta.json yoktur. Bu yuzden 0/1/2
+    # ailesinden ayri bir kod verilir - bkz. .NOTES.
+    $exitCode = $EDExitToolFailed
+    $reason = "ARAC CALISAMADI: $($_.Exception.Message)"
+    if ($log) {
+        $log.Error($reason)
+        $log.Error("Bu calistirma icin SUMMARY.csv/SUMMARY.html URETILMEDI; cikis kodu $exitCode. Onceki bir raporu guncel sanmayin.")
+        $log.Error("Yer: $($_.InvocationInfo.PositionMessage -replace '\r?\n', ' ')")
+    }
+    else {
+        # Gunlukcu bile kurulamadiysa (cikti klasoru yazilamiyor gibi) geriye
+        # yalnizca konsol kalir; sessiz cikmak en kotu secenektir.
+        Write-Host $reason -ForegroundColor Red
+        Write-Host "Cikti klasoru: $outputDir" -ForegroundColor Red
+    }
 }
 finally {
     if ($executor) { $executor.Dispose() }
