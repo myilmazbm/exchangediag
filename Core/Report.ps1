@@ -135,11 +135,46 @@ function Export-EDSummaryCsv {
         [Parameter(Mandatory)][string]$Path
     )
 
+    # SUTUN ADLARI BURADA IKINCI KEZ TANIMLANMAZ. Yazan (bu dosya) ve okuyan
+    # (Compare.ps1) taraf ayni listeyi ayri ayri tasidigi icin, rapora yeni
+    # eklenen bir ust veri sutunu okuyan tarafta SUNUCU sanilmis ve olmayan
+    # bir sunucu adina "olculmedi" kaydi uretilmisti. Liste artik tek yerde:
+    # Framework.ps1 -> $script:EDSummaryMetaColumns.
+    #
+    # Sunucu sutunlari 'Durum'dan ONCE girer; listenin o noktaya kadarki
+    # bolumu bas blok, kalani son bloktur. Boylece sutun SIRASI da paylasilan
+    # listeden gelir.
+    $statusIndex = [array]::IndexOf([string[]]$script:EDSummaryMetaColumns, 'Durum')
+    if ($statusIndex -lt 1) {
+        # Bolme noktasi yoksa sutun sirasi kurulamaz. Sessizce devam etmek
+        # basliklari karisik bir CSV yazardi ve o dosya -CompareWith ile
+        # MAKINE tarafindan okunuyor: bozuk sira, yanlis sunucuya yazilmis
+        # deger demektir. Bu yuzden neden acikca soylenir.
+        throw "Ust veri sutun listesi bozuk: 'Durum' bulunamadi. Framework.ps1 -> `$script:EDSummaryMetaColumns sirasini koruyun (once satir kimligi, sonra sunucular, en sonda Durum/Not)."
+    }
+    $leadingMeta = @($script:EDSummaryMetaColumns[0..($statusIndex - 1)])
+    $trailingMeta = @($script:EDSummaryMetaColumns[$statusIndex..($script:EDSummaryMetaColumns.Count - 1)])
+
     $records = foreach ($row in $Rows) {
-        $record = [ordered]@{
-            Modul   = ConvertTo-EDCsvSafeText $row.Module
-            Kontrol = ConvertTo-EDCsvSafeText $row.Check
-            Birim   = ConvertTo-EDCsvSafeText $row.Unit
+        # Ad -> deger eslemesi. Listede olup burada karsiligi olmayan bir ad
+        # BOS hucre uretir (uydurma deger degil); eksik esleme Tests\
+        # Test-ReportLayer.ps1 ve Test-CompareEngine.ps1 tarafindan yakalanir.
+        $metaValues = @{
+            Modul   = $row.Module
+            Kontrol = $row.Check
+            Birim   = $row.Unit
+            # Orgusuz satirda bos metin: '-' ya da 'YOK' yazmak, bir orgunun
+            # arastirilip bulunamadigi izlenimi verirdi.
+            Orgu    = (Format-EDPatternList -Patterns (Get-EDRowPatterns $row))
+            Durum   = $row.Status
+            # Not alani Exchange metnini en sik tasiyan alandir (LastError,
+            # ContentIndexErrorMessage, mesaj konusu).
+            Not     = $row.Note
+        }
+
+        $record = [ordered]@{}
+        foreach ($name in $leadingMeta) {
+            $record[$name] = ConvertTo-EDCsvSafeText $metaValues[$name]
         }
         foreach ($column in $Columns) {
             # SUMMARY.csv makine tarafindan da okunur (-CompareWith). Sayilar
@@ -153,24 +188,9 @@ function Export-EDSummaryCsv {
             # "-3.5" sayi olarak taninir ve dokunulmadan gecer.
             $record[$column] = ConvertTo-EDCsvSafeText $cell
         }
-        $record['Durum'] = ConvertTo-EDCsvSafeText $row.Status
-        # Orgu etiketi AYRI BIR SUTUN DEGIL, notun basina yazilir.
-        #
-        # NEDEN: Compare.ps1 onceki SUMMARY.csv'nin basliklarindan sabit bir
-        # liste ('Modul','Kontrol','Birim','Durum','Not') disinda kalan HER
-        # sutunu BIR SUNUCU sayar. 'Orgu' adinda bir sutun eklenseydi, simdiki
-        # calistirmanin satirlarinda boyle bir sunucu olmadigi icin delta
-        # motoru orgusu olan her satir icin "bu sunucu simdiki calistirmada
-        # olculmedi" diye UYDURMA bir KAYBOLDU kaydi uretirdi. Notun basi,
-        # hem Excel'de ilk gorunen yer hem de kiyas motorunun zaten hesaba
-        # katmadigi alan. (Compare.ps1 o listeye 'Orgu' eklediginde bu tercih
-        # birinci sinif bir sutuna donusturulebilir.)
-        $patternText = Format-EDPatternList -Patterns (Get-EDRowPatterns $row)
-        $note = [string]$row.Note
-        if ($patternText) { $note = ("[ORGU {0}] {1}" -f $patternText, $note).Trim() }
-        # Not alani Exchange metnini en sik tasiyan alandir (LastError,
-        # ContentIndexErrorMessage, mesaj konusu).
-        $record['Not']   = ConvertTo-EDCsvSafeText $note
+        foreach ($name in $trailingMeta) {
+            $record[$name] = ConvertTo-EDCsvSafeText $metaValues[$name]
+        }
         [pscustomobject]$record
     }
 
@@ -276,13 +296,19 @@ function Export-EDSummaryHtml {
     }
 
     # --- Ozet tablo ---
+    # Orgu sutunu burada da vardir ve SUMMARY.csv ile ayni siradadir (Birim'den
+    # sonra). Yalnizca bulgu tablosuna konsaydi, hukmu 'OK' olan orgu satirlari
+    # (ornegin M10 ortalama, M13 sakin saat p95) HTML'de orgusuz gorunur, ayni
+    # satir CSV'de orgulu olurdu; iki cikti ayni veriyi farkli anlatirdi.
     [void]$builder.AppendLine('<h2>Ozet &mdash; tum sunucular yan yana</h2>')
-    [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Kontrol</th><th>Birim</th>')
+    [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Kontrol</th><th>Birim</th><th>Orgu</th>')
     foreach ($column in $Columns) { [void]$builder.AppendLine("<th>$(ConvertTo-EDHtmlEncoded $column)</th>") }
     [void]$builder.AppendLine('<th>Durum</th><th>Not</th></tr>')
 
     foreach ($row in $Rows) {
-        [void]$builder.Append("<tr><td>$(ConvertTo-EDHtmlEncoded $row.Module)</td><td>$(ConvertTo-EDHtmlEncoded $row.Check)</td><td>$(ConvertTo-EDHtmlEncoded $row.Unit)</td>")
+        $summaryPatternCell = (@(Get-EDPatternLines -Patterns (Get-EDRowPatterns $row)) |
+            ForEach-Object { ConvertTo-EDHtmlEncoded $_ }) -join '<br>'
+        [void]$builder.Append("<tr><td>$(ConvertTo-EDHtmlEncoded $row.Module)</td><td>$(ConvertTo-EDHtmlEncoded $row.Check)</td><td>$(ConvertTo-EDHtmlEncoded $row.Unit)</td><td class=""orgu"">$summaryPatternCell</td>")
         foreach ($column in $Columns) {
             $value = if ($row.Values.ContainsKey($column)) { $row.Values[$column] } else { $null }
             $text = if ($null -eq $value -or "$value" -eq '') { 'N/A' } else { "$value" }
