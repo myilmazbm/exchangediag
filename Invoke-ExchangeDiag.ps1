@@ -131,6 +131,7 @@ $timings = @()
 $exitCode = 0
 
 try {
+    # ED-WRITE-OK: calistirmanin kendi cikti klasoru (-OutputRoot + runId)
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
     $log = New-EDLogger -LogPath (Join-Path $outputDir 'run.log') -Quiet:$Quiet
@@ -518,6 +519,7 @@ try {
                 Write-EDDeltaConsole -Comparison $comparison -Log $log
 
                 $deltaCsv = Join-Path $outputDir 'DELTA.csv'
+                # ED-WRITE-OK: DELTA.csv; yol cikti klasorunden hesaplanir
                 @($comparison.Deltas) | Export-Csv -LiteralPath $deltaCsv -NoTypeInformation -Encoding UTF8
                 $deltaHtml = Export-EDDeltaHtml -Comparison $comparison -Path (Join-Path $outputDir 'DELTA.html') -Context $context
                 $log.Info("Delta : $deltaHtml")

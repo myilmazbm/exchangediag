@@ -81,6 +81,20 @@ function Test-EDFinding {
 # 1. Splat: -Command parametresi CommandParameterAst degil, hashtable icinde.
 #    Eski denetim hicbir sey KAYDETMIYOR ve hicbir ihlal URETMIYORDU; modul
 #    Exchange'e Remove-Mailbox gonderse denetim izinde tek satir bile olmazdi.
+# YAZMANIN KOMUT OLMAYAN BICIMLERI.
+# Olculdu: bu dosya bir sure denetimden SIFIR bulguyla geciyordu. `>` bir
+# komut degildir (AST'de FileRedirectionAst'tir) ve denetim o dugum turunu
+# hic ziyaret etmiyordu; degiskende tutulan yol sessizce atlaniyordu;
+# Tee-Object'in fiili degistirici listesinde yoktu.
+New-EDLintFixtureFile 'Modules\M95-Yonlendirme.ps1' @'
+$data = 'zarar'
+$data > 'C:\Windows\Temp\evil.txt'
+$data >> 'C:\Windows\Temp\evil2.txt'
+$hedef = 'C:\Windows\Temp\evil3.txt'
+Set-Content -LiteralPath $hedef -Value $data
+Tee-Object -FilePath 'C:\Windows\Temp\evil4.txt'
+'@
+
 New-EDLintFixtureFile 'Modules\M90-Splat.ps1' @'
 $splat = @{ Key = 'evil'; Command = 'Remove-Mailbox' }
 New-EDExchangeTask @splat
@@ -261,6 +275,23 @@ Assert-True 'Inline olmayan -ScriptBlock bulgu uretiyor' `
     (Test-EDFinding -Findings $findings -Kind 'DOGRULANAMAZ' -Command 'Invoke-Command')
 Assert-True '[scriptblock]::Create yakalaniyor' `
     (Test-EDFinding -Findings $findings -Command 'scriptblock::Create')
+
+Write-Host "`n=== 10b. Komut olmayan yazma yollari ===" -ForegroundColor Cyan
+Assert-True '> yonlendirmesi yakalaniyor' `
+    (Test-EDFinding -Findings $findings -Kind 'YONLENDIRME')
+Assert-True '>> ekleyerek yonlendirme yakalaniyor' `
+    (@($findings | Where-Object { $_.Tur -eq 'YONLENDIRME' -and $_.Komut -like '*>>*' }).Count -gt 0)
+# Degiskende tutulan yol STATIK OLARAK BILINEMEZ; sessiz gecmek yerine
+# DOGRULANAMAZ bulgusu uretilir (brief: denetimin sessizligi temizlikten
+# ayirt edilemez).
+Assert-True 'Degiskende tutulan yol DOGRULANAMAZ sayiliyor' `
+    (Test-EDFinding -Findings $findings -Kind 'DOGRULANAMAZ' -Command 'Set-Content')
+Assert-True 'Tee-Object -FilePath yakalaniyor' `
+    (@($findings | Where-Object { $_.Komut -eq 'Tee-Object' }).Count -gt 0)
+# 2>$null gibi SUSTURMALAR dosyaya yazmaz; ihlal sayilirsa denetim yanlis
+# alarma boğulur ve susturulan bir denetim yok demektir.
+Assert-True 'null susturmasi ihlal sayilmiyor' `
+    (@($findings | Where-Object { $_.Tur -eq 'YONLENDIRME' -and $_.Komut -like '*$null*' }).Count -eq 0)
 
 Write-Host "`n=== 11. Mimari kural ===" -ForegroundColor Cyan
 Assert-True 'New-PSSession mimari ihlali' (Test-EDFinding -Findings $findings -Kind 'MIMARI' -Command 'New-PSSession')

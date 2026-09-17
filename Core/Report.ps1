@@ -1,4 +1,4 @@
-<#
+﻿<#
     ExchangeDiag - Rapor uretimi
 
     Brief Bolum 8: her modul tum sunucular icin tek satir uretir, sunucular yan
@@ -115,7 +115,7 @@ function ConvertTo-EDStatusClass {
         altinda -replace da PASSIVE/FAIL degerlerini bozmuyor, cunku .NET
         ASCII araliklarinda bu katlamayi ozel olarak ele aliyor. Tuzak
         GERCEKTIR ama baska islemlerde: .ToUpper()/.ToLower() cagrilari
-        tr-TR'de 'i' -> 'İ' ve 'I' -> 'ı' uretir. Durum adlarini bir yerde
+        tr-TR'de 'i' -> 'Ä°' ve 'I' -> 'Ä±' uretir. Durum adlarini bir yerde
         buyuk/kucuk harfe cevirip sonra [A-Za-z] ile suzen bir kod eklenirse
         sinif adlari orada bozulur.
 #>
@@ -194,6 +194,7 @@ function Export-EDSummaryCsv {
         [pscustomobject]$record
     }
 
+    # ED-WRITE-OK: SUMMARY.csv; yol cagirandan gelir ve cikti klasorune baglidir
     $records | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
     return $Path
 }

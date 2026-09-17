@@ -114,6 +114,7 @@ function Initialize-ExchangeDiagCore {
     # 2) Derleyip cache'le.
     try {
         if (-not (Test-Path -LiteralPath $cacheDir)) {
+            # ED-WRITE-OK: derleme onbellegi klasoru, yol $env:TEMP altinda hesaplanir
             New-Item -ItemType Directory -Path $cacheDir -Force -ErrorAction Stop | Out-Null
         }
         Add-Type -Path $paths -ReferencedAssemblies $references -OutputAssembly $cacheFile -ErrorAction Stop
@@ -150,6 +151,7 @@ function Clear-ExchangeDiagCoreCache {
         return
     }
     if ($PSCmdlet.ShouldProcess($cacheDir, 'Cache temizle')) {
+        # ED-WRITE-OK: yalnizca kendi onbellek klasorundeki *.dll, ShouldProcess arkasinda
         Get-ChildItem -LiteralPath $cacheDir -Filter '*.dll' -File | Remove-Item -Force
     }
 }

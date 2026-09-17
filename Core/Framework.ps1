@@ -854,6 +854,7 @@ function New-EDLogger {
 
         $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
         $line = '{0} [{1,-5}] {2}' -f $stamp, $Level, $Message
+        # ED-WRITE-OK: run.log; yol cikti klasorunden hesaplanir (Join-Path $OutputDir)
         try { Add-Content -LiteralPath $this.Path -Value $line -Encoding UTF8 } catch { }
 
         if ($this.Quiet -and $Level -notin @('WARN', 'ERROR')) { return }
@@ -889,6 +890,7 @@ function Save-EDEvidence {
     if (-not $Data -or $Data.Count -eq 0) { return $null }
     $safe = ($Name -replace '[^\w\-\.]', '_')
     $path = Join-Path $Context.OutputDir "$safe.csv"
+    # ED-WRITE-OK: kanit CSV'si; yol Join-Path $Context.OutputDir ile hesaplanir
     $Data | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
     $Context.Log.Info("Kanit yazildi: $safe.csv ($($Data.Count) satir)")
     return $path

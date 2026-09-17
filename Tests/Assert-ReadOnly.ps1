@@ -190,6 +190,9 @@ $script:AllowedCommands = @{
 # sabit degildir - bu yuzden "mutlak sabit yol" guvenli bir isarettir.
 $script:PathConstrainedCommands = @(
     'Set-Content', 'Add-Content', 'Clear-Content', 'Export-Csv', 'Out-File',
+    # Tee-Object fiili masum gorunur ('Tee' degistirici fiil listesinde yok)
+    # ama -FilePath ile DOSYAYA YAZAR. Fiil listesine guvenmek yetmiyor.
+    'Tee-Object',
     'New-Item', 'Remove-Item', 'Copy-Item', 'Move-Item', 'Rename-Item',
     'Set-ItemProperty', 'Remove-ItemProperty'
 )
@@ -357,6 +360,22 @@ function Test-EDSplatted {
     return $false
 }
 
+function Test-EDWriteMarked {
+    <#
+        Yazim satiri acikca muaf tutulmus mu? Isaret satirin KENDISINDE ya da
+        hemen ustundeki satirda aranir - gerekce yazimdan uzaklasirsa
+        okuyan onu dogrulayamaz.
+    #>
+    param([int]$Line)
+
+    foreach ($offset in 0, 1) {
+        $index = $Line - 1 - $offset
+        if ($index -lt 0 -or $index -ge $script:CurrentLines.Count) { continue }
+        if ($script:CurrentLines[$index] -match '#\s*ED-WRITE-OK:') { return $true }
+    }
+    return $false
+}
+
 function Test-EDPathArguments {
     <#
         Izinli yazma komutlarinin hedef yolunu denetler. Kaynakta MUTLAK SABIT
@@ -372,8 +391,47 @@ function Test-EDPathArguments {
     # Konumsal ilk arguman da hedef olabilir: Add-Content 'C:\...' 'x'
     if ($Elements.Count -gt 1) { $candidates += $Elements[1] }
 
+    # AYNI HEDEF IKI KEZ BULUNABILIR: adlandirilmis parametre ile konumsal
+    # arguman ayni dugume isaret edebilir. Ayni ihlali iki kez raporlamak
+    # bulgu sayisini sisirir ve okuyanin gercek kapsami kestirmesini
+    # zorlastirir - bir denetimin gurultusu de guvenilirligini dusurur.
+    $seen = @{}
+    $unique = @()
     foreach ($candidate in $candidates) {
-        if ($candidate -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+        if ($null -eq $candidate) { continue }
+        # PARAMETRE ADI HEDEF DEGILDIR. Konumsal aday olarak alinan
+        # $Elements[1], `-LiteralPath $p` yaziminda parametrenin KENDISIDIR
+        # (CommandParameterAst). Onu "sabit olmayan yol" sayarsak her mesru
+        # cagri icin ikinci bir sahte bulgu ureririz - denetimin gurultusu
+        # de guvenilirligini dusurur.
+        if ($candidate -is [System.Management.Automation.Language.CommandParameterAst]) { continue }
+        $key = "$($candidate.Extent.StartOffset)|$($candidate.Extent.Text)"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $unique += $candidate
+    }
+    $candidates = $unique
+
+    foreach ($candidate in $candidates) {
+        # STATIK OLARAK KARAR VERILEMEYEN SEY SESSIZ GECILMEZ.
+        #
+        # Eski kod sabit olmayan her yolu `continue` ile atliyordu, yani
+        # $p = 'C:\Windows\Temp\x'; Set-Content -LiteralPath $p ... yazimi
+        # denetimden HIC IZ BIRAKMADAN geciyordu. Olculdu: boyle bir modul
+        # sifir bulgu uretti.
+        #
+        # Cozum "hepsini ihlal say" DEGIL: aracin kendi cikti yollari da
+        # hesaplanmis degiskenlerdir (Join-Path $OutputDir ...) ve onlari
+        # kirmizi yapmak denetimi kalici kirmiziya cevirirdi - kalici
+        # kirmizi bir denetim, susturulmus denetimle aynidir. Bunun yerine
+        # mesru olanlar satirinda GEREKCESIYLE isaretlenir; isaretsiz her
+        # degisken yol DOGRULANAMAZ bulgusu uretir.
+        if ($candidate -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            if (Test-EDWriteMarked -Line $Line) { continue }
+            Add-EDViolation -File $File -Line $Line -Kind 'DOGRULANAMAZ' -Command $CommandName `
+                -Detail ("Hedef yol SABIT DEGIL ({0}); nereye yazildigi kaynaktan bilinemez. Mesruysa satirina '# ED-WRITE-OK: <gerekce>' yazin." -f $candidate.Extent.Text)
+            continue
+        }
         if ($candidate.Value -notmatch $script:AbsolutePathPattern) { continue }
         Add-EDViolation -File $File -Line $Line -Kind 'YOL' -Command $CommandName `
             -Detail ("Mutlak sabit yola yaziliyor: '{0}'. Izin gerekcesi yalnizca KENDI cikti klasorunu kapsar." -f $candidate.Value)
@@ -421,6 +479,11 @@ function Test-EDFileReadOnly {
     $leaf = Split-Path -Leaf $Path
     $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errors)
+    # Muafiyet isaretini satir bazinda arayabilmek icin kaynak satirlari
+    # tutulur. Dosya BAZINDA aramak (ED-LOCAL-OK'un yaptigi gibi) burada
+    # fazla kaba olurdu: tek bir mesru yazim, ayni dosyadaki butun
+    # yazimlari muaf kilardi.
+    $script:CurrentLines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)
 
     if ($errors.Count -gt 0) {
         Add-EDViolation -File $name -Line $errors[0].Extent.StartLineNumber -Kind 'SOZDIZIMI' `
@@ -611,6 +674,35 @@ function Test-EDFileReadOnly {
             Add-EDViolation -File $name -Line $line -Kind 'UYE' -Command $qualified `
                 -Detail 'Bu tipte varsayilan reddetmektir; yalnizca acikca okuma olan uyeler gecer.'
         }
+    }
+
+    # --- C. YONLENDIRME OPERATORLERI ---
+    #
+    # EN GENIS KACIS YOLUYDU. `$data > 'C:\Windows\Temp\x.txt'` bir KOMUT
+    # DEGILDIR: AST'de CommandAst yoktur, FileRedirectionAst vardir ve
+    # denetim bu dugum turunu HIC ziyaret etmiyordu. Olculdu: C:\Windows'a
+    # dort ayri yoldan yazan bir modul SIFIR bulguyla gecti.
+    #
+    # Yonlendirme tek basina yazmadir; hedefin ne oldugu onemli degildir,
+    # cunku salt okunur bir aracin DOSYAYA YAZMASI icin mesru bir sebep
+    # yoktur - kendi ciktisini bile Export-Csv / Out-File ile yazar ve o
+    # yollar yol kisitiyla ayrica denetlenir.
+    $redirections = @($ast.FindAll(
+        { param($node) $node -is [System.Management.Automation.Language.FileRedirectionAst] }, $true))
+
+    foreach ($redirection in $redirections) {
+        $line = $redirection.Extent.StartLineNumber
+        $text = $redirection.Extent.Text
+
+        # 2>$null / *>$null gibi SUSTURMALAR dosyaya yazmaz. $null hedefi
+        # PowerShell'de ozel bir bit kovasidir; bunu ihlal saymak denetimi
+        # yanlis alarma bogar ve susturulan bir denetim yok demektir.
+        $target = $redirection.Location
+        $targetText = $(if ($target) { [string]$target.Extent.Text } else { '' })
+        if ($targetText -match '^\$null$') { continue }
+
+        Add-EDViolation -File $name -Line $line -Kind 'YONLENDIRME' -Command $text `
+            -Detail ("Yonlendirme operatoru DOSYAYA YAZAR (hedef: {0}). Salt okunur arac dosyaya yalnizca kendi cikti yoluna, Export-Csv/Out-File ile yazar." -f $targetText)
     }
 }
 
