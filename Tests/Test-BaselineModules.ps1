@@ -46,10 +46,36 @@ $m25 = @(Get-EDModules -Id 'M25')[0]
 $m26 = @(Get-EDModules -Id 'M26')[0]
 
 function New-BaseContext {
-    param($Executor = $null, $Databases = @(), $Servers = $null)
+    # ConfigOverride: esiklerin ayarlanabilirligini kanitlayan testler kendi
+    # config'lerini verir (bkz. New-EDTestConfigFromJson). Verilmezse depodaki
+    # varsayilanlar kullanilir - "bugunku davranis" testleri bunu bekler.
+    param($Executor = $null, $Databases = @(), $Servers = $null, $ConfigOverride = $null)
     if ($null -eq $Servers) { $Servers = @((New-EDTestServer -Name 'MBX1')) }
-    return New-EDTestContext -Config $config -Executor $Executor -Servers $Servers `
+    $effectiveConfig = $(if ($null -ne $ConfigOverride) { $ConfigOverride } else { $config })
+    return New-EDTestContext -Config $effectiveConfig -Executor $Executor -Servers $Servers `
         -Databases $Databases -Sites @([pscustomobject]@{ Name = 'Site1' }) -OutputDir $script:OutputDir
+}
+
+function New-EDTestConfigFromJson {
+<#
+    Gecici bir PROJE KOKU altina gercek bir Config\<dosya> yazar ve
+    Get-EDConfig ile okur.
+
+    NEDEN DOSYA: $config.Thresholds[...] = ... demek yalnizca hashtable'i
+    degistirir; operatorun gercekte yaptigi sey ise bir JSON dosyasi yazmaktir.
+    Aradaki yol (JSONC yorum temizligi, ConvertTo-EDHashtable, Merge-EDDefaults
+    ile eksiklerin varsayilandan tamamlanmasi) ancak dosyadan gecilirse test
+    edilmis olur. JSON sayilari KULTURDEN BAGIMSIZ ayristirilir; paket tr-TR
+    altinda da kostugu icin bu iddia orada da dogrulanir.
+
+    DEPO ICINE YAZILMAZ: kok, paketin kendi gecici klasorunun altindadir.
+#>
+    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$Json)
+
+    $root = Join-Path $script:OutputDir ('cfg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path (Join-Path $root 'Config') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $root "Config\$FileName") -Value $Json -Encoding UTF8
+    return Get-EDConfig -ProjectRoot $root
 }
 
 # ===========================================================================
@@ -153,7 +179,9 @@ function New-OsContext {
         # Varsayilan pagefile SAGLIKLIDIR (3584 MB'in 1000'i = %28). Bellek
         # uyarisinin BAGLAC oldugunu gosterebilmek icin bu iki deger testten
         # verilebilir olmali.
-        $PageTotalMb = 3584, $PageUsedMb = 1000
+        $PageTotalMb = 3584, $PageUsedMb = 1000,
+        # Esik ezmesinin HUKME yansidigini gosteren testler icin.
+        $ConfigOverride = $null
     )
     $script:OsRow = [pscustomobject]@{
         TotalMemoryMb = $TotalMb; FreeMemoryMb = $FreeMb; LogicalCpus = 8
@@ -172,7 +200,7 @@ function New-OsContext {
         }
         return $out
     }
-    $context = New-BaseContext -Executor $mock
+    $context = New-BaseContext -Executor $mock -ConfigOverride $ConfigOverride
     # Perf ornegi enjekte edilir: M05 YENI bir ornekleme turu acmamali.
     $stats = New-Object ExchangeDiag.Stats
     $stats.Count = 20; $stats.P95 = $CpuP95; $stats.Mean = $CpuP95 / 3.0; $stats.Max = $CpuP95
@@ -259,6 +287,78 @@ Assert-Equal 'Pagefile satiri da N/A' 'N/A' (Get-EDTestRow $rows 'Pagefile').Sta
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 72))
 $pageRow = Get-EDTestRow $rows 'Pagefile'
 Assert-True 'Pagefile kullanim yuzdesi yazildi' ($pageRow.Values['MBX1'] -like '*%*') $pageRow.Values['MBX1']
+
+# 2d-6. BUGUNKU DAVRANIS, ESIKLER CONFIG'E TASINDIKTAN SONRA DA AYNI.
+# Esikler artik thresholds.json'dan geliyor; varsayilan degerler degismedigi
+# icin 2d / 2d-2 / 2d-3'teki hukumlerin hicbiri kaymamalidir. Varsayilanlarin
+# kendisi de sabitlenir: bir sonraki el, degeri "biraz" degistirmek isterse
+# bunu bilerek yapsin.
+Assert-Equal 'memoryFreePercent varsayilani korundu (warn)' 5 $config.Thresholds['memoryFreePercent']['warn']
+Assert-Equal 'pagefileUsedPercent varsayilani korundu (warn)' 50 $config.Thresholds['pagefileUsedPercent']['warn']
+Assert-True 'memoryFreePercent yonu DUSUK KOTU (warn > fail)' `
+    ($config.Thresholds['memoryFreePercent']['warn'] -gt $config.Thresholds['memoryFreePercent']['fail']) `
+    ("warn={0} fail={1}" -f $config.Thresholds['memoryFreePercent']['warn'], $config.Thresholds['memoryFreePercent']['fail'])
+Assert-True 'pagefileUsedPercent yonu YUKSEK KOTU (warn < fail)' `
+    ($config.Thresholds['pagefileUsedPercent']['warn'] -lt $config.Thresholds['pagefileUsedPercent']['fail']) `
+    ("warn={0} fail={1}" -f $config.Thresholds['pagefileUsedPercent']['warn'], $config.Thresholds['pagefileUsedPercent']['fail'])
+
+# 2f. ESIK CONFIG'DEN EZILDIGINDE MODULUN HUKMU DEGISIR.
+#
+# Burada olculen sey "deger okundu mu" DEGIL, "hukum degisti mi"dir. Bir
+# esigi okuyup sonra gomulu sayiyla karsilastiran bir modul de "okudu"
+# sayilirdi; operatorun umursadigi tek sey hucrenin rengidir.
+#
+# Girdi UC testte de AYNIDIR (%2 bos bellek, pagefile %84) - degisen tek sey
+# operatorun yazdigi dosyadir.
+
+# 2f-1. Esik GEVSETILIRSE bugun WARN olan olcum artik uyari degildir.
+$laxConfig = New-EDTestConfigFromJson -FileName 'thresholds.json' `
+    -Json '{ "memoryFreePercent": { "warn": 1, "fail": 0.5 } }'
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500 -PageUsedMb 3000))
+Assert-Equal 'Varsayilanla: %2 bos + %84 pagefile -> WARN' 'WARN' (Get-EDTestRow $rows 'Bellek').Status
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500 -PageUsedMb 3000 -ConfigOverride $laxConfig))
+Assert-Equal 'Esik %1e cekilince AYNI olcum -> OK' 'OK' (Get-EDTestRow $rows 'Bellek').Status
+Assert-Equal 'Yazilmayan esikler varsayilandan tamamlandi' 70 $laxConfig.Thresholds['cpuPercent']['warn']
+
+# 2f-2. Esik SIKILASTIRILIRSA bugun OK olan olcum uyariya doner.
+# %25 bos bellek + %27.9 pagefile: varsayilanla iki kosul da saglanmaz.
+$strictConfig = New-EDTestConfigFromJson -FileName 'thresholds.json' `
+    -Json '{ "memoryFreePercent": { "warn": 30, "fail": 5 }, "pagefileUsedPercent": { "warn": 20, "fail": 95 } }'
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 6000))
+Assert-Equal 'Varsayilanla: %25 bos + %28 pagefile -> OK' 'OK' (Get-EDTestRow $rows 'Bellek').Status
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 6000 -ConfigOverride $strictConfig))
+Assert-Equal 'Esikler sikilasinca AYNI olcum -> WARN' 'WARN' (Get-EDTestRow $rows 'Bellek').Status
+
+# 2f-3. ESIK AYARLANABILIR OLDU DIYE BAGLAC BOZULMADI: tek bacak yetmez.
+# Yalnizca pagefile esigi indirilir; bos bellek varsayilan esigin (%5) uzerinde
+# kalir. Baglac korunuyorsa hukum yine OK'tir - aksi halde ESE onbellegini
+# "bellek yetmiyor" diye okuyan eski yanlis alarm geri gelirdi.
+$pageOnlyConfig = New-EDTestConfigFromJson -FileName 'thresholds.json' `
+    -Json '{ "pagefileUsedPercent": { "warn": 20, "fail": 95 } }'
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 6000 -ConfigOverride $pageOnlyConfig))
+Assert-Equal 'Tek bacak (pagefile) tek basina uyari uretmez' 'OK' (Get-EDTestRow $rows 'Bellek').Status
+
+# 2f-4. ZAYIF HALKA: bacaklardan biri yalnizca WARN seviyesindeyse satir FAIL
+# OLMAZ. "VE" ile baglanmis bir iddia, bacaklarindan daha guclu olamaz.
+# %0.4 bos bellek (fail bacagi) + %84 pagefile (warn bacagi).
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 100 -PageUsedMb 3000))
+Assert-Equal 'Bir bacak FAIL, digeri WARN -> WARN' 'WARN' (Get-EDTestRow $rows 'Bellek').Status
+
+# 2f-5. Iki bacak da fail seviyesindeyse FAIL. Bu, esikler config'e tasinirken
+# semanin (warn + fail) eksiksiz doldurulmasinin SONUCUDUR: kullanilmayan bir
+# 'fail' anahtari, operatore yalan soyleyen bir ayar olurdu. Pratikte bu durum
+# sunucunun bellegi tukenmis demektir (%0.4 bos RAM + %97 pagefile).
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 100 -PageUsedMb 3500))
+Assert-Equal 'Iki bacak da fail seviyesinde -> FAIL' 'FAIL' (Get-EDTestRow $rows 'Bellek').Status
+
+# 2f-6. Rapor, hukmu kuran esigin ADINI ve DEGERINI gosterir; operator
+# "neye gore" sorusunu config'e bakarak cevaplayabilmeli.
+$memoryRow = Get-EDTestRow $rows 'Bellek'
+Assert-True 'Notta esik adlari yaziyor' `
+    ($memoryRow.Note -like '*memoryFreePercent*' -and $memoryRow.Note -like '*pagefileUsedPercent*') $memoryRow.Note
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500 -PageUsedMb 3000 -ConfigOverride $laxConfig))
+Assert-True 'Notta yazan sinir CONFIG''den geliyor (gomulu %5 degil)' `
+    ((Get-EDTestRow $rows 'Bellek').Note -like '*%1''in altinda*') (Get-EDTestRow $rows 'Bellek').Note
 
 # 2e. .NET raporlanir ama hukum verilmez
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 72))

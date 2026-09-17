@@ -19,6 +19,13 @@
     baglagin ikinci kosulu bilinmiyor demektir ve hukum VERILMEZ (N/A) -
     okunamayan veriye saglikli varsayilan verilmez.
 
+    Baglagin iki bacagi da thresholds.json'dadir: memoryFreePercent (dusuk
+    kotu) ve pagefileUsedPercent (yuksek kotu). 8 GB'lik bir lab ile 256 GB'lik
+    bir uretim sunucusunun ayni yuzdeyle olculmesi zorunlu degildir; operator
+    hukmun nereden geldigini config'e bakarak gorebilmelidir. Satirin hukmu
+    iki bacagin ZAYIF HALKASIDIR - "VE" ile baglanmis bir iddia, bacaklarindan
+    daha guclu olamaz.
+
     DIKKAT - CPU tek basina suclu degildir. Yuksek CPU bir SONUCTUR; sebebi
     M23 (agir kullanici), M24 (buyuk klasor) veya M26 (indeksleme) olabilir.
     Bu modul CPU'yu olcer, sebebini iddia ETMEZ.
@@ -46,6 +53,49 @@ Register-EDModule @{
         $servers = @($Context.Topology.Servers)
         if ($servers.Count -eq 0) {
             return @(New-EDRow -Module 'M05' -Check 'OS / kaynak' -Status 'N/A' -Note 'Sunucu yok.')
+        }
+
+        function Get-EDWeakestLinkStatus {
+            <#
+                Bir BAGLACIN (VE) hukmunu dondurur: en ZAYIF bacak kazanir.
+                Cerceve yalnizca Get-EDWorstStatus'u (en kotu kazanir) sunar
+                ve o "veya" icindir - sunuculardan biri kotuyse satir kotudur.
+                Burada mantik terstir: iki kosul BIRLIKTE saglandiginda hukum
+                kurulur, dolayisiyla iddianin gucu zayif bacaktan buyuk olamaz.
+                Taninmayan bir deger (orn. 'N/A') hukum degildir; o durumda
+                hukum verilmez.
+            #>
+            param([string[]]$Statuses)
+
+            $rank = @{ 'OK' = 0; 'WARN' = 1; 'FAIL' = 2 }
+            $mildest = $null
+            foreach ($status in @($Statuses)) {
+                if (-not $rank.ContainsKey($status)) { return 'N/A' }
+                if ($null -eq $mildest -or $rank[$status] -lt $rank[$mildest]) { $mildest = $status }
+            }
+            if ($null -eq $mildest) { return 'N/A' }
+            return $mildest
+        }
+
+        function Get-EDThresholdWarnText {
+            <#
+                Bir esigin 'warn' bacagini NOTTA GOSTERMEK icin okur.
+
+                Bozuk bir esikte hukmu Get-EDStatus zaten gurultuyle reddeder
+                (acik hata) - ama o yol yalnizca olculebilmis bir sunucu varken
+                isler. Hicbir sunucudan bellek okunamadigi durumda not yine
+                yazilir; orada bozuk bir esik yuzunden modulun cokmesi, hicbir
+                sey olcemedigi icin zaten bos olan bir satiri ERROR'a cevirirdi.
+                Bu yuzden gosterim tarafi sessizce 'N/A' der, hukum tarafi degil.
+            #>
+            param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Name)
+
+            if (-not $Config.Thresholds.Contains($Name)) { return 'N/A' }
+            $threshold = $Config.Thresholds[$Name]
+            if ($threshold -isnot [System.Collections.IDictionary] -or -not $threshold.Contains('warn')) { return 'N/A' }
+            $numeric = ConvertTo-EDNumber $threshold['warn']
+            if ($null -eq $numeric) { return 'N/A' }
+            return $numeric
         }
 
         $scriptBlock = {
@@ -203,13 +253,19 @@ Register-EDModule @{
                 # zorlaniyor. Pagefile baskisi, ESE onbelleginden farkli
                 # olarak, gercekten yetmeyen bellegin izidir.
                 #
-                # Esikler thresholds.json'a EKLENMEDI: orada tanimsiz bir
-                # anahtar Get-EDStatus'u throw ettirir ve mevcut kurulumlarin
-                # Config\thresholds.json dosyasinda bu anahtarlar yoktur.
-                $freeMemoryFloorPercent = 5.0    # altinda "cok dusuk" sayilir
-                $pageFilePressurePercent = 50.0  # ustunde pagefile "zorlaniyor"
+                # Baglagin iki bacagi da CONFIG'DEN gelir (thresholds.json ->
+                # memoryFreePercent / pagefileUsedPercent). Eskiden ikisi de
+                # burada gomuluydu ve gerekce olarak "tanimsiz bir anahtar
+                # Get-EDStatus'u throw ettirir" yaziliydi; bu gerekce yanlisti:
+                # anahtar Get-EDDefaultThresholds'ta tanimli oldugu surece
+                # Merge-EDDefaults onu kullanicinin dosyasi eksik olsa da
+                # tamamlar. Gomulu kaldiklari surece 8 GB'lik bir lab ile
+                # 256 GB'lik bir uretim sunucusu ayni sinirla olculuyordu ve
+                # operator hukmun nereden geldigini config'e bakarak
+                # goremiyordu.
+                $freeStatus = Get-EDStatus -Value $freePercent -ThresholdName 'memoryFreePercent' -Config $Context.Config
 
-                if ($freePercent -ge $freeMemoryFloorPercent) {
+                if ($freeStatus -eq 'OK') {
                     $memoryCellStatus[$server] = 'OK'
                 }
                 elseif ($null -eq $pageTotal -or [double]$pageTotal -le 0 -or $null -eq $pageUsed) {
@@ -221,15 +277,21 @@ Register-EDModule @{
                 }
                 else {
                     $pageUsedPercent = [math]::Round(100.0 * [double]$pageUsed / [double]$pageTotal, 1)
-                    if ($pageUsedPercent -ge $pageFilePressurePercent) {
-                        $memoryCellStatus[$server] = 'WARN'
-                        $memoryProblems += ("{0}: bos bellek %{1} VE pagefile kullanimi %{2} ({3:N0}/{4:N0} MB) - iki kosul birlikte saglandi, bellek baskisi gercek olabilir" -f `
-                            $server, $freePercent, $pageUsedPercent, $pageUsed, $pageTotal)
-                    }
-                    else {
+                    $pageStatus = Get-EDStatus -Value $pageUsedPercent -ThresholdName 'pagefileUsedPercent' -Config $Context.Config
+
+                    if ($pageStatus -eq 'OK') {
                         $memoryCellStatus[$server] = 'OK'
                         $memoryProblems += ("{0}: bos bellek %{1} ama pagefile kullanimi yalnizca %{2} - bu ESE onbelleginin BEKLENEN davranisidir, hata degildir" -f `
                             $server, $freePercent, $pageUsedPercent)
+                    }
+                    else {
+                        # BAGLACIN HUKMU ZAYIF HALKADIR. "VE" ile baglanmis iki
+                        # kosulun ortak gucu, zayif olanindan buyuk olamaz:
+                        # bacaklardan biri yalnizca WARN seviyesindeyken satiri
+                        # FAIL yapmak, olculenden fazlasini iddia etmek olurdu.
+                        $memoryCellStatus[$server] = Get-EDWeakestLinkStatus @($freeStatus, $pageStatus)
+                        $memoryProblems += ("{0}: bos bellek %{1} VE pagefile kullanimi %{2} ({3:N0}/{4:N0} MB) - iki kosul birlikte saglandi, bellek baskisi gercek olabilir" -f `
+                            $server, $freePercent, $pageUsedPercent, $pageUsed, $pageTotal)
                     }
                 }
             }
@@ -322,7 +384,13 @@ Register-EDModule @{
             $log.Info("M05: son 24 saatte yeniden baslatilmis - $($recentlyRebooted -join ', ')")
         }
 
-        $memoryNote = 'Exchange RAM''i ESE onbellegi icin KASITLI doldurur; dusuk bos bellek TEK BASINA hata degildir. Bu yuzden uyari ancak IKI kosul birlikte saglandiginda verilir: bos bellek %5''in altinda VE pagefile kullanimi %50''nin uzerinde. Pagefile okunamazsa hukum verilmez (N/A) - okunmamis veriden "saglikli" sonucu cikarilmaz.'
+        # Notta yazan sinirlar KODA GOMULU DEGIL, hukmu gercekten kuran
+        # esiklerdir: operator raporda gordugu sayiyi thresholds.json'da
+        # bulabilmeli. Gomulu bir metin, esik degistiginde sessizce yalan
+        # soylemeye baslardi.
+        $memoryFreeWarn = Get-EDThresholdWarnText -Config $Context.Config -Name 'memoryFreePercent'
+        $pagefileUsedWarn = Get-EDThresholdWarnText -Config $Context.Config -Name 'pagefileUsedPercent'
+        $memoryNote = ('Exchange RAM''i ESE onbellegi icin KASITLI doldurur; dusuk bos bellek TEK BASINA hata degildir. Bu yuzden uyari ancak IKI kosul birlikte saglandiginda verilir: bos bellek %{0}''in altinda VE pagefile kullanimi %{1}''nin uzerinde (thresholds.json -> memoryFreePercent / pagefileUsedPercent). Satirin hukmu iki kosulun ZAYIF HALKASIDIR. Pagefile okunamazsa hukum verilmez (N/A) - okunmamis veriden "saglikli" sonucu cikarilmaz.' -f $memoryFreeWarn, $pagefileUsedWarn)
         if ($memoryProblems.Count -gt 0) { $memoryNote = ($memoryProblems -join ' | ') + '. ' + $memoryNote }
 
         return @(

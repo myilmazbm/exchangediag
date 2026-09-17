@@ -29,6 +29,19 @@
 
   // --- Faz A/E: ortam ---
   "cpuPercent":              { "warn": 70,    "fail": 90 },
+
+  // M05 bellek satiri bir BAGLACTIR ve bu iki esik onun iki bacagidir.
+  // Exchange RAM'i ESE onbellegi icin KASITLI doldurur: dusuk bos bellek
+  // TEK BASINA hata degildir. Uyari ancak bos bellek memoryFreePercent'in
+  // altinda VE pagefile kullanimi pagefileUsedPercent'in ustundeyken verilir;
+  // satirin hukmu iki bacagin ZAYIF HALKASIDIR (ikisi de fail seviyesindeyse
+  // FAIL). Pagefile okunamazsa baglagin ikinci kosulu bilinmiyordur ve hukum
+  // VERILMEZ (N/A) - okunmamis veriden "saglikli" sonucu cikarilmaz.
+  // Varsayilanlar 24-128 GB RAM'li Exchange sunuculari icindir; cok buyuk
+  // RAM'de %5 mutlak olarak cok yer demektir, dusurmeyi dusunun.
+  "memoryFreePercent":       { "warn": 5,     "fail": 1 },
+  "pagefileUsedPercent":     { "warn": 50,    "fail": 95 },
+
   "certExpiryDays":          { "warn": 30,    "fail": 7 },
   "backupAgeDays":           { "warn": 3,     "fail": 7 },
 

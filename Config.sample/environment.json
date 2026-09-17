@@ -54,6 +54,16 @@
   // en cok gecikme yasayandan baslar ve kapsam orani rapora yazilir.
   "maxRecipientLookups": 300,
 
+  // M23: teshis KAPISI, esik DEGIL (bu yuzden thresholds.json'da degil).
+  // Bir posta kutusu icin "BEKLIYOR" / "CPU YAKIYOR" demeden once olcum
+  // penceresinde en az bu kadar milisaniye sunucu zamani harcamis olmasi
+  // aranir. 3 ms sunucu zamaninin 0 ms CPU'ya orani da sonsuzdur ama kimse
+  // beklemiyordur; bu kapi olmadan bos bir sistemde kanit dosyasinin cogu
+  // satiri "bulgu" gibi okunuyordu. Satirin OK/WARN/FAIL hukmu buradan
+  // DEGIL, thresholds.json -> storeTimeInServerMs'ten gelir.
+  // Yukseltmek gercek bulgulari da susturabilir - taban olarak dusunun.
+  "storeDiagnosisFloorMs": 1000,
+
   // Yanit vermeyen sunucu araci kilitlemez; hucre TIMEOUT yazar.
   "moduleTimeoutSeconds": 120
 }

@@ -380,6 +380,98 @@ Assert-True 'Sinir ve kapsam orani raporlandi' `
     ($cappedFolderRow.Note -like '*maxFolderScans=1*' -and $cappedFolderRow.Note -like '*%50*') $cappedFolderRow.Note
 
 # ---------------------------------------------------------------------------
+Write-Host "`n=== 10. Teshis kapisi (storeDiagnosisFloorMs) config'den gelir ===" -ForegroundColor Cyan
+
+<#
+    Kapi eskiden modulun icine gomuluydu. Olculen sey burada "deger okundu mu"
+    DEGIL, "TESHIS DEGISTI mi"dir: esigi okuyup sonra gomulu sayiyla kiyaslayan
+    bir modul de "okumus" sayilirdi, oysa operatorun gordugu tek sey teshis
+    cumlesidir.
+
+    Girdi UC kosumda da AYNIDIR; degisen tek sey operatorun yazdigi dosyadir.
+#>
+
+function New-EDTestConfigFromJson {
+    <#
+        Gecici bir PROJE KOKU altina gercek bir Config\<dosya> yazar ve
+        Get-EDConfig ile okur: JSONC temizligi, ConvertTo-EDHashtable ve
+        Merge-EDDefaults yolunun tamami test edilmis olur. JSON sayilari
+        kulturden bagimsiz ayristirilir; paket tr-TR altinda da kosar.
+        Depo icine YAZILMAZ - kok paketin kendi gecici klasorunun altindadir.
+    #>
+    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$Json)
+
+    $root = Join-Path $FixtureDir ('cfg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path (Join-Path $root 'Config') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $root "Config\$FileName") -Value $Json -Encoding UTF8
+    return Get-EDConfig -ProjectRoot $root
+}
+
+function Get-EDFloorTestDiagnosis {
+    param($Config)
+    # 2 sn sunucu zamani, 50 ms CPU: oran 40x. Ortanca kurmak icin birkac
+    # siradan kayit da verilir (goreli kiyas bu testin konusu degil).
+    $rows = @()
+    foreach ($i in 1..4) {
+        $rows += New-EDUsageRow -Display "Sakin$i" -Guid "guid-s$i" -Database 'DB01' -Server 'SRV1' `
+            -TimeInServer 100 -TimeInCPU 50 -ROPCount 100 -PageRead 50 -LogRecordCount 20
+    }
+    $rows += New-EDUsageRow -Display 'KucukBekleyen' -Guid 'guid-kb' -Database 'DB01' -Server 'SRV1' `
+        -TimeInServer 2000 -TimeInCPU 50 -ROPCount 110 -PageRead 55 -LogRecordCount 22
+
+    $executor = New-EDMockExecutor -ResponsesByCommand @{ 'Get-StoreUsageStatistics' = { param($Key, $Identity) $rows } }
+    $result = @(& $m23.Run (New-EDTestContext -Config $Config -Executor $executor))
+    $evidenceRows = @(Import-Csv (Join-Path $script:OutputDir 'M23-store-usage.csv'))
+    return [pscustomobject]@{
+        Teshis = @($evidenceRows | Where-Object { $_.Mailbox -eq 'KucukBekleyen' })[0].Teshis
+        Not    = (Get-EDTestRow $result 'En agir mailbox (TimeInServer)').Note
+    }
+}
+
+# 10a. VARSAYILAN DAVRANIS KORUNDU: taban 1000 ms, 2000 ms'lik bekleme teshis alir.
+Assert-Equal 'storeDiagnosisFloorMs varsayilani korundu' 1000 $config.Environment['storeDiagnosisFloorMs']
+$defaultFloor = Get-EDFloorTestDiagnosis -Config $config
+Assert-True 'Varsayilan tabanda 2000 ms BEKLIYOR teshisi aliyor' ($defaultFloor.Teshis -like '*BEKLIYOR*') $defaultFloor.Teshis
+
+# 10b. TABAN YUKSELTILIRSE ayni olcum icin oruntu IDDIA EDILMEZ.
+$highFloorConfig = New-EDTestConfigFromJson -FileName 'environment.json' -Json '{ "storeDiagnosisFloorMs": 5000 }'
+$highFloor = Get-EDFloorTestDiagnosis -Config $highFloorConfig
+Assert-True 'Taban 5000 ms iken AYNI olcum icin teshis yok' `
+    ($highFloor.Teshis -like '*Belirgin bir oruntu yok*') $highFloor.Teshis
+Assert-Equal 'Yazilmayan ayarlar varsayilandan tamamlandi' 300 $highFloorConfig.Environment['maxRecipientLookups']
+
+# 10c. TABAN INDIRILIRSE bugun susan olcumler konusur: 100 ms'lik sakin
+# kayitlar (oran 2x) artik "CPU YAKIYOR" teshisi alir. Kapinin gercekten
+# sustugu, indirildiginde ortaya cikar.
+$lowFloorConfig = New-EDTestConfigFromJson -FileName 'environment.json' -Json '{ "storeDiagnosisFloorMs": 50 }'
+$rows = @()
+foreach ($i in 1..4) {
+    $rows += New-EDUsageRow -Display "Sakin$i" -Guid "guid-s$i" -Database 'DB01' -Server 'SRV1' `
+        -TimeInServer 100 -TimeInCPU 50 -ROPCount 100 -PageRead 50 -LogRecordCount 20
+}
+$executor = New-EDMockExecutor -ResponsesByCommand @{ 'Get-StoreUsageStatistics' = { param($Key, $Identity) $rows } }
+& $m23.Run (New-EDTestContext -Config $config -Executor $executor) | Out-Null
+$quietDefault = @(Import-Csv (Join-Path $script:OutputDir 'M23-store-usage.csv') | Where-Object { $_.Mailbox -eq 'Sakin1' })[0].Teshis
+Assert-True 'Varsayilan tabanda 100 ms''lik kayit icin oruntu iddia edilmiyor' `
+    ($quietDefault -like '*Belirgin bir oruntu yok*') $quietDefault
+
+$executor = New-EDMockExecutor -ResponsesByCommand @{ 'Get-StoreUsageStatistics' = { param($Key, $Identity) $rows } }
+& $m23.Run (New-EDTestContext -Config $lowFloorConfig -Executor $executor) | Out-Null
+$quietLow = @(Import-Csv (Join-Path $script:OutputDir 'M23-store-usage.csv') | Where-Object { $_.Mailbox -eq 'Sakin1' })[0].Teshis
+Assert-True 'Taban 50 ms''ye inince AYNI kayit CPU YAKIYOR teshisi aliyor' `
+    ($quietLow -like '*CPU YAKIYOR*') $quietLow
+
+# 10d. Bozuk/negatif deger SESSIZCE kabul edilmez; varsayilan taban korunur.
+# Aksi halde "-1" yazan bir config tum gurultuyu geri getirirdi.
+$badFloorConfig = New-EDTestConfigFromJson -FileName 'environment.json' -Json '{ "storeDiagnosisFloorMs": "abc" }'
+$badFloor = Get-EDFloorTestDiagnosis -Config $badFloorConfig
+Assert-True 'Sayi olmayan taban varsayilana duser (teshis uretilir)' ($badFloor.Teshis -like '*BEKLIYOR*') $badFloor.Teshis
+
+# 10e. Operator hukmun nereden geldigini raporda gorebilmeli.
+Assert-True 'Not, kapinin config anahtarini adiyla soyluyor' `
+    ($defaultFloor.Not -like '*storeDiagnosisFloorMs*') $defaultFloor.Not
+
+# ---------------------------------------------------------------------------
 # Yalnizca KENDI klasorunu siler.
 Remove-Item -LiteralPath $FixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 
