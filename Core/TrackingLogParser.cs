@@ -14,6 +14,10 @@
 //    sonucu verir.
 //  - #Fields: satiri HER DOSYADA okunup kolon indeksleri dinamik haritalanir;
 //    surumler arasi sema kaymasi hata degil, eksik kolon icin N/A uretir.
+//    Ama bir SATIRIN alan sayisi basliktaki kolon sayisiyla uyusmuyorsa o
+//    satirdaki hicbir kolon guvenilir degildir: satir atilir ve MalformedLines
+//    sayacina yazilir. Sessiz kayip yok - kismen bozuk bir log ile temiz bir
+//    log operatore ayni gorunmemeli.
 //  - date-time UTC'dir. Saat bazli dagilim yerel saate cevrilmeden uretilirse
 //    yogun saat korelasyonu kayar.
 //  - MessageLatency log'da BIR KOLON DEGILDIR; cmdlet onu hesaplar. Burada
@@ -41,8 +45,32 @@ namespace ExchangeDiag
         private int[] _length = new int[64];
         private int _count;
         private string _line;
+        private bool _unterminatedQuote;
+        private bool _quoteResidue;
 
         public int Count { get { return _count; } }
+
+        /// <summary>
+        /// Tirnak acildi ama satir icinde KAPANMADI. Pratikteki sebebi
+        /// genellikle masum: Exchange dosyaya o anda yaziyor ve okuyucu
+        /// (FileShare.ReadWrite ile acildigi icin) son satiri yarim yakaladi.
+        /// Sonucu masum degildir: virgul alan ayiraci olmaktan cikar ve
+        /// satirin geri kalani TEK alana yutulur.
+        /// </summary>
+        public bool HasUnterminatedQuote { get { return _unterminatedQuote; } }
+
+        /// <summary>
+        /// Kapanis tirnagindan sonra ayirac yerine metin geldi (orn. a,"b"x,c).
+        /// Artik metin KENDI alanini acar ve sagindaki her kolon bir saga kayar.
+        /// </summary>
+        public bool HasQuoteResidue { get { return _quoteResidue; } }
+
+        /// <summary>
+        /// Satir kendi icinde tutarsiz. Alanlar yine de uretilir - hangi
+        /// kolonun kaydigi burada bilinemez, karari cagiran taraf verir -
+        /// ama satirin GUVENILMEZ oldugu artik soylenebilir.
+        /// </summary>
+        public bool IsMalformed { get { return _unterminatedQuote || _quoteResidue; } }
 
         /// <summary>
         /// Satiri alanlara boler. Alan METINLERI kopyalanmaz; yalnizca konum ve
@@ -56,6 +84,11 @@ namespace ExchangeDiag
             // Literal tablosu da sifirlanmali: kacisli tirnak iceren her satir
             // buraya bir string ekler ve temizlenmezse dosya boyunca birikir.
             if (_literals != null) _literals.Clear();
+            // Bozukluk bayraklari da SATIR BASINA sifirlanir; aksi halde bir
+            // dosyadaki tek bozuk satir, ayni ayirici nesnesi yeniden
+            // kullanildigi icin kalan tum satirlari bozuk gosterirdi.
+            _unterminatedQuote = false;
+            _quoteResidue = false;
 
             int i = 0;
             int n = line.Length;
@@ -105,9 +138,14 @@ namespace ExchangeDiag
                     }
 
                     // Kapanis tirnagini ve ayiraci atla.
+                    // Buradaki iki "else" dali eskiden yoktu: ayirici satirin
+                    // bozuk oldugunu GORUYOR ama kimseye soylemiyordu.
                     if (i < n && line[i] == '"') i++;
+                    else _unterminatedQuote = true;   // i >= n: tirnak hic kapanmadi
+
                     if (i < n && line[i] == ',') i++;
                     else if (i >= n) break;
+                    else _quoteResidue = true;        // tirnaktan sonra ayirac degil metin var
                 }
                 else
                 {
@@ -156,9 +194,31 @@ namespace ExchangeDiag
             return _line.Substring(start, _length[index]);
         }
 
+        /// <summary>
+        /// Bu satirda boyle bir kolon VAR MI? "Kolon yok" ile "kolon bos"
+        /// AYRI iddialardir ve ayri sorulmalidir.
+        /// </summary>
+        public bool HasField(int index)
+        {
+            return index >= 0 && index < _count;
+        }
+
+        /// <summary>
+        /// Kolon var ve BOS mu?
+        ///
+        /// Eskiden kapsam disi indekste de true donuyordu. O davranis, sema
+        /// kaymis bir dosyada HIC OLMAYAN bir kolonu, var olup bos birakilmis
+        /// bir kolondan ayirt edilemez kiliyordu: cagiran taraf "bu alan bos"
+        /// diye dogru bir cevap aldigini saniyordu, oysa aldigi cevap
+        /// "boyle bir alan yok" idi.
+        ///
+        /// Uc durum (yok / bos / dolu) icin yeni bir enum eklemek yerine iki
+        /// yuklem tutuldu: HasField(i) ve IsFieldEmpty(i). Birlikte okununca
+        /// ucunu de verirler ve hicbir cagriyi imza degisikligine zorlamazlar.
+        /// </summary>
         public bool IsFieldEmpty(int index)
         {
-            if (index < 0 || index >= _count) return true;
+            if (index < 0 || index >= _count) return false;
             if (_start[index] < 0) return _literals[-_start[index] - 1].Length == 0;
             return _length[index] == 0;
         }
@@ -224,10 +284,21 @@ namespace ExchangeDiag
         public bool Truncated;             // zaman siniri kesti: SONUC KISMI
         public bool ReadFailed;            // okuma basarisiz: "veri yok" ile ayni sey DEGIL
         public long LinesScanned;
+        public long MalformedLines;         // semaya uymayan satirlar: ATILDI ama SAYILDI
         public long DeliverEvents;
         public long LatencyComputed;
         public long LatencyMissing;         // message-info'dan gonderim zamani cikarilamayan kayitlar
         public long NegativeLatency;        // saat kaymasi kaynakli; kirpilmaz, atilir
+
+        /// <summary>
+        /// Bozuk satirlarin taranan satirlara orani. Ham sayi tek basina
+        /// yetmez ("4 satir" 11 satirda mi 1.2 milyonda mi?), oran da tek
+        /// basina yetmez (bkz. TrackingLogParser.ShouldWarnMalformed).
+        /// </summary>
+        public double MalformedLineRatio
+        {
+            get { return LinesScanned > 0 ? (double)MalformedLines / LinesScanned : 0d; }
+        }
         public double SlowThresholdSeconds;
         public long SlowDeliveryCount;
         public Stats Overall;
@@ -279,21 +350,46 @@ namespace ExchangeDiag
         public string Server;
         public long FilesScanned;
         public long LinesScanned;
+        public long MalformedLines;         // semaya uymayan satirlar: ATILDI ama SAYILDI
         public long MessagesSeen;
-        public long MessagesComplete;       // ucu de olcuulebilen mesajlar
+        public long MessagesComplete;       // faz zinciri TAM olan mesajlar = PhaseSamples
         public long SkewedSamples;          // sunucular arasi saat kaymasi -> negatif faz
         public bool TruncatedByLimit;      // maxMessages siniri
         public bool Truncated;             // zaman siniri kesti: KIRILIM KISMI
         public long FilesProcessed;
 
-        public Stats Total;                 // DELIVER - gonderim (uctan uca)
+        public Stats Total;                 // DELIVER - gonderim (uctan uca), GENIS nufus
         public Stats Ingress;               // Transport RECEIVE - gonderim
         public Stats Transport;             // Mailbox RECEIVE - Transport RECEIVE
         public Stats Store;                 // DELIVER - Mailbox RECEIVE  (DeliveryToMailbox)
 
+        // --- Nufus muhasebesi -------------------------------------------
+        // Uc faz ayni mesaj kumesinden hesaplanir (bkz. AnalyzePhaseBreakdown).
+        // Uctan uca (Total) ise BILEREK daha genis tutulur: ara olaylari
+        // pencere disinda kalmis yavas mesajlari raporun disina atmak,
+        // "her sey yolunda" diyen daha beter bir yalan olurdu. Bu yuzden iki
+        // nufusun da sayisi ACIKCA tasinir.
+        public long PhaseSamples;           // uc fazin da dayandigi mesaj sayisi
+        public long MessagesWithTotal;      // uctan uca olculebilen mesaj sayisi (= Total.Count)
+        public long UnreconciledSamples;    // uctan uca var ama faz zinciri eksik
+        public Stats TotalReconciled;       // faz karsilastirmasinin uctan uca karsiligi
+        public Stats UnreconciledTotal;     // zinciri eksik mesajlarin uctan uca dagilimi
+
+        /// <summary>
+        /// Zinciri eksik kalan mesajlar, zinciri tam olanlardan BELIRGIN
+        /// SEKILDE yavas. Yani baskin faz hukmu, tam da aciklanmasi gereken
+        /// mesajlari disarida birakarak verildi.
+        /// </summary>
+        public bool PhaseVerdictIncomplete;
+
         public string DominantPhase;        // p95'i en buyuk olan faz
         public List<string> Warnings;
         public double ElapsedMs;
+
+        public double MalformedLineRatio
+        {
+            get { return LinesScanned > 0 ? (double)MalformedLines / LinesScanned : 0d; }
+        }
 
         public PhaseBreakdown()
         {
@@ -301,6 +397,8 @@ namespace ExchangeDiag
             Ingress = new Stats();
             Transport = new Stats();
             Store = new Stats();
+            TotalReconciled = new Stats();
+            UnreconciledTotal = new Stats();
             Warnings = new List<string>();
             DominantPhase = "N/A";
         }
@@ -317,6 +415,58 @@ namespace ExchangeDiag
             string[] keys = new string[24];
             for (int h = 0; h < 24; h++) keys[h] = h.ToString(CultureInfo.InvariantCulture);
             return keys;
+        }
+
+        // ---------------------------------------------------------------
+        // Bozuk satir politikasi
+        //
+        // NEDEN HEM SAYI HEM ORAN
+        // Ham sayi tek basina okunamaz: "4 bozuk satir" 11 satirlik bir
+        // dosyada felaket, 1.2 milyon satirlik bir dosyada ise yazilmakta
+        // olan son satirdir. Oran tek basina da yetmez: cok buyuk bir
+        // dosyada sistematik bir bozulma (orn. tirnaklanmamis bir kolon
+        // uretiliyor) binlerce satiri yutsa bile oran esigin altinda kalir.
+        // Bu yuzden SAYAC her zaman analiz nesnesine ulasir (sessiz kayip
+        // olmaz), UYARI ise iki esikten biri asilinca uretilir (gurultu
+        // olmaz - her calistirmada uyari veren bir arac okunmaz hale gelir).
+        private const double MalformedRatioWarn = 0.001;    // binde 1
+        private const long MalformedAbsoluteWarn = 1000;    // oran kucuk olsa da sistematik
+
+        private static bool ShouldWarnMalformed(long malformed, long scanned)
+        {
+            if (malformed <= 0) return false;
+            if (malformed >= MalformedAbsoluteWarn) return true;
+            if (scanned <= 0) return true;
+            return ((double)malformed / scanned) >= MalformedRatioWarn;
+        }
+
+        private static string MalformedWarning(long malformed, long scanned)
+        {
+            double ratio = scanned > 0 ? (double)malformed / scanned : 1d;
+            return malformed.ToString(CultureInfo.InvariantCulture) + " satir (%" +
+                   (ratio * 100d).ToString("F2", CultureInfo.InvariantCulture) +
+                   ") semaya uymadi (alan sayisi #Fields kolon sayisiyla ayni degil ya da tirnak " +
+                   "kapanmamis); bu satirlar ATILDI. Sonuc log'un TAMAMINI temsil etmiyor.";
+        }
+
+        /// <summary>
+        /// Satir semaya uyuyor mu?
+        ///
+        /// Alan sayisi basliktaki kolon sayisindan farkliysa o satirdaki
+        /// HICBIR kolona guvenilemez: kaymanin nerede basladigi bilinemez.
+        /// "date-time ve event-id yerinde duruyor gibi" gorunmesi yanilticidir -
+        /// a,"b"x,c orneginde suclu alanin SAGINDAKI her kolon bir saga kayar,
+        /// yani satir dogru event-id ile yanlis message-info tasiyabilir.
+        /// Bu yuzden satir kismen kurtarilmaya calisilmaz, atilir ve sayilir.
+        ///
+        /// expectedFields &lt;= 1 ise karsilastirma yapilmaz: tek kolonluk bir
+        /// #Fields satiri semanin kendisi supheli demektir ve o durumda
+        /// virgul iceren HER satiri bozuk saymak butun dosyayi yok ederdi.
+        /// </summary>
+        private static bool IsRowMalformed(CsvLineSplitter splitter, int expectedFields)
+        {
+            if (splitter.IsMalformed) return true;
+            return expectedFields > 1 && splitter.Count != expectedFields;
         }
 
         // Tracking log kolon adlari. #Fields: satirindan dinamik haritalanir.
@@ -604,6 +754,7 @@ namespace ExchangeDiag
                     // kismi sonuctur ve o durumda sayilar esitlenir.
                     if (partial.DeadlineHit) deadlineHit = true;
                     analysis.LinesScanned += partial.LinesScanned;
+                    analysis.MalformedLines += partial.MalformedLines;
                     analysis.DeliverEvents += partial.DeliverEvents;
                     analysis.LatencyComputed += partial.Latencies.Count;
                     analysis.LatencyMissing += partial.LatencyMissing;
@@ -641,6 +792,9 @@ namespace ExchangeDiag
                     filesProcessed + " tanesi islendi. SONUC KISMI - persentiller tam pencereyi temsil etmez.");
             }
 
+            if (ShouldWarnMalformed(analysis.MalformedLines, analysis.LinesScanned))
+                analysis.Warnings.Add(MalformedWarning(analysis.MalformedLines, analysis.LinesScanned));
+
             analysis.Overall = PercentileEngine.Compute(allLatencies);
 
             List<RecipientLatency> recipientList = new List<RecipientLatency>(slowRecipients.Values);
@@ -671,6 +825,7 @@ namespace ExchangeDiag
         private class FileAnalysis
         {
             public long LinesScanned;
+            public long MalformedLines;
             public long DeliverEvents;
             public long LatencyMissing;
             public long NegativeLatency;
@@ -704,6 +859,7 @@ namespace ExchangeDiag
                     int idxDateTime = -1, idxEvent = -1, idxInfo = -1, idxRecipient = -1;
                     int idxSender = -1, idxSubject = -1, idxNetworkId = -1, idxSource = -1, idxServer = -1;
                     int idxMessageId = -1;
+                    int expectedFields = 0;
                     bool haveFields = false;
 
                     string line;
@@ -732,6 +888,10 @@ namespace ExchangeDiag
                             if (line.StartsWith("#Fields:", StringComparison.OrdinalIgnoreCase))
                             {
                                 string[] names = line.Substring("#Fields:".Length).Split(',');
+                                // Kolon SAYISI da sema kadar onemli: satirin
+                                // alan sayisi bununla karsilastirilmazsa
+                                // kaymis satirlar sessizce yanlis kolon okur.
+                                expectedFields = names.Length;
                                 idxDateTime = IndexOf(names, ColDateTime);
                                 idxEvent = IndexOf(names, ColEventId);
                                 idxInfo = IndexOf(names, ColMessageInfo);
@@ -754,6 +914,15 @@ namespace ExchangeDiag
                         result.LinesScanned++;
                         splitter.Split(line);
 
+                        // Semaya uymayan satir: atilir AMA sayilir. Eskiden
+                        // yalnizca atiliyordu ve kismen bozuk bir log,
+                        // tertemiz bir logdan ayirt edilemiyordu.
+                        if (IsRowMalformed(splitter, expectedFields))
+                        {
+                            result.MalformedLines++;
+                            continue;
+                        }
+
                         // Once en ucuz eleme: olay tipi.
                         if (!splitter.FieldEquals(idxEvent, "DELIVER")) continue;
 
@@ -765,7 +934,9 @@ namespace ExchangeDiag
 
                         // MessageLatency log'da kolon degildir: message-info
                         // alanindaki gonderim zamanindan turetilir.
-                        string messageInfo = idxInfo >= 0 ? splitter.GetField(idxInfo) : null;
+                        // HasField iki soruyu birden cevaplar: kolon semada
+                        // var mi (idx >= 0) ve BU SATIRDA var mi.
+                        string messageInfo = splitter.HasField(idxInfo) ? splitter.GetField(idxInfo) : null;
                         DateTime submitUtc;
                         if (!TryParseSubmitTime(messageInfo, out submitUtc))
                         {
@@ -789,7 +960,7 @@ namespace ExchangeDiag
                         if (slowThresholdSeconds > 0 && seconds >= slowThresholdSeconds)
                         {
                             result.SlowDeliveryCount++;
-                            string recipients = idxRecipient >= 0 ? splitter.GetField(idxRecipient) : null;
+                            string recipients = splitter.HasField(idxRecipient) ? splitter.GetField(idxRecipient) : null;
                             AddSlowRecipients(result.SlowRecipients, recipients, seconds);
                         }
 
@@ -798,13 +969,15 @@ namespace ExchangeDiag
                             SlowDelivery record = new SlowDelivery();
                             record.TimestampUtc = timestampUtc;
                             record.LatencySeconds = seconds;
-                            record.Recipient = idxRecipient >= 0 ? splitter.GetField(idxRecipient) : null;
-                            record.Sender = idxSender >= 0 ? splitter.GetField(idxSender) : null;
-                            record.Subject = idxSubject >= 0 ? splitter.GetField(idxSubject) : null;
-                            record.NetworkMessageId = idxNetworkId >= 0 ? splitter.GetField(idxNetworkId) : null;
-                            record.MessageId = idxMessageId >= 0 ? splitter.GetField(idxMessageId) : null;
-                            record.Source = idxSource >= 0 ? splitter.GetField(idxSource) : null;
-                            record.ServerHostname = idxServer >= 0 ? splitter.GetField(idxServer) : null;
+                            // Eksik kolon icin N/A (null) uretilir; "kolon yok"
+                            // ile "kolon bos" burada da ayni sey degildir.
+                            record.Recipient = splitter.HasField(idxRecipient) ? splitter.GetField(idxRecipient) : null;
+                            record.Sender = splitter.HasField(idxSender) ? splitter.GetField(idxSender) : null;
+                            record.Subject = splitter.HasField(idxSubject) ? splitter.GetField(idxSubject) : null;
+                            record.NetworkMessageId = splitter.HasField(idxNetworkId) ? splitter.GetField(idxNetworkId) : null;
+                            record.MessageId = splitter.HasField(idxMessageId) ? splitter.GetField(idxMessageId) : null;
+                            record.Source = splitter.HasField(idxSource) ? splitter.GetField(idxSource) : null;
+                            record.ServerHostname = splitter.HasField(idxServer) ? splitter.GetField(idxServer) : null;
                             result.Slowest.Add(record);
 
                             if (result.Slowest.Count > topSlowCount * 2)
@@ -903,6 +1076,14 @@ namespace ExchangeDiag
         /// Store fazi baskinsa darbogaz transport'ta degil Store tarafindadir
         /// (orgu P2) ve arastirma M20/M21/M22'ye kayar.
         ///
+        /// NUFUS: uc faz da YALNIZCA zinciri tam olan mesajlardan hesaplanir
+        /// (PhaseSamples). Boylece uc sutun ayni mesaj kumesini anlatir ve
+        /// Ingress + Transport + Store = TotalReconciled olur. Uctan uca
+        /// (Total) daha genis bir kumeden gelir - zinciri eksik ama teslim
+        /// edilmis mesajlar da sayilir - ve kac mesajdan geldigi
+        /// MessagesWithTotal ile ayrica bildirilir. Iki kume arasindaki fark
+        /// hukmu degistirecek kadar buyukse PhaseVerdictIncomplete isaretlenir.
+        ///
         /// Cok alicili mesajlar ayni network-message-id ile birden cok DELIVER
         /// satiri uretir; mesajin tamamlanma suresi icin EN GEC DELIVER, giris
         /// icin EN ERKEN RECEIVE alinir.
@@ -956,6 +1137,7 @@ namespace ExchangeDiag
             ConcurrentDictionary<string, MessageTrace> traces =
                 new ConcurrentDictionary<string, MessageTrace>(StringComparer.OrdinalIgnoreCase);
             long linesScanned = 0;
+            long malformedLines = 0;
             bool truncated = false;
             long filesProcessed = 0;
             object sync = new object();
@@ -974,6 +1156,7 @@ namespace ExchangeDiag
                 }
 
                 long localLines = 0;
+                long localMalformed = 0;
                 bool localTruncated = false;
                 bool localDeadline = false;
                 // Tek uyari alani yerine liste: sema hatasi sonrasi gelen bir
@@ -997,6 +1180,7 @@ namespace ExchangeDiag
                     {
                         CsvLineSplitter splitter = new CsvLineSplitter();
                         int idxDateTime = -1, idxEvent = -1, idxInfo = -1, idxNetworkId = -1;
+                        int expectedFields = 0;
                         bool haveFields = false;
 
                         string line;
@@ -1018,6 +1202,7 @@ namespace ExchangeDiag
                                 if (line.StartsWith("#Fields:", StringComparison.OrdinalIgnoreCase))
                                 {
                                     string[] names = line.Substring("#Fields:".Length).Split(',');
+                                    expectedFields = names.Length;
                                     idxDateTime = IndexOf(names, ColDateTime);
                                     idxEvent = IndexOf(names, ColEventId);
                                     idxInfo = IndexOf(names, ColMessageInfo);
@@ -1032,6 +1217,11 @@ namespace ExchangeDiag
                             if (!haveFields) continue;
                             localLines++;
                             splitter.Split(line);
+
+                            // Kaymis bir satir yanlis network-message-id ile
+                            // yanlis bir zincire yapisabilir; faz kirilimi bu
+                            // yuzden bozuk satira HIC dokunmaz.
+                            if (IsRowMalformed(splitter, expectedFields)) { localMalformed++; continue; }
 
                             bool isDeliver = splitter.FieldEquals(idxEvent, "DELIVER");
                             bool isReceive = !isDeliver && splitter.FieldEquals(idxEvent, "RECEIVE");
@@ -1065,7 +1255,7 @@ namespace ExchangeDiag
                                         trace.DeliverUtc = timestampUtc;
                                         trace.HasDeliver = true;
                                     }
-                                    if (!trace.HasSubmit && idxInfo >= 0)
+                                    if (!trace.HasSubmit && splitter.HasField(idxInfo))
                                     {
                                         DateTime submitUtc;
                                         if (TryParseSubmitTime(splitter.GetField(idxInfo), out submitUtc))
@@ -1104,6 +1294,7 @@ namespace ExchangeDiag
                 {
                     filesProcessed++;
                     linesScanned += localLines;
+                    malformedLines += localMalformed;
                     if (localTruncated) truncated = true;
                     if (localDeadline) deadlineHit = true;
                     breakdown.Warnings.AddRange(localWarnings);
@@ -1119,13 +1310,35 @@ namespace ExchangeDiag
             }
 
             breakdown.LinesScanned = linesScanned;
+            breakdown.MalformedLines = malformedLines;
+            if (ShouldWarnMalformed(malformedLines, linesScanned))
+                breakdown.Warnings.Add(MalformedWarning(malformedLines, linesScanned));
+
             breakdown.MessagesSeen = traces.Count;
             breakdown.TruncatedByLimit = truncated;
             if (truncated)
                 breakdown.Warnings.Add("Mesaj sayisi " + maxMessages.ToString(CultureInfo.InvariantCulture) +
                                        " sinirini asti; kirilim orneklemdir. Pencereyi daraltin.");
 
+            // FAZLAR TEK BIR NUFUSTAN HESAPLANIR.
+            //
+            // Eskiden her fazin kendi kabul kosulu vardi: Store yalnizca
+            // Mailbox RECEIVE istiyordu, Transport iki RECEIVE birden,
+            // Ingress gonderim + Transport RECEIVE. Sonuc, yan yana basilan
+            // ama FARKLI mesaj kumelerini anlatan dort sutundu ve kirilim
+            // toplanmiyordu. Daha kotusu, sistematik olarak Store'a yanliydi:
+            // ara olaylari pencere disinda kalan mesajlar - yani tam da EN
+            // YAVAS olanlar - yalnizca Store ve Total'a giriyordu. 7195
+            // saniyenin 7180'i mailbox receive'den ONCE gecmisken hukum
+            // "darbogaz Store" cikiyordu ve arastirma yanlis yere (disk/RPC)
+            // yonlendiriliyordu.
+            //
+            // Artik uc faz da YALNIZCA zinciri tam olan mesajlardan hesaplanir;
+            // boylece Ingress + Transport + Store, ayni mesajin uctan uca
+            // suresini verir ve karsilastirma anlamli olur.
             List<double> totals = new List<double>();
+            List<double> reconciledTotals = new List<double>();
+            List<double> unreconciledTotals = new List<double>();
             List<double> ingress = new List<double>();
             List<double> transport = new List<double>();
             List<double> store = new List<double>();
@@ -1137,48 +1350,74 @@ namespace ExchangeDiag
                 MessageTrace trace = pair.Value;
                 if (!trace.HasDeliver) continue;
 
-                bool full = true;
-
+                double totalValue = 0d;
+                bool hasTotal = false;
                 if (trace.HasSubmit)
                 {
-                    double value = (trace.DeliverUtc - trace.SubmitUtc).TotalSeconds;
-                    if (value >= 0) totals.Add(value); else skewed++;
+                    totalValue = (trace.DeliverUtc - trace.SubmitUtc).TotalSeconds;
+                    if (totalValue >= 0) hasTotal = true; else skewed++;
                 }
-                else full = false;
 
+                double ingressValue = 0d;
+                bool hasIngress = false;
                 if (trace.HasSubmit && trace.HasTransportReceive)
                 {
-                    double value = (trace.TransportReceiveUtc - trace.SubmitUtc).TotalSeconds;
-                    if (value >= 0) ingress.Add(value); else skewed++;
+                    ingressValue = (trace.TransportReceiveUtc - trace.SubmitUtc).TotalSeconds;
+                    if (ingressValue >= 0) hasIngress = true; else skewed++;
                 }
-                else full = false;
 
+                double transportValue = 0d;
+                bool hasTransport = false;
                 if (trace.HasTransportReceive && trace.HasMailboxReceive)
                 {
                     // Bu iki olay FARKLI SUNUCULARDA olabilir; saatleri kaymissa
                     // negatif cikar. Kirpilmaz, sayilir ve raporlanir.
-                    double value = (trace.MailboxReceiveUtc - trace.TransportReceiveUtc).TotalSeconds;
-                    if (value >= 0) transport.Add(value); else skewed++;
+                    transportValue = (trace.MailboxReceiveUtc - trace.TransportReceiveUtc).TotalSeconds;
+                    if (transportValue >= 0) hasTransport = true; else skewed++;
                 }
-                else full = false;
 
+                double storeValue = 0d;
+                bool hasStore = false;
                 if (trace.HasMailboxReceive)
                 {
-                    double value = (trace.DeliverUtc - trace.MailboxReceiveUtc).TotalSeconds;
-                    if (value >= 0) store.Add(value); else skewed++;
+                    storeValue = (trace.DeliverUtc - trace.MailboxReceiveUtc).TotalSeconds;
+                    if (storeValue >= 0) hasStore = true; else skewed++;
                 }
-                else full = false;
 
-                if (full) complete++;
+                // Uctan uca olcum BILEREK genis nufustan toplanir: zinciri
+                // eksik diye en yavas mesajlari rapordan silmek, faz yanliligi
+                // yerine "her sey yolunda" yalanini koyardi.
+                if (hasTotal) totals.Add(totalValue);
+
+                bool reconciled = hasTotal && hasIngress && hasTransport && hasStore;
+                if (reconciled)
+                {
+                    ingress.Add(ingressValue);
+                    transport.Add(transportValue);
+                    store.Add(storeValue);
+                    reconciledTotals.Add(totalValue);
+                    complete++;
+                }
+                else if (hasTotal)
+                {
+                    unreconciledTotals.Add(totalValue);
+                }
             }
 
             breakdown.MessagesComplete = complete;
+            breakdown.PhaseSamples = complete;
             breakdown.SkewedSamples = skewed;
             breakdown.Total = PercentileEngine.Compute(totals);
+            breakdown.MessagesWithTotal = breakdown.Total.Count;
+            breakdown.TotalReconciled = PercentileEngine.Compute(reconciledTotals);
+            breakdown.UnreconciledTotal = PercentileEngine.Compute(unreconciledTotals);
+            breakdown.UnreconciledSamples = breakdown.UnreconciledTotal.Count;
             breakdown.Ingress = PercentileEngine.Compute(ingress);
             breakdown.Transport = PercentileEngine.Compute(transport);
             breakdown.Store = PercentileEngine.Compute(store);
             breakdown.DominantPhase = DetermineDominantPhase(breakdown);
+
+            EvaluatePhaseCoverage(breakdown);
 
             if (skewed > 0)
                 breakdown.Warnings.Add(skewed.ToString(CultureInfo.InvariantCulture) +
@@ -1187,6 +1426,45 @@ namespace ExchangeDiag
             watch.Stop();
             breakdown.ElapsedMs = watch.Elapsed.TotalMilliseconds;
             return breakdown;
+        }
+
+        // Faz hukmunun kor noktasi icin esikler. Zinciri eksik kalan mesajlar
+        // nadiren rastgeledir: bir mesajin RECEIVE olayi pencerenin onunde
+        // kaldiysa o mesaj zaten uzun suredir yoldadir. Bu yuzden TEK BASINA
+        // "eksik mesaj var" demek her kosuda uyari uretirdi. Uyari, eksik
+        // kumenin hem KAYDA DEGER buyuklukte hem de BELIRGIN yavas oldugu
+        // durumda cikar - yani hukmun yonunu degistirebilecegi durumda.
+        private const double PhaseGapShareWarn = 0.01;      // uctan uca nufusun %1'i
+        private const double PhaseGapSlownessWarn = 2.0;    // p95 orani
+
+        /// <summary>
+        /// Baskin faz hukmu, aciklanmasi gereken mesajlari disarida birakarak
+        /// mi verildi? Birakildiysa bu SESSIZ kalmamalidir: operator aksi
+        /// halde "darbogaz su fazda" cumlesini, en yavas mesajlarin hic
+        /// bakilmadigini bilmeden okur.
+        /// </summary>
+        private static void EvaluatePhaseCoverage(PhaseBreakdown breakdown)
+        {
+            if (breakdown.UnreconciledSamples <= 0 || breakdown.Total.Count <= 0) return;
+
+            double share = (double)breakdown.UnreconciledSamples / breakdown.Total.Count;
+
+            // Zinciri tam hic mesaj yoksa karsilastirilacak taban da yoktur:
+            // bu, gorunurlugun tamamen kayip oldugu en kotu durumdur.
+            double slowness = double.MaxValue;
+            if (breakdown.TotalReconciled.Count > 0 && breakdown.TotalReconciled.P95 > 0)
+                slowness = breakdown.UnreconciledTotal.P95 / breakdown.TotalReconciled.P95;
+
+            if (share < PhaseGapShareWarn || slowness < PhaseGapSlownessWarn) return;
+
+            breakdown.PhaseVerdictIncomplete = true;
+            breakdown.Warnings.Add(
+                "Faz zinciri " + breakdown.Total.Count.ToString(CultureInfo.InvariantCulture) + " mesajin " +
+                breakdown.UnreconciledSamples.ToString(CultureInfo.InvariantCulture) +
+                " tanesinde tamamlanamadi (ara olaylar pencerenin disinda kalmis olabilir). Bu mesajlarin " +
+                "uctan uca p95'i " + breakdown.UnreconciledTotal.P95.ToString("F2", CultureInfo.InvariantCulture) +
+                " sn, zinciri tam olanlarinki " + breakdown.TotalReconciled.P95.ToString("F2", CultureInfo.InvariantCulture) +
+                " sn: BASKIN FAZ HUKMU EN YAVAS MESAJLARI ICERMIYOR. Pencereyi -WindowHours ile GENISLETIN.");
         }
 
         private static string DetermineDominantPhase(PhaseBreakdown breakdown)
