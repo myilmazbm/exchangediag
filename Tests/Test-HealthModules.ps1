@@ -14,7 +14,10 @@
            1498 saglikli monitoru "gecerli degil" saymisti);
            kapali tek monitor tum calistirmayi WARN'a cikarmaz ama izlemenin
            buyuk bolumu kapaliysa "saglikli" hukmu dayanaksizdir
-      M41: gruplama, depolama kaynakli hatanin ayri onemi, "olay cok" != "hata"
+      M41: gruplama, depolama kaynakli hatanin ayri onemi, "olay cok" != "hata";
+           tavana ulasilinca (4000 olay/gunluk) sayilarin EKSIK oldugunun
+           soylenmesi - bu dal daha once hicbir testle sabitlenmemisti, iki
+           sahte yanit da Truncated = $false veriyordu
       M42: ucuncu parti AV varsa DISLAMA YOK DENMEZ; gercek zamanli koruma
            kapaliysa eksik dislama zararsizdir; ust klasor dislamasi alti kapsar
       M43: referans liste bosken "guncel" IDDIA EDILMEZ
@@ -215,6 +218,34 @@ $errorRow = Get-EDTestRow $rows 'Hata olayi'
 Assert-Equal 'Az sayida ama DEPOLAMA hatasi WARN' 'WARN' $errorRow.Status
 Assert-True 'Depolama vurgulandi' ($errorRow.Note -like '*DEPOLAMA*') $errorRow.Note
 Assert-True 'M21/M22 ile okunmasi soylendi' ($errorRow.Note -like '*M21*' -and $errorRow.Note -like '*M22*')
+
+# 2c. TAVANA ULASILDI: sayilar EKSIK oldugunda bunu soylemek zorunludur.
+#
+# M41 gunluk basina 4000 olayda durur ve ozet satirinda Truncated bayragini
+# tasir. Yukaridaki iki sahte yanit bu bayragi HER ZAMAN $false veriyordu:
+# yani "gordugumun tamami bu degil" dali hicbir testle sabitlenmemisti. Oysa
+# tavan tam da hukmun kaydigi yerdir - yogun bir sunucuda hata sayisi eksik
+# sayilir, esigin altinda kalir ve FAIL yerine WARN (hatta OK) cikar. Bayrak
+# nota tasinmazsa operator eksik bir sayiyi TAM sanir.
+$truncatedMock = [pscustomobject]@{ ExchangeConnection = 'mock'; Parallelism = 1; Rows = @(
+    [pscustomobject]@{ Kind = 'summary'; TotalScanned = 8000; Truncated = $true }
+    (New-EventGroup -Provider 'MSExchangeTransport' -Id 5678 -Level 'Error' -Count 3900)
+) }
+$truncatedMock | Add-Member -MemberType ScriptMethod -Name RunLocal -Value $eventMock.PSObject.Methods['RunLocal'].Script
+$truncatedContext = New-HealthContext -Responses @{}
+$truncatedContext.Executor = $truncatedMock
+$rows = @(& $m41.Run $truncatedContext)
+$errorRow = Get-EDTestRow $rows 'Hata olayi'
+Assert-True 'Tavana ulasildigi notta yazili' ($errorRow.Note -like '*TAVANA ULASILDI*') $errorRow.Note
+Assert-True 'Hangi sunucuda oldugu yazili' ($errorRow.Note -like '*MBX1*') $errorRow.Note
+Assert-True 'Sayilarin eksik olabilecegi soylendi' ($errorRow.Note -like '*eksik olabilir*') $errorRow.Note
+# DIKKAT - BILINEN ACIK, M41'DE: bayragin kendisi
+# ($totalScanned -ge $MaxEvents * 2) ile hesaplanir. Tavan gunluk BASINA
+# 4000'dir ve iki gunluk (Application + System) taranir; bu yuzden bayrak
+# ancak IKI gunluk birden tavana vurursa kalkar. Application 4000'de kesilip
+# System 10 olay dondurdugunde toplam 4010 olur, bayrak $false kalir ve eksik
+# sayim SESSIZ gecer. Burasi M41'in sahibine bildirildi; bu paket bayragin
+# rapora DOGRU tasindigini sabitler, hesabini degil.
 
 # ===========================================================================
 Write-Host "`n=== 3. M42 AV dislamalari ===" -ForegroundColor Cyan
