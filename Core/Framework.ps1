@@ -24,27 +24,39 @@ $script:EDModules = [ordered]@{}
 # ---------------------------------------------------------------------------
 # SUMMARY.csv sutun sozlesmesi
 # ---------------------------------------------------------------------------
-# SUMMARY.csv'nin SUNUCU OLMAYAN (ust veri) sutunlari. Dosyayi YAZAN
+# SUMMARY.csv'nin VARLIK OLMAYAN (ust veri) sutunlari. Dosyayi YAZAN
 # (Core\Report.ps1) ve -CompareWith ile geri OKUYAN (Core\Compare.ps1)
 # taraflar icin TEK KAYNAK.
 #
+# TERIM: bu listenin disinda kalan sutunlar "sunucu" DEGIL VARLIK
+# sutunlaridir - satirin olcum anahtari sunucu (M10), veritabani (M12, M23)
+# ya da volume olabilir. Kavrami "sunucu" sanmak gercek bir kusur uretti:
+# DB adiyla anahtarlanmis satirlar topolojide bulunmadigi icin kiyas disi
+# kalmis ve olculmus gercek bir degisim (M12'de 3 -> 1174) delta raporundan
+# dusmustu. Buraya "sunucu" yazmak, sonraki okuyani ayni hataya cagirir.
+#
 # NEDEN burada: liste iki dosyada ayri ayri dururken okuyan taraf yazan
 # tarafi tahmin etmek zorunda kaliyordu - "bu listede olmayan her sutun bir
-# sunucudur". Bu varsayim yanlis yonde guvenli DEGILDIR: CSV'ye eklenen her
-# yeni ust veri sutunu (orn. 'Orgu') hic var olmamis bir sunucuya donusur ve
-# o "sunucu" simdiki kosumda bulunmadigi icin delta motoru "bu sunucu
+# varliktir". Bu varsayim yanlis yonde guvenli DEGILDIR: CSV'ye eklenen her
+# yeni ust veri sutunu (orn. 'Orgu') hic var olmamis bir varliga donusur ve
+# o "varlik" simdiki kosumda bulunmadigi icin delta motoru "bu sunucu
 # simdiki calistirmada olculmedi" diyen UYDURMA bir satir uretir. Nitekim
-# gercek bir sutun eklemek tam da bu kurala carpip vazgecilmisti.
+# gercek bir sutun eklemek tam da bu kurala carpip bir kez ertelenmisti.
 #
-# Bir sunucuyu ust veri sanmak yalnizca bir olcumu gozden kacirir; ust
-# veriyi sunucu sanmak ise OLMAYAN bir sunucu hakkinda hukum uretir -
+# Bir varligi ust veri sanmak yalnizca bir olcumu gozden kacirir; ust
+# veriyi varlik sanmak ise OLMAYAN bir varlik hakkinda hukum uretir -
 # aracin "okunamayan degeri uydurma" ilkesinin dogrudan ihlali. Bu yuzden
-# okuyan taraf sunucuyu artik POZITIF olarak tanir ve bu liste yalnizca
-# "kesinlikle sunucu degil" demeye yarar.
+# okuyan taraf varligi artik POZITIF olarak tanir (topoloji + simdiki
+# kosumda GOZLENEN olcum anahtarlari) ve bu liste yalnizca "kesinlikle
+# varlik degil" demeye yarar.
+#
+# SIRA SOZLESMESI: Report.ps1 listeyi 'Durum'dan bolerek basa ve sona
+# yazilacak ust veri sutunlarini ayirir. Sira degistirilirse CSV'nin
+# sutun duzeni degisir; yeni ad eklerken 'Durum'/'Not' sonda kalmalidir.
 #
 # Yeni bir ust veri sutunu eklenecekse once BURAYA yazilir; Tests\
 # Test-CompareEngine.ps1 yazicinin urettigi basliklarin hepsinin ya bu
-# listede ya da sunucu adi oldugunu dogrular.
+# listede ya da bir varlik adi oldugunu dogrular.
 $script:EDSummaryMetaColumns = @('Modul', 'Kontrol', 'Birim', 'Orgu', 'Durum', 'Not')
 
 function Reset-EDModuleRegistry {
