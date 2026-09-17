@@ -111,7 +111,9 @@ Register-EDModule @{
                 if ($remainingRaw -is [timespan]) { $days = [int][math]::Floor($remainingRaw.TotalDays) }
                 else {
                     $parsed = New-Object 'System.TimeSpan'
-                    if ([timespan]::TryParse([string]$remainingRaw, [ref]$parsed)) { $days = [int][math]::Floor($parsed.TotalDays) }
+                    if ([timespan]::TryParse([string]$remainingRaw, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+                        $days = [int][math]::Floor($parsed.TotalDays)
+                    }
                 }
 
                 if ($null -eq $days) {

@@ -164,7 +164,7 @@ $current = @((New-EDRow -Module 'M05' -Check 'CPU' -Values @{ MBX1 = 82.6 } -Uni
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
 $delta = @($comparison.Deltas)[0]
 Assert-True 'Degisen degere "ayni" DENMEDI' ($delta.Aciklama -notlike '*Deger ayni*') $delta.Aciklama
-Assert-True 'Fark yine de yazildi' ($delta.Fark -like '*+65.8*') $delta.Fark
+Assert-True 'Fark yine de yazildi' ($delta.Fark -like ('*+' + ('{0:N1}' -f 65.8) + '*')) $delta.Fark
 
 # ===========================================================================
 Write-Host "`n=== 4. Kapsam korumasi ===" -ForegroundColor Cyan

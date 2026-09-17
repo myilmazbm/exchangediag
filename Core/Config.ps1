@@ -318,7 +318,11 @@ function Get-EDConfig {
         if (-not $issue) { continue }
         $expires = $null
         if ($issue.Contains('expires') -and $issue['expires']) {
-            [datetime]::TryParse([string]$issue['expires'], [ref]$expires) | Out-Null
+            # Tarih de kulture duyarlidir; known-issues.json ISO yazar.
+            [datetime]::TryParse([string]$issue['expires'],
+                                 [System.Globalization.CultureInfo]::InvariantCulture,
+                                 [System.Globalization.DateTimeStyles]::None,
+                                 [ref]$expires) | Out-Null
         }
         if ($expires -and $expires -lt (Get-Date)) { $expiredKnownIssues += $issue }
         else { $activeKnownIssues += $issue }

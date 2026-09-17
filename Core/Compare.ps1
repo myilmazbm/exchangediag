@@ -159,11 +159,14 @@ function Get-EDDeltaKind {
     if ($previousMissing -and $currentMissing) { return 'both-missing' }
     if ($previousMissing -or $currentMissing) { return 'measurement-change' }
 
-    $previousNumber = 0.0; $currentNumber = 0.0
-    $previousIsNumber = [double]::TryParse($previousText, [ref]$previousNumber)
-    $currentIsNumber = [double]::TryParse($currentText, [ref]$currentNumber)
+    # "Sayi mi?" testi ile aritmetigin AYNI ayristiriciyi kullanmasi sart.
+    # Eskiden test CurrentCulture, aritmetik invariant idi: tr-TR'de yazilan
+    # "12,5" once 12.5 sonra 125 okunuyor, iki OZDES kosu hayalet delta
+    # uretiyordu.
+    $previousNumber = ConvertTo-EDNumber $previousText
+    $currentNumber = ConvertTo-EDNumber $currentText
 
-    if ($previousIsNumber -and $currentIsNumber) { return 'numeric' }
+    if ($null -ne $previousNumber -and $null -ne $currentNumber) { return 'numeric' }
     return 'text'
 }
 
@@ -291,8 +294,9 @@ function Compare-EDRuns {
                 }
             }
             elseif ($kind -eq 'numeric') {
-                $previousNumber = [double]$previousValue
-                $currentNumber = [double]$currentValue
+                # 'numeric' hukmunu veren ayristiricinin ta kendisi.
+                $previousNumber = ConvertTo-EDNumber $previousValue
+                $currentNumber = ConvertTo-EDNumber $currentValue
                 $difference = $currentNumber - $previousNumber
 
                 if ($difference -eq 0) {

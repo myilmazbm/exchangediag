@@ -37,7 +37,14 @@ function Export-EDSummaryCsv {
             Birim   = $row.Unit
         }
         foreach ($column in $Columns) {
-            $record[$column] = if ($row.Values.ContainsKey($column)) { $row.Values[$column] } else { '' }
+            # SUMMARY.csv makine tarafindan da okunur (-CompareWith). Sayilar
+            # CurrentCulture ile yazilirsa tr-TR'de "12,5" olur ve delta motoru
+            # onu 125 okur. Sunum bicimi HTML'in isi; burasi veri sozlesmesi.
+            $cell = if ($row.Values.ContainsKey($column)) { $row.Values[$column] } else { '' }
+            if ($cell -is [double] -or $cell -is [single] -or $cell -is [decimal]) {
+                $cell = ([double]$cell).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            $record[$column] = $cell
         }
         $record['Durum'] = $row.Status
         $record['Not']   = $row.Note

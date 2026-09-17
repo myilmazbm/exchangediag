@@ -128,7 +128,8 @@ function Get-EDThrottlingCap {
         $value = Get-EDProperty -InputObject $row -Name 'PowerShellMaxConcurrency'
         if ($null -ne $value) {
             $parsed = 0
-            if ([int]::TryParse([string]$value, [ref]$parsed) -and $parsed -gt 0) { $limits += $parsed }
+            $parsedNumber = ConvertTo-EDNumber $value
+            if ($null -ne $parsedNumber -and $parsedNumber -gt 0) { $limits += [int]$parsedNumber }
         }
     }
 

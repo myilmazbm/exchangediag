@@ -220,7 +220,10 @@ function Get-EDCmdletDeliveryAnalysis {
         if ($raw -is [timespan]) { $seconds = $raw.TotalSeconds }
         else {
             $parsed = [timespan]::Zero
-            if ([timespan]::TryParse([string]$raw, [ref]$parsed)) { $seconds = $parsed.TotalSeconds }
+            # TimeSpan ayristirmasi da kulture duyarlidir (kesir ayraci).
+            if ([timespan]::TryParse([string]$raw, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+                $seconds = $parsed.TotalSeconds
+            }
         }
         if ($null -eq $seconds) { $analysis.LatencyMissing++; continue }
         # Saat kaymasi yalnizca NegativeLatency'e yazilir; LatencyMissing

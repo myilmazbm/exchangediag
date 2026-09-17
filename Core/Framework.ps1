@@ -278,6 +278,39 @@ function Get-EDProperty {
 # Esik degerlendirme
 # ---------------------------------------------------------------------------
 
+function ConvertTo-EDNumber {
+<#
+    .SYNOPSIS
+        Bir degeri sayiya cevirir; cevrilemezse $null doner.
+
+    .DESCRIPTION
+        KULTUR TUZAGI: [double]::TryParse'in tek argumanli hali CurrentCulture
+        ile ayristirir, ama PowerShell sayilari HER ZAMAN invariant bicimde
+        string'e cevirir ("0.07"). tr-TR'de "." binlik ayracidir, yani
+        "0.07" -> 7 olur ve her esik hukmu 100 kat kayar. Turkce bir Exchange
+        sunucusunda varsayilan davranis budur.
+
+        Iki savunma: (1) deger zaten sayiysa string'e HIC ugranmaz,
+        (2) string ise invariant kultur ile ayristirilir.
+#>
+    [CmdletBinding()]
+    param([AllowNull()]$Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [double] -or $Value -is [int] -or $Value -is [long] -or
+        $Value -is [decimal] -or $Value -is [single] -or $Value -is [byte]) {
+        return [double]$Value
+    }
+
+    $numeric = 0.0
+    $ok = [double]::TryParse([string]$Value,
+                             [System.Globalization.NumberStyles]::Float -bor [System.Globalization.NumberStyles]::AllowThousands,
+                             [System.Globalization.CultureInfo]::InvariantCulture,
+                             [ref]$numeric)
+    if (-not $ok) { return $null }
+    return $numeric
+}
+
 function Get-EDStatus {
 <#
     .SYNOPSIS
@@ -302,12 +335,23 @@ function Get-EDStatus {
         throw "Tanimsiz esik: '$ThresholdName'. Config\thresholds.json'a ekleyin."
     }
 
-    $numeric = 0.0
-    if (-not [double]::TryParse([string]$Value, [ref]$numeric)) { return 'N/A' }
+    $numeric = ConvertTo-EDNumber $Value
+    if ($null -eq $numeric) { return 'N/A' }
+    # NaN her karsilastirmada false doner ve sessizce OK uretirdi.
+    if ([double]::IsNaN($numeric) -or [double]::IsInfinity($numeric)) { return 'N/A' }
 
     $threshold = $Config.Thresholds[$ThresholdName]
-    $warn = [double]$threshold['warn']
-    $fail = [double]$threshold['fail']
+    # Eksik anahtar sessizce 0 uretir ve warn>fail karsilastirmasi yonu
+    # TERSINE cevirir: bos kuyruk FAIL, 5000 mesajlik kuyruk OK olur.
+    if (-not ($threshold -is [System.Collections.IDictionary]) -or
+        -not $threshold.Contains('warn') -or -not $threshold.Contains('fail')) {
+        throw "Bozuk esik '$ThresholdName': 'warn' ve 'fail' anahtarlarinin ikisi de gerekli (thresholds.json)."
+    }
+    $warn = ConvertTo-EDNumber $threshold['warn']
+    $fail = ConvertTo-EDNumber $threshold['fail']
+    if ($null -eq $warn -or $null -eq $fail) {
+        throw "Bozuk esik '$ThresholdName': 'warn' ve 'fail' sayisal olmali (thresholds.json)."
+    }
 
     if ($warn -le $fail) {
         if ($numeric -ge $fail) { return 'FAIL' }

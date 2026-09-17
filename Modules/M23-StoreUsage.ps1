@@ -105,7 +105,8 @@ Register-EDModule @{
                     $value = Get-EDProperty $row $field
                     if ($null -eq $value) { continue }
                     $numeric = 0.0
-                    if (-not [double]::TryParse([string]$value, [ref]$numeric)) { continue }
+                    $numeric = ConvertTo-EDNumber $value
+                    if ($null -eq $numeric) { continue }
                     if ($numeric -gt $entry.$field) { $entry.$field = $numeric }
                 }
             }

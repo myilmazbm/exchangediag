@@ -181,7 +181,7 @@ function New-OsContext {
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 0.5))
 $uptimeRow = Get-EDTestRow $rows 'Calisma suresi'
 Assert-Equal 'Yakin reboot WARN' 'WARN' $uptimeRow.Status
-Assert-Equal 'Saat olarak gosterildi' '0.5 saat' $uptimeRow.Values['MBX1']
+Assert-Equal 'Saat olarak gosterildi' ('{0:N1} saat' -f 0.5) $uptimeRow.Values['MBX1']
 Assert-True 'Diger bulgularin bu bilgiyle okunmasi soylendi' ($uptimeRow.Note -like '*Diger modullerin bulgularini bu bilgiyle okuyun*') $uptimeRow.Note
 Assert-True 'Kuyrugun dolu olmasinin normal olabilecegi yazildi' ($uptimeRow.Note -like '*NORMAL olabilir*')
 
@@ -189,7 +189,7 @@ Assert-True 'Kuyrugun dolu olmasinin normal olabilecegi yazildi' ($uptimeRow.Not
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 72))
 $uptimeRow = Get-EDTestRow $rows 'Calisma suresi'
 Assert-Equal 'Uzun uptime OK' 'OK' $uptimeRow.Status
-Assert-Equal 'Gun olarak gosterildi' '3.0 gun' $uptimeRow.Values['MBX1']
+Assert-Equal 'Gun olarak gosterildi' ('{0:N1} gun' -f 3.0) $uptimeRow.Values['MBX1']
 
 # 2c. CPU p95 kullanilir, ortalama DEGIL
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -CpuP95 95.0))
