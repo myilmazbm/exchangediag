@@ -583,7 +583,7 @@ Paketler geliştiricinin makinesinde (çoğunlukla en-US) koşuyordu ve **tek bi
 
 **Geçmek yetmez, iki kültürde de geçmek gerekir.** Bir iddia yalnızca tek kültürde geçiyorsa ya ürün kültüre bağımlıdır (hata) ya da iddianın kendisi geliştiricinin ondalık ayracını varsayıyordur (test hatası); ikisi de düzeltilir. Sonuç satırı üretmeyen bir paket "0 hata" sayılmaz, `COKTU` olarak raporlanır.
 
-Bugünkü durum — **15 paket × 2 kültür = 1730 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
+Bugünkü durum — **15 paket × 2 kültür = 1988 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
 
 | Paket | Doğrulama | Kapsam |
 |---|---|---|
@@ -593,14 +593,14 @@ Bugünkü durum — **15 paket × 2 kültür = 1730 doğrulama, 0 hata** (paket 
 | `Test-LatencyPatterns` | 14 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
 | `Test-TransportModules` | 71 | M14-M16 |
 | `Test-PerfModules` | 31 | M20-M22, örgü P4 ve P5 |
-| `Test-StoreModules` | 42 | M23-M24, yorum tablosu |
-| `Test-BaselineModules` | 84 | M04, M05, M25, M26 |
+| `Test-StoreModules` | 50 | M23-M24, yorum tablosu |
+| `Test-BaselineModules` | 98 | M04, M05, M25, M26 |
 | `Test-DagModules` | 64 | M30-M34 (sentetik DAG) |
 | `Test-HealthModules` | 67 | M40-M45 |
-| `Test-CompareEngine` | 74 | Delta motoru ve kapsam koruması |
-| `Test-ReportLayer` | 58 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
+| `Test-CompareEngine` | 145 | Delta motoru ve kapsam koruması |
+| `Test-ReportLayer` | 90 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
 | `Test-ReadOnlyLint` | 38 | Salt okunurluk denetiminin **kendi** testi |
-| `Test-ModuleContracts` | 22 | Yapısal sözleşme: `RunLocal` kullanan modül hedefe gidiyor mu |
+| `Test-ModuleContracts` | 26 | Yapısal sözleşme: `RunLocal` kullanan modül ve Core toplayıcısı hedefe gidiyor mu |
 | `Test-TimeoutVerdict` | 28 | `TIMEOUT` sıralaması: `N/A` < `TIMEOUT` < `WARN` < `ERROR` < `FAIL` |
 
 > `Test-LatencyModules` dışındaki paketler gerçek sunucuya sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır. `Test-LatencyModules` ise bağlanır ve M01'i koşturur; bu yüzden örgülerin **karar** mantığı orada değil `Test-LatencyPatterns`'ta sınanır — iki sunuculu, pasif siteli, tek örneklemli senaryolar canlı ortamda üretilemez.

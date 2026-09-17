@@ -232,7 +232,12 @@ $context = New-SampleContext -Path $currentPath -Hour 9 -RunId '20260917-090000'
 $columns = Get-EDReportColumns -Rows $rows -PreferredOrder $serverNames
 Export-EDSummaryCsv  -Rows $rows -Columns $columns -Path (Join-Path $currentPath 'SUMMARY.csv') | Out-Null
 Export-EDSummaryHtml -Rows $rows -Columns $columns -Path (Join-Path $currentPath 'SUMMARY.html') -Context $context -ModuleTimings $timings | Out-Null
-Save-EDRunMeta -Context $context -Path (Join-Path $currentPath 'run-meta.json') -ModuleTimings $timings | Out-Null
+# -Rows GECIRILMEK ZORUNDA: meta'nin 'entities' alani olculen varlik
+# adlarini (sunucular + DB'ler) satirlardan uretir. Gecirilmezse alan bos
+# kalir ve delta motoru KALDIRILMIS VARLIK ile TANIMADIGIM SUTUN ayrimini
+# yapamaz - yani depoya commit edilen demo, aracin gercek davranisini
+# eksik gosterir. Brief 571: tazelenmeyen ornek rapor katmanini yalanlar.
+Save-EDRunMeta -Context $context -Path (Join-Path $currentPath 'run-meta.json') -ModuleTimings $timings -Rows $rows | Out-Null
 
 # ===========================================================================
 # SAKIN SAAT (kiyas tabani) - ayni kapsam, daha dusuk degerler
@@ -286,7 +291,7 @@ $quietContext = New-SampleContext -Path $previousPath -Hour 3 -RunId '20260917-0
 $quietColumns = Get-EDReportColumns -Rows $quietRows -PreferredOrder $serverNames
 Export-EDSummaryCsv  -Rows $quietRows -Columns $quietColumns -Path (Join-Path $previousPath 'SUMMARY.csv') | Out-Null
 Export-EDSummaryHtml -Rows $quietRows -Columns $quietColumns -Path (Join-Path $previousPath 'SUMMARY.html') -Context $quietContext -ModuleTimings $timings | Out-Null
-Save-EDRunMeta -Context $quietContext -Path (Join-Path $previousPath 'run-meta.json') -ModuleTimings $timings | Out-Null
+Save-EDRunMeta -Context $quietContext -Path (Join-Path $previousPath 'run-meta.json') -ModuleTimings $timings -Rows $quietRows | Out-Null
 
 # ===========================================================================
 # DELTA: sakin saat -> yogun saat

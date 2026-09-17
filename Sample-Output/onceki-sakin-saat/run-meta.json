@@ -15,6 +15,16 @@
                     "MBX02",
                     "MBX03"
                 ],
+    "entities":  [
+                     "DB01",
+                     "DB02",
+                     "DB03",
+                     "DB04",
+                     "DR01",
+                     "MBX01",
+                     "MBX02",
+                     "MBX03"
+                 ],
     "profile":  "production",
     "modules":  [
                     "M01",
