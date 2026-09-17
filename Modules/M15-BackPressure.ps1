@@ -14,7 +14,12 @@
       15006 - mesaj gonderimleri REDDEDILIYOR
       15007 - gelen baglantilar REDDEDILIYOR
 
-    Brief: herhangi biri = FAIL. 15005 yalnizca baglam olarak raporlanir.
+    Brief: herhangi biri = FAIL. 15005 tek basina bulgu degildir; hukmu
+    DEGISTIRMEZ ama notu tamamlar: toparlanmis (15005 ile kapanmis) bir baski
+    da FAIL kalir - baski sirasinda mesajlar kabul edilmemistir - ancak not,
+    son olayin toparlanma olup olmadigini ve uzerinden ne kadar gectigini
+    tasir. Aksi halde 23 saat once kapanmis bir olay "su anda baski
+    altindasin" diye okunur ve operator artik var olmayan bir sorunu arar.
 
     Kanal: YEREL havuz. Exchange uzak uc noktasi olay gunlugune erisemez.
 #>
@@ -44,7 +49,16 @@ Register-EDModule @{
             param($Server, $StartTime)
 
             $ids = @(15004, 15005, 15006, 15007)
-            Invoke-Command -ComputerName $Server -ErrorAction Stop -ArgumentList @(, $ids), $StartTime -ScriptBlock {
+            # DIKKAT - '@(, $ids)' YAZILMAZ. Virgul isaretli tek elemanli dizi
+            # numarasi, -ArgumentList'e TEK bir dizi verildiginde duzlesmeyi
+            # onlemek icindir. Burada iki arguman var; '@(, $ids), $StartTime'
+            # yazimi $EventIds'i IC ICE dizi ([object[]] icinde [object[]])
+            # yapiyordu ve Get-WinEvent ic ice Id dizisiyle HICBIR olayi
+            # eslestirmiyor - hata da vermiyor, "eslesen olay yok" diyor.
+            # Yani modul, 15004 olaylari GERCEKTEN varken bile "kaynak baskisi
+            # olayi yok / OK" raporluyordu: gercek bir baski kesintisi
+            # sagliklidir diye okunuyordu.
+            Invoke-Command -ComputerName $Server -ErrorAction Stop -ArgumentList $ids, $StartTime -ScriptBlock {
                 param($EventIds, $Start)
 
                 # Get-WinEvent eslesme yoksa hata firlatir; bu bir bulgu degil,
@@ -58,7 +72,18 @@ Register-EDModule @{
                     } -ErrorAction Stop)
                 }
                 catch {
-                    if ($_.Exception.Message -notlike '*No events were found*') {
+                    # "Eslesen olay yok" bir HATA DEGIL, en iyi haberdir. Ama
+                    # bu metin YERELLESIR: Turkce Windows'ta "Belirtilen
+                    # sorguyla eslesen olay bulunamadi." gelir ve duz Ingilizce
+                    # alt dize TUTMAZ. Tutmayinca probe hata dondurur, tek
+                    # sunuculu bir kurulumda $anyData false kalir ve modul
+                    # "Hicbir sunucudan olay gunlugu okunamadi / ERROR" der:
+                    # OLABILECEK EN SAGLIKLI durum (hic baski olayi yok),
+                    # aracin ASIL HEDEF PLATFORMUNDA okunamayan gunluk gibi
+                    # raporlaniyordu. Desen M41 ile ayni tutulur: ASCII nokta
+                    # jokerleri Turkce 's' ve noktasiz 'i' harflerini kapsar.
+                    $noEvents = 'No events were found|Belirtilen sorguyla e.le.en|bulunamad'
+                    if ($_.Exception.Message -notmatch $noEvents) {
                         return [pscustomobject]@{ Error = $_.Exception.Message; Events = @() }
                     }
                 }
@@ -90,6 +115,11 @@ Register-EDModule @{
         $cellStatus = @{}
         $evidence = @()
         $problems = @()
+        $recoveryNotes = @()
+        # Olculemeyen sunucular. Bunlar icin "olay yok" DENEMEZ; sayilari
+        # eksiktir ve tablonun geri kalanina bakip "temiz" demek, sampled veya
+        # kismi veriyi kesin bilgi gibi sunmak olur.
+        $unmeasured = @()
         $anyData = $false
 
         foreach ($result in $results) {
@@ -100,6 +130,7 @@ Register-EDModule @{
                     $table[$server] = $result.State
                 }
                 $cellStatus[$server] = $result.State
+                $unmeasured += ("{0} ({1})" -f $server, $result.State)
                 $log.Warn("M15/$server : $($result.State) - $($result.Error)")
                 continue
             }
@@ -111,6 +142,7 @@ Register-EDModule @{
                     $table[$server] = 'ERROR'
                 }
                 $cellStatus[$server] = 'ERROR'
+                $unmeasured += ("{0} (olay gunlugu okunamadi: {1})" -f $server, $probeError)
                 $log.Warn("M15/$server : olay gunlugu okunamadi - $probeError")
                 continue
             }
@@ -127,9 +159,13 @@ Register-EDModule @{
             $recoveryValues[$server] = $decreased.Count
 
             $latest = @($events | Sort-Object -Property { Get-EDProperty $_ 'Time' } -Descending | Select-Object -First 1)
+            $latestId = 0
+            $latestTime = $null
             if ($latest.Count -gt 0) {
+                $latestId = [int](Get-EDProperty $latest[0] 'Id' 0)
                 $time = Get-EDProperty $latest[0] 'Time'
-                $lastValues[$server] = $(if ($time) { ([datetime]$time).ToString('MM-dd HH:mm') } else { '-' })
+                if ($time) { $latestTime = [datetime]$time }
+                $lastValues[$server] = $(if ($latestTime) { $latestTime.ToString('MM-dd HH:mm') } else { '-' })
             }
             else { $lastValues[$server] = '-' }
 
@@ -157,6 +193,30 @@ Register-EDModule @{
             else {
                 $cellStatus[$server] = 'OK'
             }
+
+            # TOPARLANMA BAGLAMI. Hukum brief geregi FAIL KALIR - baski
+            # yasanmistir ve o sirada kabul edilmeyen mesajlar gecikmistir.
+            # Ama 23 saat once yukselip bir dakika sonra normale donmus bir
+            # baski ile HALA SUREN bir baski ayni cumleyle raporlanirsa
+            # operator kapanmis bir olayi canli sanip diskte/RAM'de su anda
+            # olmayan bir sorunu arar. 15005 zaten toplanmistir; burada nota
+            # tasinir: son olay toparlanma mi, ve ne kadar once oldu.
+            if ($cellStatus[$server] -eq 'FAIL') {
+                $ageText = 'zamani okunamadi'
+                if ($latestTime) {
+                    $minutes = [int][math]::Round(((Get-Date) - $latestTime).TotalMinutes)
+                    if ($minutes -lt 0) { $minutes = 0 }
+                    $ageText = $(if ($minutes -lt 90) { "$minutes dakika once" }
+                                 else { "{0} saat once" -f [int][math]::Round($minutes / 60) })
+                }
+                $counts = "15004 x$($increased.Count), 15005 x$($decreased.Count), 15006/15007 x$($rejecting.Count)"
+                if ($latestId -eq 15005) {
+                    $recoveryNotes += ("{0}: son olay TOPARLANMA (15005), {1} - baski gecmis gorunuyor ({2}). Hukum yine de FAIL: baski YASANDI ve o sirada mesajlar kabul edilmedi; gecikme sikayeti o pencereye denk geliyorsa sebep budur." -f $server, $ageText, $counts)
+                }
+                else {
+                    $recoveryNotes += ("{0}: son olay {1}, {2} ve ardindan toparlanma (15005) YOK - baski SURUYOR olabilir ({3})." -f $server, $latestId, $ageText, $counts)
+                }
+            }
         }
 
         if ($evidence.Count -gt 0) {
@@ -177,7 +237,19 @@ Register-EDModule @{
             $log.Warn("M15: $($problems -join ' | ')")
         }
         else {
-            $note += 'Kaynak baskisi olayi yok.'
+            # Bir sunucu olculemediyse cumle TUM tabloya mal edilemez: hukum
+            # yalnizca okunabilen sunucular icin gecerlidir.
+            $note += $(if ($unmeasured.Count -gt 0) { 'Olculebilen sunucularda kaynak baskisi olayi yok. ' }
+                       else { 'Kaynak baskisi olayi yok. ' })
+        }
+
+        if ($recoveryNotes.Count -gt 0) {
+            $note += ' DURUM: ' + ($recoveryNotes -join ' | ') + ' '
+        }
+        if ($unmeasured.Count -gt 0) {
+            # Olculemeyen sunucu ile TEMIZ sunucu ayni sey degildir: "olay yok"
+            # cumlesi yalnizca okunabilenler icin gecerlidir.
+            $note += ("OLCULEMEYEN SUNUCULAR: {0}. Bu sunucular icin 'baski olayi yok' DENEMEZ. " -f ($unmeasured -join ' | '))
         }
 
         $rows = @()

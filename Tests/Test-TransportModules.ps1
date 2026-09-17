@@ -18,6 +18,15 @@
            yoktu; TimeInServer = 3 ms / TimeInCPU = 0 olan bir posta kutusu
            kilit cekismesi sayilip M21/M22'ye yonlendiriliyordu.
 
+      M15: hic modul testi YOKTU. Iki ayri yanlis hukum vardi. (1) "Eslesen
+           olay yok" istisnasi duz INGILIZCE alt dize ile taniniyordu; Turkce
+           bir Windows'ta metin tutmuyor, EN SAGLIKLI durum (hic back pressure
+           olayi olmamasi) "olay gunlugu okunamadi / ERROR" olarak
+           raporlaniyordu - hem de aracin asil hedef platformunda. (2) 23 saat
+           once yukselip bir dakika sonra dusmus bir baski ile HALA SUREN bir
+           baski ayni cumleyle FAIL veriyordu; modulun elinde duran 15005
+           toparlanma bilgisi nota hic girmiyordu.
+
     Sahte yurutucu GERCEK ExecResult nesneleri uretir; hicbir sunucuya
     sorgu gitmez.
 #>
@@ -44,6 +53,7 @@ $config = Get-EDConfig -ProjectRoot $projectRoot
 Reset-EDModuleRegistry
 Import-EDModules -ModuleRoot (Join-Path $projectRoot 'Modules')
 $m14 = @(Get-EDModules -Id 'M14')[0]
+$m15 = @(Get-EDModules -Id 'M15')[0]
 $m16 = @(Get-EDModules -Id 'M16')[0]
 $m23 = @(Get-EDModules -Id 'M23')[0]
 
@@ -314,6 +324,223 @@ $mock = New-EDMockExecutor @{ 'Get-StoreUsageStatistics' = { param($Key, $Identi
 $twoDbResult = @(& $m23.Run (New-TransportContext -Executor $mock))
 $twoDbRow = Get-EDTestRowSafe $twoDbResult 'TimeInServer max (DB bazinda)'
 Assert-True 'Iki DB varsa referans DB02 gosterildi' ($twoDbRow.Note -like '*DB02*') $twoDbRow.Note
+
+# ===========================================================================
+# M15 icin sahte yurutucu - digerlerinden BILINCLI olarak farklidir.
+#
+# M15'in hukmu modulun KENDI PROBE KODUNUN icinde baslar: "eslesen olay yok"
+# istisnasinin bulgu mu yoksa iyi haber mi sayilacagi orada karara baglanir.
+# Hazir satir enjekte eden sahte yurutucu o kodu HIC calistirmaz; yani asil
+# kusur o yolla test EDILEMEZ. Bu yuzden buradaki yurutucu, gorevin GERCEK
+# betik metnini ([scriptblock]::Create ile) calistirir ve yalnizca en dis iki
+# cmdlet'i saplar: WinRM tasiyicisi Invoke-Command ve Get-WinEvent. Gercek
+# sunucuya hicbir sorgu gitmez, hicbir olay gunlugu okunmaz.
+# ===========================================================================
+
+$script:M15Plan = @{}
+$script:M15ProbeEvents = @()
+$script:M15ProbeThrow = ''
+# Bu en-US host'ta Get-WinEvent'in gercekten firlattigi metin.
+$script:M15NoEventsMessage = 'No events were found that match the specified selection criteria.'
+
+function Invoke-Command {
+    <#
+        WinRM tasiyicisinin saplamasi: blok uzak makinede degil burada kosar.
+        Modul icin fark yoktur - tasidigi blok aynen calisir.
+    #>
+    [CmdletBinding()]
+    param([string]$ComputerName, [object[]]$ArgumentList, [scriptblock]$ScriptBlock)
+    return & $ScriptBlock @ArgumentList
+}
+
+function Get-WinEvent {
+    <#
+        Get-WinEvent saplamasi. Gercek cmdlet'in test icin onemli olan IKI
+        davranisini taklit eder:
+          1. Filtre SUNUCU TARAFINDA uygulanir (Id + StartTime).
+          2. Hicbir olay eslesmiyorsa deger dondurmez, ISTISNA firlatir - ve
+             o istisnanin metni YERELLESMISTIR.
+
+        Isletim sisteminin dili test icinde degistirilemez; ama modulun
+        gordugu tek sey bu metindir. Metni Turkce vermek, Turkce bir
+        Windows'ta olusan durumun TA KENDISIDIR: kod yolu, karsilastirma ve
+        sonuc birebir aynidir.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$FilterHashtable, [int]$MaxEvents)
+
+    if ($script:M15ProbeThrow) { throw $script:M15ProbeThrow }
+
+    $ids = @($FilterHashtable['Id'])
+    $start = [datetime]$FilterHashtable['StartTime']
+    $matched = @($script:M15ProbeEvents | Where-Object { $_.Id -in $ids -and $_.TimeCreated -ge $start })
+    if ($matched.Count -eq 0) { throw $script:M15NoEventsMessage }
+    return $matched
+}
+
+function New-M15Event {
+    param(
+        [int]$Id, [double]$MinutesAgo,
+        [string]$Provider = 'MSExchangeTransport',
+        [string]$Message = 'The resource pressure increased from Normal to Medium.'
+    )
+    return [pscustomobject]@{
+        Id = $Id; TimeCreated = (Get-Date).AddMinutes(-1 * $MinutesAgo)
+        ProviderName = $Provider; Message = $Message
+    }
+}
+
+function New-M15Executor {
+    <#
+        $Plan: sunucu adi -> plan nesnesi.
+          @{ Events = @(...) }          : bu olaylar gunlukte VARDIR
+          @{ ThrowMessage = '...' }     : Get-WinEvent bu metinle patlar
+          New-EDMockTimeout / -Error    : gorev hic sonuc uretmez
+    #>
+    param([hashtable]$Plan)
+
+    $script:M15Plan = $Plan
+    $mock = [pscustomobject]@{ ExchangeConnection = 'mock'; Parallelism = 1 }
+    $mock | Add-Member -MemberType ScriptMethod -Name RunLocal -Value {
+        param($Tasks)
+        $out = @()
+        foreach ($task in $Tasks) {
+            # Yerel gorevde komut hatti (Steps) YOKTUR: betik metni
+            # $task.Script alaninda, argumanlar $task.Parameters icindedir.
+            $server = [string]$task.Parameters['Server']
+            $start = $task.Parameters['StartTime']
+            $plan = $script:M15Plan[$server]
+
+            $result = New-Object ExchangeDiag.ExecResult
+            $result.Key = $task.Key
+
+            $outcome = Test-EDMockOutcome -Rows @($plan)
+            if ($null -ne $outcome) {
+                $result.Output = [System.Management.Automation.PSObject[]]@()
+                $result.DurationMs = [double]$outcome.DurationMs
+                if ($outcome.EDMockOutcome -eq 'TimedOut') { $result.TimedOut = $true }
+                else { $result.Error = [string]$outcome.Error }
+            }
+            else {
+                $script:M15ProbeEvents = @(Get-EDProperty $plan 'Events' @())
+                $script:M15ProbeThrow = [string](Get-EDProperty $plan 'ThrowMessage' '')
+                # Modulun GERCEK probe kodu; saplanan yalnizca iki cmdlet.
+                $probe = [scriptblock]::Create($task.Script)
+                $rows = @(& $probe $server $start)
+                $result.Output = [System.Management.Automation.PSObject[]]@($rows | ForEach-Object { [psobject]$_ })
+            }
+            $out += $result
+        }
+        return $out
+    }
+    return $mock
+}
+
+function Invoke-M15 {
+    param([hashtable]$Plan, $Servers = $null)
+    return @(& $m15.Run (New-TransportContext -Executor (New-M15Executor -Plan $Plan) -Servers $Servers))
+}
+
+# ===========================================================================
+Write-Host "`n=== 10. M15: tek 15004 FAIL ve gerekcesi ===" -ForegroundColor Cyan
+
+# Brief: herhangi biri = FAIL. Ayni ID'yi kullanan baska bir saglayici
+# (Exchange disi) sayima GIRMEMELIDIR; girerse sucsuz bir uygulamanin olayi
+# transport'a yazilmis olur.
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{ Events = @(
+    (New-M15Event -Id 15004 -MinutesAgo 120)
+    (New-M15Event -Id 15004 -MinutesAgo 60 -Provider 'BaskaUygulama')
+) } }
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+
+Assert-Equal '15004 -> FAIL' 'FAIL' $pressureRow.Status
+Assert-Equal 'Exchange disi saglayici sayilmadi' 1 $pressureRow.Values['SRV1']
+Assert-True 'Kuyruklarin BOS gorunecegi yazildi' ($pressureRow.Note -like '*kuyruklar BOS gorunur*') $pressureRow.Note
+Assert-True 'Sebep icin M05/M21 gosterildi' `
+    ($pressureRow.Note -like '*M05*' -and $pressureRow.Note -like '*M21*') $pressureRow.Note
+Assert-True 'Baskinin SURUYOR olabilecegi soylendi (son olay toparlanma degil)' `
+    ($pressureRow.Note -like '*SURUYOR olabilir*') $pressureRow.Note
+
+# ===========================================================================
+Write-Host "`n=== 11. M15: toparlanmis baski FAIL kalir ama BAGLAMIYLA ===" -ForegroundColor Cyan
+
+# 23 saat once yukselmis, bir dakika sonra normale donmus bir baski. Brief
+# geregi hukum yine FAIL'dir (o sirada mesajlar kabul edilmemistir) - ama
+# operator "su anda baski altindayim" diye okursa kapanmis bir olayi canli
+# sanip yanlis yerde arar. 15005 zaten modulun elindedir.
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{ Events = @(
+    (New-M15Event -Id 15004 -MinutesAgo 1380)
+    (New-M15Event -Id 15005 -MinutesAgo 1379 -Message 'The resource pressure decreased from Medium to Normal.')
+) } }
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+
+Assert-Equal 'Toparlanmis baski yine FAIL (brief)' 'FAIL' $pressureRow.Status
+Assert-True 'Notta toparlanma (15005) anildi' ($pressureRow.Note -like '*15005*') $pressureRow.Note
+Assert-True 'Son olayin TOPARLANMA oldugu yazildi' ($pressureRow.Note -like '*TOPARLANMA*') $pressureRow.Note
+Assert-True 'Ne kadar once oldugu yazildi' ($pressureRow.Note -match '\d+\s+saat once') $pressureRow.Note
+Assert-True 'Baski hala suruyor IDDIASI kurulmadi' ($pressureRow.Note -notlike '*SURUYOR olabilir*') $pressureRow.Note
+Assert-Equal 'Toparlanma satirinda sayi 1' 1 (Get-EDTestRowSafe $rows 'Toparlanma (15005)').Values['SRV1']
+
+# ===========================================================================
+Write-Host "`n=== 12. M15: hic olay yok = OK (ERROR DEGIL) ===" -ForegroundColor Cyan
+
+# Get-WinEvent eslesme bulamayinca ISTISNA firlatir. Bu, olabilecek EN
+# SAGLIKLI durumdur: hic back pressure olayi yok.
+$script:M15NoEventsMessage = 'No events were found that match the specified selection criteria.'
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{ Events = @() } }
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+Assert-Equal 'Olay yok -> OK' 'OK' $pressureRow.Status
+Assert-Equal 'Olay yok -> 0 olay' 0 $pressureRow.Values['SRV1']
+Assert-True 'Olay olmadigi acikca soylendi' ($pressureRow.Note -like '*kaynak baskisi olayi yok*') $pressureRow.Note
+
+# ===========================================================================
+Write-Host "`n=== 13. M15: YERELLESMIS 'olay yok' metni de OK ===" -ForegroundColor Cyan
+
+# Turkce Windows'ta ayni istisnanin metni farklidir ve ASCII degildir. Dosya
+# ASCII kalsin diye harfler kod noktasiyla yazilir: s-cedilla (015F) ve
+# noktasiz i (0131). Metin disinda hicbir sey degismez - modulun gordugu tek
+# sey zaten bu metindir, dolayisiyla bu Turkce bir host'un TA KENDISIDIR.
+$script:M15NoEventsMessage = ('Belirtilen sorguyla e{0}le{0}en olay bulunamad{1}.' -f [char]0x015F, [char]0x0131)
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{ Events = @() } }
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+Assert-Equal 'Turkce "olay yok" metni de OK' 'OK' $pressureRow.Status
+Assert-True 'Olay gunlugu OKUNAMADI denmedi' ($pressureRow.Note -notlike '*okunamadi*') $pressureRow.Note
+Assert-Equal 'Hucre de OK' 'OK' $pressureRow.CellStatus['SRV1']
+$script:M15NoEventsMessage = 'No events were found that match the specified selection criteria.'
+
+# ===========================================================================
+Write-Host "`n=== 14. M15: gercekten okunamayan gunluk ERROR'dur ===" -ForegroundColor Cyan
+
+# "Olay yok" ile "gunluk okunamadi" AYNI SEY DEGILDIR; ikincisinde 0 yazmak
+# uydurma olur. Not, 12/13'teki OK notundan ayirt edilebilmelidir.
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{
+    ThrowMessage = 'Attempted to perform an unauthorized operation.' } }
+# Hicbir sunucu okunamadiginda modul tek bir teshis satiri dondurur ve o
+# satirin adi digerlerinden farklidir ('Back pressure olaylari'): tablo
+# "0 olay" gibi okunacak sayi sutunlari URETMEZ.
+$pressureRow = Get-EDTestRowSafe $rows 'Back pressure olaylari'
+Assert-Equal 'Okunamayan gunluk -> ERROR' 'ERROR' $pressureRow.Status
+Assert-Equal 'Hucre de ERROR' 'ERROR' $pressureRow.CellStatus['SRV1']
+Assert-True 'Deger olarak 0 UYDURULMADI' ("$($pressureRow.Values['SRV1'])" -ne '0') $pressureRow.Values['SRV1']
+Assert-True 'Not ayirt edilebilir' `
+    ($pressureRow.Note -like '*okunamadi*' -and $pressureRow.Note -notlike '*kaynak baskisi olayi yok*') $pressureRow.Note
+
+# ===========================================================================
+Write-Host "`n=== 15. M15: zaman asimi hucresi TIMEOUT ve notta gorunur ===" -ForegroundColor Cyan
+
+# Bir sunucu zaman asimina ugrarken digeri temizse, temiz sunucunun "olay
+# yok" hukmu TUM tabloya mal edilemez: olculmemis sunucu icin 'olay yok'
+# denemez.
+$twoServers = @((New-EDTestServer -Name 'SRV1'), (New-EDTestServer -Name 'SRV2'))
+$rows = Invoke-M15 -Servers $twoServers -Plan @{
+    'SRV1' = (New-EDMockTimeout -DurationMs 180000)
+    'SRV2' = [pscustomobject]@{ Events = @() }
+}
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+Assert-Equal 'Zaman asimi hucresi TIMEOUT' 'TIMEOUT' $pressureRow.CellStatus['SRV1']
+Assert-Equal 'Olculebilen sunucu OK' 'OK' $pressureRow.CellStatus['SRV2']
+Assert-Equal 'Satir hukmu TIMEOUT (sessizce OK degil)' 'TIMEOUT' $pressureRow.Status
+Assert-True 'Olculemeyen sunucu notta adiyla anildi' ($pressureRow.Note -like '*SRV1*') $pressureRow.Note
 
 # ===========================================================================
 Write-EDTestSummary
