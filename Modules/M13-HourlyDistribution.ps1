@@ -65,15 +65,22 @@ Register-EDModule @{
         # uygularsa zaman asimini KOTULESTIRIR. Genisletme tavsiyesi yalnizca
         # okumanin BASARILI oldugu sunucular icin gecerlidir.
         $readFailedServers = @()
+        $readFailedDetails = @()
         $partialServers = @()
+        $partialDetails = @()
+        $deadlineServers = @()
+        $fileFailServers = @()
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
             $analysis = $analyses[$server]
 
-            # Okuma hic olmadiysa saat kirilimi de yoktur: bu sunucu icin
-            # "pencere yetersiz" demek, olculmemis bir seyin sebebini
-            # uydurmaktir.
-            if ([bool](Get-EDProperty $analysis 'ReadFailed' $false)) {
+            # Kismilik TEK bayraktan okunur (IsPartial), SEBEP ayri tasinir.
+            # ReadFailed'a tek basina bakmak yetmez: ham yolda dosyalarin biri
+            # okunamadiginda da kurulur ve o sunucuda SAAT KIRILIMI OLABILIR.
+            # Ayirt edici olcut "hic saat kovasi var mi" sorusudur.
+            $isPartial = [bool](Get-EDProperty $analysis 'IsPartial' $analysis.Truncated)
+            $partialReason = [string](Get-EDProperty $analysis 'PartialReason' '')
+            if ($isPartial -and $analysis.ByHourLocal.Count -eq 0) {
                 $peakHourValues[$server] = 'N/A'; $peakP95Values[$server] = 'N/A'
                 $quietHourValues[$server] = 'N/A'; $quietP95Values[$server] = 'N/A'
                 $ratioValues[$server] = 'N/A'
@@ -81,14 +88,19 @@ Register-EDModule @{
                 # "kavram gecerli degil" gibi okunabilir.
                 $cellStatus[$server] = 'WARN'
                 $readFailedServers += $server
+                $readFailedDetails += $(if ($partialReason) { "$server ($partialReason)" } else { $server })
                 continue
             }
-            if ([bool](Get-EDProperty $analysis 'Truncated' $false)) {
+            if ($isPartial) {
                 # Okuma kismi: saatlerin bir kismi hic okunmamis olabilir,
                 # yani "yeterli saat yok" hukmu de ornekten degil EKSIK
                 # OKUMADAN geliyor olabilir. Sunucu kirilimdan cikarilmaz
                 # ama hukum ve tavsiye bunu soylemek zorunda.
                 $partialServers += $server
+                $partialDetails += $(if ($partialReason) { "$server ($partialReason)" } else { $server })
+                if ([bool](Get-EDProperty $analysis 'TruncatedByDeadline' $false)) { $deadlineServers += $server }
+                if ([long](Get-EDProperty $analysis 'FilesFailed' 0) -gt 0 -or
+                    [bool](Get-EDProperty $analysis 'TruncatedByReadFailure' $false)) { $fileFailServers += $server }
             }
 
             # Yeterli orneklemi olan saatler.
@@ -189,16 +201,23 @@ Register-EDModule @{
         $failureNotes = @()
         $failureStatus = 'OK'
         if ($readFailedServers.Count -gt 0) {
-            $part = "OLCULEMEDI - tracking log OKUNAMADI ($($readFailedServers -join ', ')): saat kirilimi bu sunucular icin HIC hesaplanmadi. "
-            $part += 'Bu bir "ornek yetersiz" durumu DEGILDIR; pencereyi GENISLETMEYIN - genisletmek zaman asimini kotulestirir. '
-            $part += 'Once -WindowHours ile DARALTIP tekrar deneyin (M10 ayni sunucular icin ayni seyi soyler).'
+            $part = "OLCULEMEDI - tracking log OKUNAMADI ($($readFailedDetails -join ', ')): saat kirilimi bu sunucular icin HIC hesaplanmadi. "
+            $part += 'Bu bir "ornek yetersiz" durumu DEGILDIR; pencereyi GENISLETMEYIN. '
+            $part += 'Sebep zaman siniri ise pencereyi -WindowHours ile DARALTIN; dosya okunamadiysa daraltmak COZMEZ - '
+            $part += 'dosya kilidi, NTFS/share izni, antivirus ya da kopmus SMB baglantisi arayin (M10 ayni sunucular icin ayni seyi soyler).'
             $failureNotes += $part
             $failureStatus = 'WARN'
         }
         if ($partialServers.Count -gt 0) {
-            $part = "PENCERE KISMI ($($partialServers -join ', ')): zaman siniri okumayi kesti, saatlerin bir kismi hic okunmamis olabilir. "
-            $part += 'Tepe ve sakin saat secimi eksik veriden yapilmis olabilir; pencereyi -WindowHours ile DARALTIP tekrar calistirin.'
-            $failureNotes += $part
+            $part = "PENCERE KISMI ($($partialDetails -join ', ')): okuma yarida kaldi, saatlerin bir kismi hic okunmamis olabilir. "
+            $part += 'Tepe ve sakin saat secimi eksik veriden yapilmis olabilir. '
+            if ($deadlineServers.Count -gt 0) {
+                $part += "Zaman siniri kesenlerde ($($deadlineServers -join ', ')) pencereyi -WindowHours ile DARALTIN. "
+            }
+            if ($fileFailServers.Count -gt 0) {
+                $part += "Dosyasi okunamayanlarda ($($fileFailServers -join ', ')) pencereyi daraltmak COZMEZ - kilit/izin/antivirus/SMB arayin. "
+            }
+            $failureNotes += $part.TrimEnd()
             $failureStatus = 'WARN'
         }
 

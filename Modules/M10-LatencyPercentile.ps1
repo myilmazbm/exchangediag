@@ -47,12 +47,23 @@ Register-EDModule @{
         # hesaplanmistir ve bu, rapora cikmadan yalnizca log'a yazilirsa
         # aracin uretebilecegi en tehlikeli ciktidir (yanlis sunucuyu suclar).
         $partialServers = @()
+        # KISMILIGIN SEBEBI DE TASINIR. Ayristirici artik zaman sinirini
+        # (TruncatedByDeadline) okunamayan dosyadan (TruncatedByReadFailure)
+        # ayiriyor ve ikisinin TAVSIYESI TERSTIR: birinde pencereyi daraltmak
+        # coz, digerinde hicbir sey degistirmez. Tek bir "PENCERE KISMI"
+        # cumlesi, yanlis sebebi yanlis eyleme baglardi.
+        $partialDetails = @()
+        $deadlineServers = @()
+        $fileFailServers = @()
         $coverageValues = @{}
         $coverageStatus = @{}
         # DELIVER okundu ama hicbirinden gecikme turetilemedi: "olay yok" ile
         # ayni sey DEGIL ve rapor ikisini karistirmamali.
         $eventsNoLatency = @()
         $readFailedServers = @()
+        $readFailedDetails = @()
+        $cmdletReadFailure = $false
+        $rawReadFailure = $false
         $anyData = $false
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
@@ -62,11 +73,24 @@ Register-EDModule @{
 
             foreach ($warning in $analysis.Warnings) { $log.Info("M10/$server : $warning") }
 
-            if ($analysis.Truncated) {
+            # KISMILIK TEK BAYRAKTAN OKUNUR: IsPartial. Eskiden yalnizca
+            # Truncated'a bakiliyordu ve not kosulsuz "zaman siniri kesti"
+            # diyordu; okunamayan bir dosyada bu YANLIS SEBEPTIR ve yanlis
+            # eyleme (pencereyi daralt) baglar.
+            $partialReason = [string](Get-EDProperty $analysis 'PartialReason' '')
+            $filesFailed = [long](Get-EDProperty $analysis 'FilesFailed' 0)
+            if ([bool](Get-EDProperty $analysis 'IsPartial' $analysis.Truncated)) {
                 $partialServers += $server
-                $coverageValues[$server] = "KISMI $($analysis.FilesProcessed)/$($analysis.FilesScanned) dosya"
+                $partialDetails += $(if ($partialReason) { "$server ($partialReason)" } else { $server })
+                if ([bool](Get-EDProperty $analysis 'TruncatedByDeadline' $false)) { $deadlineServers += $server }
+                if ($filesFailed -gt 0 -or [bool](Get-EDProperty $analysis 'TruncatedByReadFailure' $false)) {
+                    $fileFailServers += $server
+                }
+                $cell = "KISMI $($analysis.FilesProcessed)/$($analysis.FilesScanned) dosya"
+                if ($filesFailed -gt 0) { $cell += " ($filesFailed okunamadi)" }
+                $coverageValues[$server] = $cell
                 $coverageStatus[$server] = 'WARN'
-                $log.Warn("M10/$server : zaman siniri kesti; persentiller EKSIK pencereden hesaplandi.")
+                $log.Warn("M10/$server : SONUC KISMI ($partialReason); persentiller EKSIK pencereden hesaplandi.")
             }
             elseif ($analysis.Via -eq 'smb') {
                 $coverageValues[$server] = "tam $($analysis.FilesScanned) dosya"
@@ -85,6 +109,14 @@ Register-EDModule @{
                 # de TERSTIR (pencereyi genisletmek, timeout'u kotulestirir).
                 if ([bool](Get-EDProperty $analysis 'ReadFailed' $false)) {
                     $readFailedServers += $server
+                    # SEBEP ve OKUMA YOLU birlikte yazilir: dogru EYLEM ikisine
+                    # birden baglidir (cmdlet yolunda sorgu zaman asimi -
+                    # pencereyi daraltmak ise yarar; ham yolda okunamayan dosya -
+                    # daraltmak hicbir sey degistirmez, kilit/izin/AV aranir).
+                    $detailText = "$server ($(if ($partialReason) { $partialReason } else { 'okuma hatasi' }), yol: $($analysis.Via)"
+                    if ($filesFailed -gt 0) { $detailText += ", $filesFailed dosya okunamadi" }
+                    $readFailedDetails += ($detailText + ')')
+                    if ($analysis.Via -eq 'cmdlet') { $cmdletReadFailure = $true } else { $rawReadFailure = $true }
                     # OKUNAMAYAN SAYI 0 DEGILDIR. Ayni satirda hem 'N/A' hem
                     # 0 yazmak, sunucuyu "teslim yapmadi ama saglikli" diye
                     # okutuyordu; oysa hicbir sey OLCULMEDI.
@@ -130,7 +162,7 @@ Register-EDModule @{
                 $log.Info("M10/$server : pasif sitede, $status bulgusu PASSIVE olarak etiketlendi.")
                 $status = 'PASSIVE'
             }
-            if ($analysis.Truncated) {
+            if ([bool](Get-EDProperty $analysis 'IsPartial' $analysis.Truncated)) {
                 # Satiri WARN yapmak yetmez: hucre esik hukmunu (yesil OK)
                 # gostermeye devam ederse operator o sayiya guvenir.
                 $status = Get-EDWorstStatus @($status, 'WARN')
@@ -149,9 +181,14 @@ Register-EDModule @{
                 Max              = [math]::Round($stats.Max, 3)
                 Ortalama         = [math]::Round($stats.Mean, 3)
                 P99OrtalamaOrani = [math]::Round($stats.P99 / [math]::Max($stats.Mean, 0.001), 1)
-                Kismi            = $analysis.Truncated
+                # "Kismi mi" sorusunun cevabi tek bayrakta; SEBEBI ayri
+                # sutunda. Kanit dosyasinda da ikisi birlikte durmali, cunku
+                # tartisma cikinca sorulan ilk sey "neden eksikti" olur.
+                Kismi            = [bool](Get-EDProperty $analysis 'IsPartial' $analysis.Truncated)
+                KismiSebep       = $partialReason
                 DosyaBulunan     = $analysis.FilesScanned
                 DosyaIslenen     = $analysis.FilesProcessed
+                DosyaOkunamayan  = $filesFailed
                 DeliverOlayi     = $analysis.DeliverEvents
                 GecikmeYok       = $analysis.LatencyMissing
                 SaatKaymasi      = $analysis.NegativeLatency
@@ -191,11 +228,20 @@ Register-EDModule @{
         $failureNotes = @()
         $failureStatus = 'OK'
         if ($readFailedServers.Count -gt 0) {
-            $note = "OLCULEMEDI - tracking log OKUNAMADI ($($readFailedServers -join ', ')): sorgu hata verdi veya zaman asimina ugradi. "
+            $note = "OLCULEMEDI - tracking log OKUNAMADI ($($readFailedDetails -join ', ')). "
             $note += 'Bu bir bulgu YOKLUGU degil, olcum eksikligidir: bu sunucularin hucreleri N/A, teslim sayilari BILINMIYOR '
-            $note += 've kiyasa (ORGU P1) girmezler. Pencereyi GENISLETMEYIN - '
-            $note += 'once -WindowHours ile DARALTIP tekrar deneyin, ham log erisimi (-LogAccess Smb) acilabiliyorsa cok daha hizlidir.'
-            $failureNotes += $note
+            $note += 've kiyasa (ORGU P1) girmezler. Pencereyi GENISLETMEYIN. '
+            # TAVSIYE SEBEBE GORE AYRILIR. Ayni cumleyi iki sebebe birden
+            # vermek, birinde kesin ise yaramayan bir eylem onermek demektir.
+            if ($cmdletReadFailure) {
+                $note += 'Cmdlet yolunda sorgu hata verdi veya zaman asimina ugradi: once -WindowHours ile DARALTIP tekrar deneyin; '
+                $note += 'ham log erisimi (-LogAccess Smb) acilabiliyorsa cok daha hizlidir. '
+            }
+            if ($rawReadFailure) {
+                $note += 'Ham log yolunda dosya okunamadi: pencereyi daraltmak ya da genisletmek bunu COZMEZ - '
+                $note += 'dosya kilidi (baska bir surec dosyayi paylasimsiz acmis), NTFS/share izni, antivirus ya da kopmus SMB baglantisi arayin. '
+            }
+            $failureNotes += $note.TrimEnd()
             $failureStatus = 'WARN'
         }
         if ($eventsNoLatency.Count -gt 0) {
@@ -208,6 +254,25 @@ Register-EDModule @{
         # yoktu. Hucrede 0 yazar ve satirin hukmunu yukseltmez - ama yine de
         # adlandirilir, cunku "veri yok" ile "sifir teslim" arasindaki farki
         # ancak sunucu adini goren operator dogrulayabilir.
+        # KISMILIK CUMLESI DE TEK YERDE kurulur ve EYLEMI sebebe gore verir.
+        # Bu cumle dort ayri yerde kullaniliyor; metin oralara kopyalanirsa
+        # biri gunceldigi gun digerleri eski sebebi soylemeye devam eder.
+        $partialNote = ''
+        $partialTagShort = ''
+        if ($partialServers.Count -gt 0) {
+            $partialNote = "SONUC KISMI ($($partialDetails -join ', ')): bu sunucularin persentilleri pencerenin "
+            $partialNote += 'TAMAMINI temsil etmez ve sunucular arasi kiyas (ORGU P1) yaniltici olabilir. '
+            if ($deadlineServers.Count -gt 0) {
+                $partialNote += "Zaman siniri kesenlerde ($($deadlineServers -join ', ')) pencereyi -WindowHours ile DARALTIN. "
+            }
+            if ($fileFailServers.Count -gt 0) {
+                $partialNote += "Dosyasi okunamayanlarda ($($fileFailServers -join ', ')) pencereyi daraltmak ya da genisletmek COZMEZ - "
+                $partialNote += 'dosya kilidi, NTFS/share izni, antivirus ya da kopmus SMB baglantisi arayin. '
+            }
+            $partialNote = $partialNote.TrimEnd()
+            $partialTagShort = "SONUC KISMI ($($partialDetails -join ', ')). "
+        }
+
         $noEventNote = ''
         if ($noDataServers.Count -gt 0) {
             $noEventNote = "Pencerede DELIVER olayi bulunamadi ($($noDataServers -join ', ')); bu sunucularda okuma BASARILI, teslim sayisi gercekten 0."
@@ -219,7 +284,7 @@ Register-EDModule @{
         $contextRows = @()
         if ($partialServers.Count -gt 0) {
             $contextRows += New-EDRow -Module 'M10' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
-                -Status 'WARN' -Note 'Zaman siniri okumayi kesti; isaretli sunucularda persentiller eksik pencereden hesaplandi.'
+                -Status 'WARN' -Note ('Isaretli sunucularda persentiller EKSIK pencereden hesaplandi. ' + $partialNote)
         }
         if ($Context.VerifyParser) {
             $log.Info('M10: -VerifyParser istendi; ham ayristirici cmdlet ile karsilastiriliyor.')
@@ -240,8 +305,7 @@ Register-EDModule @{
         if (-not $anyData) {
             # Neden uc ayri sey olabilir ve tavsiye her birinde FARKLI.
             if ($partialServers.Count -gt 0) {
-                $detail = "Zaman siniri okumayi kesti ($($partialServers -join ', ')); gecikme hesaplanamadi. "
-                $detail += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
+                $detail = 'Okuma EKSIK kaldi ve gecikme hesaplanamadi. ' + $partialNote
                 $noDataStatus = 'WARN'
             }
             elseif ($failureNotes.Count -gt 0) {
@@ -367,12 +431,6 @@ Register-EDModule @{
         }
 
         $rows = @()
-        $partialNote = ''
-        if ($partialServers.Count -gt 0) {
-            $partialNote = "PENCERE KISMI: $($partialServers -join ', ') sunucusunda zaman siniri okumayi kesti; "
-            $partialNote += 'bu sunucularin persentilleri pencerenin TAMAMINI temsil etmez ve sunucular arasi '
-            $partialNote += 'kiyas (ORGU P1) yaniltici olabilir. Pencereyi daraltin (-WindowHours) ve tekrar calistirin.'
-        }
         # OLCULEMEYEN SUNUCU EN ONDE yazilir: bir kiyas notu, kiyasa hic
         # giremeyen sunucularin adini gormeden okunamaz.
         $p95Note = (@(@($failureNotes) + @($noEventNote, $partialNote, $outlierNote, $windowNote)) | Where-Object { $_ }) -join ' '
@@ -385,7 +443,7 @@ Register-EDModule @{
             -Unit 'sn' -Status $overallStatus -Patterns @('P1', 'P6') -Note $p95Note
         # p50/p99/max/ortalama da ayni eksik pencereden geliyor; notsuz
         # birakilirsa "yetkili sayi" gibi okunurlar.
-        $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
+        $partialTag = $partialTagShort
         # Olculemeyen sunucular bu satirlarda da N/A yazar; SEBEBI yazmazsak
         # okuyucu N/A'i "bu sunucuda sorun yok" diye gecistirebilir. Hukum
         # burada yukseltilmez - bulgu tablosunu ayni olaydan turemis bes

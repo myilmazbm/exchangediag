@@ -349,7 +349,15 @@ function New-PhaseStub {
     $breakdown.MessagesSeen = $Samples
     $breakdown.FilesScanned = 4
     $breakdown.FilesProcessed = 4
+    $breakdown.MessageLimit = 2000000
     $breakdown.TruncatedByLimit = [bool]$TruncatedByLimit
+    if ($TruncatedByLimit) {
+        # Kirpilan MESAJ sayisi olculemez; kirpilmayan olcu OLAY sayisidir.
+        # Tavan dolunca zincire aday olaylarin bir kismi hicbir zincire
+        # yazilamaz ve hukmun dayandigi pay budur.
+        $breakdown.ChainEventsSeen = 8000000
+        $breakdown.ChainEventsDropped = 3000000
+    }
     return $breakdown
 }
 
@@ -614,7 +622,10 @@ $partial = New-HourlyAnalysis -Server 'SRV1' -HoursSpec @{
     13 = @{ P95 = 2.5; Count = 900 }
     14 = @{ P95 = 2.5; Count = 900 }
 }
+# Zaman siniri kesti: ayristirici bu yolda iki bayragi birden kurar ve
+# TAVSIYE (pencereyi daralt) sebebin bu olmasina baglidir.
 $partial.Truncated = $true
+$partial.TruncatedByDeadline = $true
 Set-AnalysisCache -Context $context -Analyses @($partial)
 $rows = @(& $m13.Run $context)
 $ratioRow = Get-EDTestRow $rows 'Yogun/sakin p95 orani'

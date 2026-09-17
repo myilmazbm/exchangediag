@@ -101,11 +101,16 @@ Register-EDModule @{
         # altinda kalan sunucular: WARN degil bilgi.
         $belowFloorServers = @()
         $partialServers = @()
+        # Kismiligin SEBEBI: "SRV1 (mesaj tavani (ornekleme))" gibi.
+        $partialDetails = @()
+        $deadlineServers = @()
+        $fileFailServers = @()
         # Mesaj sayisi tavani asildigi icin ORNEKLEM uzerinden hukum verilen
-        # sunucular. Zaman siniriyle (Truncated) ayni sey DEGILDIR: orada
-        # dosyalarin bir kismi hic okunmaz, burada butun dosyalar okunur ama
-        # tavandan sonraki YENI mesajlar zincire hic girmez.
+        # sunucular. Zaman siniriyle ayni sey DEGILDIR: orada dosyalarin bir
+        # kismi hic okunmaz, burada butun dosyalar okunur ama tavandan
+        # sonraki YENI mesajlar hicbir zincire girmez.
         $sampledServers = @()
+        $sampleDetails = @()
         # Faz hukmu eksik nufustan verilen sunucular.
         $incompleteServers = @()
         # Tek bir mesajin bile zinciri kurulamayan sunucular: bu, eksik
@@ -176,17 +181,46 @@ Register-EDModule @{
             # bakilip hucreye "tam N dosya / OK" yaziliyor, "Baskin faz:
             # Store" hukmu de o ORNEKTEN kuruluyordu. Dosyalarin hepsi
             # okunmustu - ama mesajlarin hepsi degil.
-            if ($breakdown.Truncated) {
+            # Kismilik TEK bayraktan (IsPartial) okunur, SEBEP ise ayri
+            # tasinir: zaman siniri / okuma hatasi / mesaj tavani ucunun de
+            # tavsiyesi farklidir ve tek bir "zaman siniri kesti" cumlesi
+            # ikisinde YANLIS sebep olurdu.
+            $partialReason = [string](Get-EDProperty $breakdown 'PartialReason' '')
+            $filesFailed = [long](Get-EDProperty $breakdown 'FilesFailed' 0)
+            $byLimit = [bool](Get-EDProperty $breakdown 'TruncatedByLimit' $false)
+            $byDeadline = [bool](Get-EDProperty $breakdown 'TruncatedByDeadline' $false)
+            $byReadFailure = ([bool](Get-EDProperty $breakdown 'TruncatedByReadFailure' $false) -or
+                              [bool](Get-EDProperty $breakdown 'ReadFailed' $false) -or $filesFailed -gt 0)
+
+            if ([bool](Get-EDProperty $breakdown 'IsPartial' $breakdown.Truncated)) {
                 $partialServers += $server
-                $coverageValues[$server] = "KISMI $($breakdown.FilesProcessed)/$($breakdown.FilesScanned) dosya"
+                $partialDetails += $(if ($partialReason) { "$server ($partialReason)" } else { $server })
+                if ($byDeadline) { $deadlineServers += $server }
+                if ($byReadFailure) { $fileFailServers += $server }
+
+                $cellParts = @()
+                if ($byDeadline -or $byReadFailure) {
+                    $cell = "KISMI $($breakdown.FilesProcessed)/$($breakdown.FilesScanned) dosya"
+                    if ($filesFailed -gt 0) { $cell += " ($filesFailed okunamadi)" }
+                    $cellParts += $cell
+                }
+                if ($byLimit) {
+                    # KIRPILAN MESAJ SAYISI OLCULEMEZ (tavan altinda benzersiz
+                    # kimlikleri saymak, tam da tavanin engelledigi bellegi
+                    # ister). Kirpilmayan tek buyukluk OLAY sayisidir; hukmun
+                    # hangi paya dayandigi da oradan okunur.
+                    $sampledServers += $server
+                    $share = [double](Get-EDProperty $breakdown 'SampledEventShare' 1) * 100
+                    $seen = [long](Get-EDProperty $breakdown 'ChainEventsSeen' 0)
+                    $dropped = [long](Get-EDProperty $breakdown 'ChainEventsDropped' 0)
+                    $sampleDetails += ('{0}: zincire aday {1} olayin {2} tanesi tavan yuzunden hicbir zincire yazilamadi (olaylarin %{3:N1} i kullanildi)' -f `
+                        $server, $seen, $dropped, $share)
+                    $cellParts += ('ORNEKLEM %{0:N0} olay' -f $share)
+                }
+                if ($cellParts.Count -eq 0) { $cellParts += 'KISMI' }
+                $coverageValues[$server] = ($cellParts -join ' + ')
                 $coverageStatus[$server] = 'WARN'
-                $log.Warn("M11/$server : zaman siniri kesti; faz kirilimi EKSIK pencereden hesaplandi.")
-            }
-            elseif ([bool](Get-EDProperty $breakdown 'TruncatedByLimit' $false)) {
-                $sampledServers += $server
-                $coverageValues[$server] = "ORNEKLEM $($breakdown.MessagesSeen) mesaj (tavan)"
-                $coverageStatus[$server] = 'WARN'
-                $log.Warn("M11/$server : mesaj sayisi tavani ($maxMessages) asildi; faz kirilimi ORNEKLEMDIR.")
+                $log.Warn("M11/$server : KIRILIM KISMI ($partialReason); baskin faz hukmu tam pencereyi temsil etmeyebilir.")
             }
             else {
                 $coverageValues[$server] = "tam $($breakdown.FilesScanned) dosya"
@@ -270,7 +304,17 @@ Register-EDModule @{
 
             $evidence += [pscustomobject]@{
                 Server           = $server
-                MesajGorulen     = $breakdown.MessagesSeen
+                # 'MesajGorulen' ADI YANILTICIYDI: tavan doldugunda bu sayi
+                # penceredeki mesaj sayisi degil, tavana kadar IZLENEBILEN
+                # orneklemin buyuklugudur - kanit dosyasinda populasyon gibi
+                # okunurdu. Ad orneklem oldugunu soyluyor, tavan da yaninda.
+                # Kirpilan MESAJ sayisi olculemez; kirpilmayan olcu olay
+                # sayisidir, o yuzden olay sutunlari da burada.
+                MesajOrneklenen  = $breakdown.MessagesSeen
+                MesajTavani      = Get-EDProperty $breakdown 'MessageLimit' $maxMessages
+                OlayGorulen      = Get-EDProperty $breakdown 'ChainEventsSeen' 0
+                OlayAtilan       = Get-EDProperty $breakdown 'ChainEventsDropped' 0
+                KullanilanOlayPayi = [math]::Round(([double](Get-EDProperty $breakdown 'SampledEventShare' 1) * 100), 1)
                 MesajTam         = $breakdown.MessagesComplete
                 # Faz p95'leri bu sayidan, uctan uca p95 sudan gelir; iki
                 # sayinin farkli olmasi normaldir ama GORUNUR olmalidir.
@@ -288,10 +332,13 @@ Register-EDModule @{
                 StoreP95         = [math]::Round($breakdown.Store.P95, 3)
                 StoreP99         = [math]::Round($breakdown.Store.P99, 3)
                 BaskinFaz        = $breakdown.DominantPhase
+                Kismi            = [bool](Get-EDProperty $breakdown 'IsPartial' $breakdown.Truncated)
+                KismiSebep       = $partialReason
                 OrneklemKirpildi = $breakdown.TruncatedByLimit
-                ZamanSiniriKesti = $breakdown.Truncated
+                ZamanSiniriKesti = $byDeadline
                 DosyaBulunan     = $breakdown.FilesScanned
                 DosyaIslenen     = $breakdown.FilesProcessed
+                DosyaOkunamayan  = $filesFailed
                 TarananSatir     = $breakdown.LinesScanned
                 SureMs           = [math]::Round($breakdown.ElapsedMs)
             }
@@ -301,31 +348,47 @@ Register-EDModule @{
             Save-EDEvidence -Context $Context -Name 'M11-phase-breakdown' -Data $evidence | Out-Null
         }
 
-        # Kapsam satiri veri cikmasa DA uretilmeli: "zincir bulunamadi"nin
-        # sebebi zaman siniri olabilir ve tavsiye o zaman TERSINE doner.
-        $coverageRow = @()
-        if ($partialServers.Count -gt 0 -or $sampledServers.Count -gt 0) {
-            $coverageNote = ''
-            if ($partialServers.Count -gt 0) {
-                $coverageNote += 'Zaman siniri okumayi kesti; KISMI isaretli sunucularda faz kirilimi eksik pencereden hesaplandi. '
+        # KISMILIK CUMLESI TEK YERDE KURULUR ve uc sebebin EYLEMI ayridir:
+        #   zaman siniri -> pencereyi DARALT
+        #   okuma hatasi -> kilit/izin/AV/SMB; daraltmak hicbir sey degistirmez
+        #   mesaj tavani -> pencereyi DARALT, ama hukum zaten ORNEKLEMDEN
+        # Cumle dort ayri satirda kullanildigi icin kopyalanmaz.
+        $partialNote = ''
+        $partialTagShort = ''
+        if ($partialServers.Count -gt 0) {
+            $partialNote = "KIRILIM KISMI ($($partialDetails -join ', ')): baskin faz hukmu pencerenin TAMAMINI temsil etmeyebilir. "
+            if ($deadlineServers.Count -gt 0) {
+                $partialNote += "Zaman siniri kesenlerde ($($deadlineServers -join ', ')) pencereyi -WindowHours ile DARALTIN. "
+            }
+            if ($fileFailServers.Count -gt 0) {
+                $partialNote += "Dosyasi okunamayanlarda ($($fileFailServers -join ', ')) pencereyi daraltmak ya da genisletmek COZMEZ - "
+                $partialNote += 'dosya kilidi, NTFS/share izni, antivirus ya da kopmus SMB baglantisi arayin. '
             }
             if ($sampledServers.Count -gt 0) {
-                $coverageNote += ("Mesaj sayisi tavani ({0}) asildi; ORNEKLEM isaretli sunucularda butun dosyalar okundu ama butun MESAJLAR okunmadi. " -f $maxMessages)
+                $partialNote += ("ORNEKLEM ({0}): mesaj tavani ({1}) doldu; kirilim pencerenin TAMAMINDAN degil bir ORNEKTEN hesaplandi - {2}. " -f `
+                    ($sampledServers -join ', '), $maxMessages, ($sampleDetails -join ' | '))
+                # Rastgele bir ornekten persentil kestirilebilir, bundan
+                # kestirilemez. Dosyalar tarihsel sirada okunuyor ama es
+                # zamanli islendigi icin "ilk N mesaj" GARANTISI de yoktur;
+                # ayristirici bunu iddia etmiyor, modul de etmez.
+                $partialNote += 'Ornek ne en yeni, ne en eski, ne de rastgeledir: bu persentiller pencerenin tamamina genellenemez. '
+                $partialNote += 'Pencereyi -WindowHours ile DARALTIN; mesaj sayisi tavanin altina indiginde kirilim tam olur. '
             }
-            $coverageNote += 'Her iki durumda da cozum ayni yondedir: pencereyi -WindowHours ile DARALTIN.'
+            $partialNote = $partialNote.TrimEnd()
+            $partialTagShort = "KIRILIM KISMI ($($partialDetails -join ', ')). "
+        }
+
+        # Kapsam satiri veri cikmasa DA uretilmeli: "zincir bulunamadi"nin
+        # sebebi okuma olabilir ve tavsiye o zaman TERSINE doner.
+        $coverageRow = @()
+        if ($partialServers.Count -gt 0) {
             $coverageRow += New-EDRow -Module 'M11' -Check 'Pencere kapsami' -Values $coverageValues -CellStatus $coverageStatus `
-                -Status 'WARN' -Note $coverageNote
+                -Status 'WARN' -Note ('Isaretli sunucularda faz kirilimi eksik ya da kirpilmis nufustan hesaplandi. ' + $partialNote)
         }
 
         if (-not $anyData) {
             if ($partialServers.Count -gt 0) {
-                $noDataNote = "Zaman siniri okumayi kesti ($($partialServers -join ', ')); mesaj zinciri birlestirilemedi. "
-                $noDataNote += 'Pencereyi -WindowHours ile DARALTIN (genisletmek durumu kotulestirir).'
-                $noDataStatus = 'WARN'
-            }
-            elseif ($sampledServers.Count -gt 0) {
-                $noDataNote = ("Mesaj sayisi tavani ({0}) asildi ($($sampledServers -join ', ')); orneklem icinde birlestirilebilir zincir cikmadi. " -f $maxMessages)
-                $noDataNote += 'Pencereyi -WindowHours ile DARALTIN; genisletmek orneklemi daha da kirpar.'
+                $noDataNote = 'Birlestirilebilir mesaj zinciri cikmadi ve okuma KISMI kaldi; ikisi karistirilmamali. ' + $partialNote
                 $noDataStatus = 'WARN'
             }
             else {
@@ -398,20 +461,10 @@ Register-EDModule @{
             $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
         }
         if ($partialServers.Count -gt 0) {
-            # Baskin faz hukmu eksik ornekten cikmis olabilir; en az WARN.
-            $note = "PENCERE KISMI: $($partialServers -join ', ') sunucusunda zaman siniri okumayi kesti; " + `
-                    'baskin faz hukmu pencerenin tamamini temsil etmeyebilir. ' + $note
-            $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
-        }
-        if ($sampledServers.Count -gt 0) {
-            # ORNEKLEM "TAM" DIYE RAPORLANAMAZ. Tavan asildiginda ayristirici
-            # yeni mesaj kabul etmeyi birakir; hangi mesajlarin kumeye girdigi
-            # dosya okuma sirasina baglidir, yani ornek ne rastgeledir ne de
-            # pencereye esit dagilir. "Baskin faz" hukmu bu ornekten cikar.
-            $note = ("ORNEKLEM ({0}): mesaj sayisi tavani ({1}) asildi; faz kirilimi pencerenin TAMAMINDAN degil bir ORNEKTEN hesaplandi. " -f `
-                        ($sampledServers -join ', '), $maxMessages) +
-                    'Ornek rastgele DEGILDIR (tavana kadar goruleni alir), bu yuzden baskin faz hukmu pencerenin tamamini temsil etmeyebilir. ' +
-                    'Pencereyi -WindowHours ile DARALTIP tekrar calistirin: mesaj sayisi tavanin altina indiginde kirilim tam olur. ' + $note
+            # Kismi ya da ORNEKLEMDEN cikan bir baskin faz hukmu yesil
+            # kalamaz: "tam" diye okunan bir orneklem, bu modulun verebilecegi
+            # en pahali yanlis yon tarifidir.
+            $note = $partialNote + ' ' + $note
             $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
         }
 
@@ -422,10 +475,7 @@ Register-EDModule @{
         # geliyor. Ikisi ayri ayri etiketlenir: biri "dosyalarin bir kismi
         # okunmadi", digeri "dosyalar okundu ama mesajlarin bir kismi kumeye
         # hic girmedi" demektir ve okuyucunun ikisini ayirt etmesi gerekir.
-        $partialTag = $(if ($partialServers.Count -gt 0) { "PENCERE KISMI ($($partialServers -join ', ')). " } else { '' })
-        if ($sampledServers.Count -gt 0) {
-            $partialTag += "ORNEKLEM ($($sampledServers -join ', ')): mesaj tavani ($maxMessages) asildi. "
-        }
+        $partialTag = $partialTagShort
         # Brief P2'yi iki sayiyla tanimlar: baskin fazin Store olmasi VE uctan
         # uca p95'in buyukluk tabanini asmasi. Iddiayi tasiyan iki satir da
         # etiketlenir, yoksa okuyucu hukmun neye dayandigini goremez.
