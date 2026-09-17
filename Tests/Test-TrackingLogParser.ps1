@@ -401,6 +401,93 @@ Remove-Item -LiteralPath $singlePath -Force
 Assert-Equal 'Butcesiz imza: Truncated kapali' $false $analysis.Truncated
 
 # ---------------------------------------------------------------------------
+# Okunamayan dosya: SESSIZCE YARIYA INEN PENCERE.
+#
+# Bu bolumun varlik sebebi olculdu: ayni klasordeki bir dosya FileShare.None
+# ile kilitlendiginde p95 600.0 sn (FAIL) yerine 2.0 sn (OK) cikiyor, Truncated
+# FALSE kaliyor ve M10 kapsam hucresi "tam N dosya" yaziyordu. Sebep, okuma
+# patlayan dosyanin da "islenmis" sayilmasiydi: filesProcessed == files.Length
+# kaldigi icin Truncated kosulu HIC saglanmiyordu. Tek iz run.log'daki bir INFO
+# satiriydi - yani kismi bir sonuc tam sonuc gibi sunuluyordu.
+Write-Host "`n=== 8b. Okunamayan (kilitli) dosya ===" -ForegroundColor Cyan
+
+$lockDir = Join-Path $FixtureDir 'kilit'
+if (-not (Test-Path -LiteralPath $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
+$lockEnd = [datetime]::UtcNow
+$lockFixture = & (Join-Path $PSScriptRoot 'New-TrackingLogFixture.ps1') `
+    -Path (Join-Path $lockDir ('MSGTRKMD' + $lockEnd.ToString('yyyyMMdd') + '-1.LOG')) `
+    -DeliverCount 600 -Seed 777 -EndUtc $lockEnd -WindowHours 6
+$lockStart = $lockFixture.StartUtc.AddMinutes(-5)
+$lockStop = $lockEnd.AddMinutes(5)
+
+$clean = [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency(
+    'EXC01', $lockDir, 'MSGTRKMD', $lockStart, $lockStop, 50, 2, $slowThreshold)
+Assert-True 'Kilitsiz kosum: veri uretildi' ($clean.Overall.Count -gt 0) ("{0} gecikme" -f $clean.Overall.Count)
+Assert-Equal 'Kilitsiz kosum: Truncated kapali' $false $clean.Truncated
+Assert-Equal 'Kilitsiz kosum: okunamayan dosya yok' 0 $clean.FilesFailed
+Assert-Equal 'Kilitsiz kosum: kismilik bayragi kapali' $false $clean.IsPartial
+
+# Gercek ortamdaki karsiligi: dosyayi paylasimsiz acan bir yedekleme/AV ajani,
+# kapali admin share, kopmus SMB oturumu. Testte ayni etki FileShare.None ile
+# uretilir - parser dosyayi FileShare.ReadWrite|Delete ile acmaya calisir ve
+# IOException alir.
+$lockedStream = [System.IO.File]::Open($lockFixture.Path, [System.IO.FileMode]::Open,
+                                       [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+try {
+    $locked = [ExchangeDiag.TrackingLogParser]::AnalyzeDeliveryLatency(
+        'EXC01', $lockDir, 'MSGTRKMD', $lockStart, $lockStop, 50, 2, $slowThreshold)
+}
+finally { $lockedStream.Dispose() }
+
+foreach ($w in $locked.Warnings) { Write-Host "  UYARI: $w" -ForegroundColor Yellow }
+
+# ASIL IDDIA: kismilik hukme ULASIYOR.
+Assert-True 'Kilitli dosya: Truncated GERCEKTEN true' $locked.Truncated `
+    ("islenen={0}/{1}, okunamayan={2}" -f $locked.FilesProcessed, $locked.FilesScanned, $locked.FilesFailed)
+Assert-Equal 'Kilitli dosya: okunamayan dosya sayildi' 1 $locked.FilesFailed
+Assert-Equal 'Kilitli dosya: okunamayan dosya ISLENMIS SAYILMADI' ($clean.FilesProcessed - 1) $locked.FilesProcessed
+Assert-True 'Kilitli dosya: kismilik bayragi hukme ulasiyor' $locked.IsPartial
+Assert-True 'Kilitli dosya: ReadFailed isaretlendi' $locked.ReadFailed
+
+# SEBEP DE DOGRU OLMAK ZORUNDA. Yanlis sebep, sebep soylememekten kotudur:
+# "pencereyi daraltin/genisletin" tavsiyesi kilitli bir dosyayi acmaz.
+Assert-True 'Kilitli dosya: sebep OKUMA HATASI' $locked.TruncatedByReadFailure
+Assert-Equal 'Kilitli dosya: sebep zaman siniri DEGIL' $false $locked.TruncatedByDeadline
+Assert-Equal 'Kilitli dosya: kismilik sebebi tek cumlede' 'okuma hatasi' $locked.PartialReason
+Assert-True 'Kilitli dosya: uyari dosyayi ve sebebi adlandiriyor' `
+    (@($locked.Warnings | Where-Object { $_ -match 'OKUNAMADI' }).Count -gt 0) (($locked.Warnings -join ' | '))
+Assert-True 'Kilitli dosya: uyari zaman asimi OLMADIGINI soyluyor' `
+    (@($locked.Warnings | Where-Object { $_ -match 'ZAMAN ASIMI DEGILDIR' }).Count -gt 0) (($locked.Warnings -join ' | '))
+Assert-True 'Kilitli dosya: zaman siniri uyarisi URETILMEDI (yanlis sebep yok)' `
+    (@($locked.Warnings | Where-Object { $_ -match 'Zaman siniri asildi' }).Count -eq 0) (($locked.Warnings -join ' | '))
+
+# Ve kaybin gercek oldugu: sessiz kalsaydi asagidaki fark persentillere
+# yansiyacak, hucre yine YESIL gorunecekti.
+Assert-True 'Kilitli dosya: gecikme kayitlari gercekten eksildi' ($locked.Overall.Count -lt $clean.Overall.Count) `
+    ("{0} < {1}" -f $locked.Overall.Count, $clean.Overall.Count)
+
+# ---------------------------------------------------------------------------
+# Dosya sirasi: kesilme HANGI dosyalarin icerde kaldigini belirler.
+#
+# Ordinal sirada -1, -10, -100, -2 gelir; kismi bir sonucun neyi temsil ettigi
+# soylenemez ve iki kosum ayni pencerede farkli cevap verir. Zamansal/sayisal
+# sirada kismi sonuc "pencerenin bastan su kadari" olur.
+Write-Host "`n=== 8c. Dosya sirasi (tekrarlanabilirlik) ===" -ForegroundColor Cyan
+
+$orderDir = Join-Path $FixtureDir 'sira'
+if (-not (Test-Path -LiteralPath $orderDir)) { New-Item -ItemType Directory -Path $orderDir -Force | Out-Null }
+foreach ($name in 'MSGTRKMD20260917-100.LOG', 'MSGTRKMD20260917-2.LOG', 'MSGTRKMD20260917-10.LOG',
+                  'MSGTRKMD20260917-1.LOG', 'MSGTRKMD20260916-9.LOG') {
+    Set-Content -LiteralPath (Join-Path $orderDir $name) -Value '#Software: Microsoft Exchange Server' -Encoding UTF8
+}
+$ordered = [ExchangeDiag.TrackingLogParser]::FindLogFiles(
+    $orderDir, 'MSGTRKMD', [datetime]::new(2026, 9, 16, 0, 0, 0), [datetime]::new(2026, 9, 17, 23, 0, 0))
+$orderedNames = @($ordered | ForEach-Object { Split-Path -Leaf $_ }) -join '|'
+Assert-Equal 'Dosyalar tarih + rotasyon numarasina gore siralaniyor' `
+    'MSGTRKMD20260916-9.LOG|MSGTRKMD20260917-1.LOG|MSGTRKMD20260917-2.LOG|MSGTRKMD20260917-10.LOG|MSGTRKMD20260917-100.LOG' `
+    $orderedNames
+
+# ---------------------------------------------------------------------------
 # Faz kirilimi: DORT DOSYA TURUNUN dogru siniflandirilmasi.
 #
 # Gercek sunucu ayni klasore MSGTRK / MSGTRKMD / MSGTRKMS / MSGTRKMA yazar ve
@@ -462,6 +549,82 @@ Assert-Close 'Uctan uca p95' $phase.ExpectedTotalP95 $breakdown.Total.P95
 
 # Ve hukmun kendisi: darbogaz gonderimde, transport'ta degil.
 Assert-Equal 'Baskin faz dogru alt sistemi gosteriyor' $phase.ExpectedDominant $breakdown.DominantPhase
+
+# ---------------------------------------------------------------------------
+# Mesaj tavani: KIRILIM BIR ORNEKLEM OLDUGUNDA BUNU SOYLEMEK ZORUNDA.
+#
+# Musteri olcegi saatte 1.000.000 mail; M11 tavani 2.000.000 gectigi icin
+# 2 saatten uzun her pencere orneklemdir (-WindowHours 8 ile %25). Bayrak
+# eskiden yalnizca kanit CSV'sinde bir sutundu: hicbir hukme, hicbir nota
+# dokunmuyordu. Ustelik MessagesSeen KIRPILMIS sayiyi raporluyordu, yani
+# rapor kac mesaj oldugunu da yanlis soyluyordu.
+Write-Host "`n=== 9b. Mesaj tavani (ornekleme) ===" -ForegroundColor Cyan
+
+Assert-Equal 'Tavan dolmadi: ornekleme bayragi kapali' $false $breakdown.TruncatedByLimit
+Assert-Equal 'Tavan dolmadi: atilan olay yok' 0 $breakdown.ChainEventsDropped
+Assert-Equal 'Tavan dolmadi: olaylarin tamami kullanildi' 1 $breakdown.SampledEventShare
+Assert-Equal 'Tavan dolmadi: kismilik bayragi kapali' $false $breakdown.IsPartial
+Assert-Equal 'Uygulanan tavan tuketiciye tasiniyor' 1000000 $breakdown.MessageLimit
+# Olay sayimi mesaj sayimindan BAGIMSIZ olmali: bir mesaj birden cok olay uretir.
+Assert-True 'Zincire aday olay sayisi mesaj sayisindan buyuk' ($breakdown.ChainEventsSeen -gt $breakdown.MessagesSeen) `
+    ("{0} olay / {1} mesaj" -f $breakdown.ChainEventsSeen, $breakdown.MessagesSeen)
+
+# Tavan mesaj sayisinin yarisina cekilir. Paralellik 1 verilir: tavan kontrolu
+# kilitsizdir ve cok is parcacigiyla birkac mesaj tavani asabilir; olculen sey
+# yaris degil, RAPORLAMA sozlesmesidir.
+$cap = [int]($phase.MessageCount / 2)
+$capped = [ExchangeDiag.TrackingLogParser]::AnalyzePhaseBreakdown(
+    'EXC01', $phaseDir, $phase.StartUtc.AddMinutes(-5), $phaseEnd.AddMinutes(5), $cap, 1)
+foreach ($w in $capped.Warnings) { Write-Host "  UYARI: $w" -ForegroundColor Yellow }
+
+Assert-True 'Tavan: ornekleme bayragi acildi' $capped.TruncatedByLimit
+Assert-Equal 'Tavan: uygulanan tavan raporlaniyor' $cap $capped.MessageLimit
+Assert-Equal 'Tavan: izlenen mesaj tavanda durdu' $cap $capped.MessagesSeen
+# ASIL IDDIA: kismilik hukme ULASIYOR ve turu adlandiriliyor.
+Assert-True 'Tavan: kismilik bayragi hukme ulasiyor' $capped.IsPartial
+Assert-True 'Tavan: kismilik sebebi ornekleme olarak adlandirildi' ($capped.PartialReason -like '*ornekleme*') $capped.PartialReason
+Assert-Equal 'Tavan: sebep zaman siniri DEGIL' $false $capped.TruncatedByDeadline
+Assert-Equal 'Tavan: sebep okuma hatasi DEGIL' $false $capped.ReadFailed
+
+# KIRPILMAYAN BUYUKLUK: olay sayimi tavandan etkilenmez. Bu iddia duserse
+# rapor yine "gordugum kadari kadar mesaj vardi" demis olur.
+Assert-Equal 'Tavan: zincire aday olay sayisi KIRPILMADI' $breakdown.ChainEventsSeen $capped.ChainEventsSeen
+Assert-True 'Tavan: kullanilamayan olay sayisi bildiriliyor' ($capped.ChainEventsDropped -gt 0) `
+    ("{0} olay atildi" -f $capped.ChainEventsDropped)
+Assert-True 'Tavan: kullanilan olay payi 1 den kucuk' ($capped.SampledEventShare -lt 1) `
+    ("%{0:N1}" -f ($capped.SampledEventShare * 100))
+Assert-True 'Tavan: uyari ORNEKLEM oldugunu soyluyor' `
+    (@($capped.Warnings | Where-Object { $_ -match 'KIRILIM BIR ORNEKLEMDIR' }).Count -gt 0) (($capped.Warnings -join ' | '))
+Assert-True 'Tavan: uyari orneklemin rastgele/yeni/eski OLMADIGINI soyluyor' `
+    (@($capped.Warnings | Where-Object { $_ -match 'ne en yeni' }).Count -gt 0) (($capped.Warnings -join ' | '))
+Assert-True 'Tavan: uyari kullanilan payi sayiyla veriyor' `
+    (@($capped.Warnings | Where-Object { $_ -match 'olaylarin %' }).Count -gt 0) (($capped.Warnings -join ' | '))
+
+# ---------------------------------------------------------------------------
+# Faz kiriliminda okunamayan dosya: eksilme degil, YANLIS ATIF.
+#
+# Transport log'u okunamazsa Transport RECEIVE olaylari hic gorulmez; zincir
+# hicbir mesajda tamamlanmaz. Bu sessiz kalirsa M11 "zincir kurulamadi" der ve
+# sebebi pencerede arar - oysa sebep okunamayan bir dosyadir.
+Write-Host "`n=== 9c. Faz kiriliminda okunamayan dosya ===" -ForegroundColor Cyan
+
+$phaseLock = [System.IO.File]::Open($phase.TransportPath, [System.IO.FileMode]::Open,
+                                    [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+try {
+    $phaseFailed = [ExchangeDiag.TrackingLogParser]::AnalyzePhaseBreakdown(
+        'EXC01', $phaseDir, $phase.StartUtc.AddMinutes(-5), $phaseEnd.AddMinutes(5),
+        1000000, [Environment]::ProcessorCount)
+}
+finally { $phaseLock.Dispose() }
+
+Assert-True 'Faz/kilitli dosya: Truncated GERCEKTEN true' $phaseFailed.Truncated `
+    ("islenen={0}/{1}, okunamayan={2}" -f $phaseFailed.FilesProcessed, $phaseFailed.FilesScanned, $phaseFailed.FilesFailed)
+Assert-Equal 'Faz/kilitli dosya: okunamayan dosya sayildi' 1 $phaseFailed.FilesFailed
+Assert-Equal 'Faz/kilitli dosya: okunamayan dosya ISLENMIS SAYILMADI' ($breakdown.FilesProcessed - 1) $phaseFailed.FilesProcessed
+Assert-Equal 'Faz/kilitli dosya: sebep zaman siniri DEGIL' $false $phaseFailed.TruncatedByDeadline
+Assert-True 'Faz/kilitli dosya: sebep okuma hatasi' $phaseFailed.TruncatedByReadFailure
+# Ve hukmun kendisi bozuldu: zincir hicbir mesajda tamamlanamadi.
+Assert-Equal 'Faz/kilitli dosya: zincir kurulamadi (hukum etkilendi)' 0 $phaseFailed.MessagesComplete
 
 # ---------------------------------------------------------------------------
 # Fixture'in kendisi yeniden uretilebilir mi?
