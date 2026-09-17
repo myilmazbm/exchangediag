@@ -230,6 +230,19 @@ function Invoke-EDEntry {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
+function Invoke-EDEntryCommand {
+    <#
+        -File ile cagrildiginda konak BOS METNI tamamen atar ("Missing an
+        argument for parameter 'Module'"), yani '-Module ""' senaryosu o
+        yoldan hic denenemez. Dizi ve bos deger gerektiren durumlar icin
+        -Command kullanilir; cikis kodu acikca geri verilir.
+    #>
+    param([string]$ArgumentLine, [string]$Script = $entryScript)
+    $command = "& '$Script' $ArgumentLine; exit `$LASTEXITCODE"
+    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command *>&1 | Out-String -Width 250
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+}
+
 $negative = Invoke-EDEntry @('-Quick', '-WindowHours', '-1', '-OutputRoot', $runRoot, '-Quiet')
 Assert-Equal 'Negatif pencere: arac calisamadi kodu' 3 $negative.ExitCode
 Assert-True 'Gerekce WindowHours olarak yazildi' ($negative.Output -like '*WindowHours*') 'hata metni'
@@ -258,6 +271,183 @@ Assert-True 'Kullanim hatasi icin Exchange baglantisi denenmedi' `
 # Kismi tanima farklidir: gercekten bir tarama yapilir, uyari yeterlidir.
 Assert-True 'Kismi tanimada uyari yolu duruyor' `
     ($entryText -like "*Bilinmeyen modul ID'leri yok sayildi*") 'uyari dali'
+
+# KORUMA TEKRARLI ID ILE ATLANAMAZ.
+#
+# Eski kosul "taninmayanlarin sayisi == ham -Module sayisi" idi.
+# Get-EDUnknownModuleIds TEKILLESTIRME yapar: '-Module M99,M99' icin
+# taninmayan sayisi 1, ham sayi 2 cikiyor, 1 -ne 2 oluyor ve koruma
+# TETIKLENMIYORDU - arac hicbir kontrol kosmadan 0 ile cikiyordu, yani
+# tam olarak bu korumanin engellemek icin var oldugu sinyali veriyordu.
+# Dogru olcut TANINAN sayisidir.
+$dupModule = Invoke-EDEntry @('-Module', 'M99,M99', '-OutputRoot', $runRoot, '-Quiet')
+Assert-Equal 'Tekrarli gecersiz ID korumayi atlayamiyor' 3 $dupModule.ExitCode
+Assert-True 'Tekrarli ID icin de gerekce yazildi' ($dupModule.Output -like '*HICBIRI kayitli degil*') $dupModule.Output
+
+# Bos metin de bir tarama DEGILDIR. (Get-EDModules -Id @('') filtreyi hic
+# uygulamaz ve TUM modulleri dondururdu; olcut orada kurulamaz.)
+$emptyModule = Invoke-EDEntryCommand -ArgumentLine ("-Module '' -OutputRoot '{0}' -Quiet" -f $runRoot)
+Assert-Equal 'Bos -Module degeri tarama saymiyor' 3 $emptyModule.ExitCode
+
+# Tekrarli ID dizi olarak verildiginde de ayni: tek metin ('M99,M99')
+# ile gercek dizi (@('M99','M99')) ayni kapiya cikmali.
+$dupArray = Invoke-EDEntryCommand -ArgumentLine ("-Module M99,M99 -OutputRoot '{0}' -Quiet" -f $runRoot)
+Assert-Equal 'Dizi olarak tekrarli gecersiz ID de yakalaniyor' 3 $dupArray.ExitCode
+
+# Buyuk/kucuk harf farki bir HATA DEGILDIR: 'm30' gercekten M30'u kosar,
+# dolayisiyla koruma tetiklenmemeli. (Exchange'siz makinede kod 3 baglanti
+# yuzunden de gelebilir; bu yuzden kod degil, GEREKCE metni denetlenir.)
+$caseModule = Invoke-EDEntry @('-Module', 'm30', '-OutputRoot', $runRoot, '-Quiet')
+Assert-True 'Kucuk harfli ID taninmadi SAYILMIYOR' `
+    ($caseModule.Output -notlike '*HICBIRI kayitli degil*') 'buyuk/kucuk harf duyarsiz'
+
+# ===========================================================================
+Write-Host "`n=== 8b. UCTAN UCA: tum sunucular okunamadi -> cikis kodu 0 OLAMAZ ===" -ForegroundColor Cyan
+
+# BURADAKI SORU MODUL SEVIYESINDE CEVAPLANAMAZ.
+#
+# Kosum ortasinda Exchange oturumu duserse M26/M30/M31/M32 'N/A' donuyor,
+# 'N/A' bulgu tablosuna girmiyor (Core\Report.ps1), rapor "Bulgular (0)"
+# yaziyor ve cikis kodu 0 oluyordu - zamanlanmis bir gorev icin bu,
+# TARANMAMIS bir ortamin "temiz" ilan edilmesidir. Zinciri ucundan ucuna
+# denemek gerekir: modul satirlari -> bulgu tablosu -> cikis kodu.
+#
+# NEDEN SAHNELENMIS BIR AGAC: gercek Invoke-ExchangeDiag.ps1 ve gercek
+# Core\ + gercek M26/M30/M31/M32 kullanilir; yalnizca Exchange'e GIDEN iki
+# ucu degistirilir (baglanti ve M01 kesfi). Aksi halde test yalnizca canli
+# bir Exchange'i olan makinede kosardi ve orada da "tum sunucular
+# okunamadi" durumu istegimizle uretilemezdi.
+$stage = Join-Path $script:Root 'e2e'
+New-Item -ItemType Directory -Path $stage -Force | Out-Null
+Copy-Item -LiteralPath $entryScript -Destination (Join-Path $stage 'Invoke-ExchangeDiag.ps1')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'Core') -Destination (Join-Path $stage 'Core') -Recurse
+New-Item -ItemType Directory -Path (Join-Path $stage 'Modules') -Force | Out-Null
+foreach ($moduleFile in @('M26-ContentIndex.ps1', 'M30-CopyStatus.ps1', 'M31-ReplicationQueues.ps1', 'M32-ActiveCopyBalance.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "Modules\$moduleFile") -Destination (Join-Path $stage "Modules\$moduleFile")
+}
+
+# Exchange'e giden tek kapi: sahte yurutucu. Gercek ParallelExecutor gibi
+# ExecResult uretir, ama HER gorev basarisiz doner - yani "tum sunucular
+# okunamadi" senaryosu.
+@'
+function Connect-EDExchange {
+    param($Config, $Log, $Credential, $ParallelismOverride)
+    $executor = [pscustomobject]@{
+        ExchangeConnection  = 'test-stub'
+        Parallelism         = 1
+        AbandonedPipelines  = 0
+        CompensationRefused = 0
+    }
+    $handler = {
+        param($Tasks)
+        $results = @()
+        foreach ($task in $Tasks) {
+            $result = New-Object ExchangeDiag.ExecResult
+            $result.Key = $task.Key
+            $result.Output = [System.Management.Automation.PSObject[]]@()
+            $result.Error = 'baglanti dustu (test)'
+            $results += $result
+        }
+        return $results
+    }
+    $executor | Add-Member -MemberType ScriptMethod -Name RunExchange -Value $handler
+    $executor | Add-Member -MemberType ScriptMethod -Name RunLocal -Value $handler
+    $executor | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+    return $executor
+}
+'@ | Set-Content -LiteralPath (Join-Path $stage 'Core\Connect.ps1') -Encoding UTF8
+
+# M01 yerine sabit topoloji: kesif bu testin konusu degil, kesif SONRASI
+# olculemeyen sunuculardir.
+@'
+Register-EDModule @{
+    Id = 'M01'; Name = 'Topoloji kesfi'; Phase = 'A'; Description = 'test'; Heavy = $false
+    Run = {
+        param($Context)
+        $servers = @(
+            [pscustomobject]@{ Name = 'MBX1'; Fqdn = 'MBX1.test.local'; Site = 'Site1'; Roles = 'Mailbox'
+                               Version = ''; Edition = ''; IsMailbox = $true; IsEdge = $false; IsTransport = $true
+                               ActiveDbs = 0; DbCopies = 0; IsPassiveSite = $false }
+            [pscustomobject]@{ Name = 'MBX2'; Fqdn = 'MBX2.test.local'; Site = 'Site1'; Roles = 'Mailbox'
+                               Version = ''; Edition = ''; IsMailbox = $true; IsEdge = $false; IsTransport = $true
+                               ActiveDbs = 0; DbCopies = 0; IsPassiveSite = $false }
+        )
+        $Context.Topology = [pscustomobject]@{
+            Servers = $servers
+            Sites = @([pscustomobject]@{ Name = 'Site1'; IsPassive = $false })
+            Dags = @([pscustomobject]@{ Name = 'DAG1'; Members = @('MBX1', 'MBX2') })
+            Databases = @(); HasDag = $true; DagsReadable = $true
+        }
+        return @(New-EDRow -Module 'M01' -Check 'Sunucular' -Values @{ MBX1 = 'Mailbox'; MBX2 = 'Mailbox' } -Status 'OK')
+    }
+}
+'@ | Set-Content -LiteralPath (Join-Path $stage 'Modules\M01-Topology.ps1') -Encoding UTF8
+
+$e2eOut = Join-Path $script:Root 'e2e-out'
+$e2e = Invoke-EDEntryCommand -Script (Join-Path $stage 'Invoke-ExchangeDiag.ps1') `
+    -ArgumentLine ("-Module M26,M30,M31,M32 -OutputRoot '{0}' -Quiet" -f $e2eOut)
+
+Assert-True 'Yarim kalan tarama 0 ile CIKMIYOR' ($e2e.ExitCode -ne 0) ("cikis kodu {0}" -f $e2e.ExitCode)
+Assert-True 'Rapor gercekten uretildi (kod 3 degil)' ($e2e.ExitCode -in @(1, 2)) ("cikis kodu {0}" -f $e2e.ExitCode)
+
+$e2eRun = @(Get-ChildItem -LiteralPath $e2eOut -Directory | Sort-Object Name)
+Assert-Equal 'Tek bir calistirma klasoru olustu' 1 $e2eRun.Count
+if ($e2eRun.Count -eq 1) {
+    $e2eRows = @(Import-Csv -LiteralPath (Join-Path $e2eRun[0].FullName 'SUMMARY.csv') -Encoding UTF8)
+    $e2eFindings = @($e2eRows | Where-Object { $_.Durum -in @('WARN', 'FAIL', 'ERROR', 'TIMEOUT') })
+    Assert-True 'Bulgu tablosu BOS DEGIL' ($e2eFindings.Count -gt 0) ("{0} bulgu" -f $e2eFindings.Count)
+
+    # Kapsam eksikligi kosum SEVIYESINDE de gorunur: 'Terk edilen is' ve
+    # 'Bastirilan bulgu' ile ayni bicimde bir CORE satiri.
+    $scopeRow = @($e2eRows | Where-Object { $_.Modul -eq 'CORE' -and $_.Kontrol -eq 'Eksik kapsam' })
+    Assert-Equal 'CORE/Eksik kapsam satiri dustu' 1 $scopeRow.Count
+    if ($scopeRow.Count -eq 1) {
+        Assert-Equal 'Eksik kapsam satiri WARN' 'WARN' $scopeRow[0].Durum
+        Assert-True 'Okunamayan sunucular ADIYLA sayiliyor' `
+            ($scopeRow[0].Not -like '*MBX1*' -and $scopeRow[0].Not -like '*MBX2*') $scopeRow[0].Not
+    }
+    # Hicbir modul satiri sessiz 'N/A' ile gecmemeli.
+    $silent = @($e2eRows | Where-Object { $_.Modul -in @('M26', 'M30', 'M31', 'M32') -and $_.Durum -in @('N/A', 'OK') })
+    Assert-Equal 'Hicbir Faz D/C satiri sessizce N/A kalmadi' 0 $silent.Count
+}
+
+# MESRU N/A UYARI URETMEZ: ayni agac, ama bu kez yurutucu CALISIYOR ve
+# ortamda kopya yok. "Kavram gecerli degil" bir olcum eksikligi degildir;
+# bu kosumun kodu 0 KALMALIDIR - aksi halde DAG'siz her lab her gun
+# yanlis alarm uretirdi.
+@'
+function Connect-EDExchange {
+    param($Config, $Log, $Credential, $ParallelismOverride)
+    $executor = [pscustomobject]@{
+        ExchangeConnection  = 'test-stub'
+        Parallelism         = 1
+        AbandonedPipelines  = 0
+        CompensationRefused = 0
+    }
+    $handler = {
+        param($Tasks)
+        $results = @()
+        foreach ($task in $Tasks) {
+            $result = New-Object ExchangeDiag.ExecResult
+            $result.Key = $task.Key
+            $result.Output = [System.Management.Automation.PSObject[]]@()
+            $results += $result
+        }
+        return $results
+    }
+    $executor | Add-Member -MemberType ScriptMethod -Name RunExchange -Value $handler
+    $executor | Add-Member -MemberType ScriptMethod -Name RunLocal -Value $handler
+    $executor | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+    return $executor
+}
+'@ | Set-Content -LiteralPath (Join-Path $stage 'Core\Connect.ps1') -Encoding UTF8
+
+$cleanOut = Join-Path $script:Root 'e2e-clean'
+$clean = Invoke-EDEntryCommand -Script (Join-Path $stage 'Invoke-ExchangeDiag.ps1') `
+    -ArgumentLine ("-Module M26,M30,M31,M32 -OutputRoot '{0}' -Quiet" -f $cleanOut)
+Assert-Equal 'Mesru N/A kosumu 0 ile cikar' 0 $clean.ExitCode
+Assert-True 'Mesru N/A icin eksik kapsam satiri URETILMEZ' `
+    ($clean.Output -notlike '*Eksik kapsam*') 'yanlis alarm yok'
 
 # ===========================================================================
 Write-Host "`n=== 9. Orgu etiketi operatorun GORDUGU yere ulasiyor ===" -ForegroundColor Cyan

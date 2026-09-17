@@ -49,11 +49,18 @@ $m34 = @(Get-EDModules -Id 'M34')[0]
 # NOT: gercek Get-MailboxDatabaseCopyStatus lag alanlarini da dondurur.
 # Mock bunlari tasimazsa lagged kopya senaryosu test edilemez - ve tam da
 # bu yuzden "lagged kopya her zaman FAIL" hatasi uzun sure gorunmedi.
+#
+# $Preference TIP KISITSIZDIR. Eskiden [int] idi ve bu yuzden fixture
+# ActivationPreference'in OKUNAMADIGI durumu (Core\Replication.ps1 orada
+# $null yazar) URETEMIYORDU: [int]$null sessizce 0'a duser. Tam da bu
+# yuzden M32'nin "$null -gt 1 ve $null -eq 1 ikisi de False" hatasi -
+# yani tercihi okunamayan aktif kopyanin hicbir kovaya girmemesi - uzun
+# sure hicbir testte gorunmedi.
 function New-Copy {
     param(
         [string]$Server, [string]$Database, [string]$Status = 'Healthy',
         [int]$CopyQueue = 0, [int]$ReplayQueue = 0,
-        [string]$Index = 'Healthy', [switch]$Active, [int]$Preference = 1,
+        [string]$Index = 'Healthy', [switch]$Active, $Preference = 1,
         [string]$ReplayLagStatus = 'Disabled', [string]$ReplayLagTime = ''
     )
     return [pscustomobject]@{
@@ -67,12 +74,21 @@ function New-Copy {
 }
 
 function New-DagContext {
-    param($Copies, $Servers, $Sites = @('Site1'), $Executor = $null, $FailedServers = @())
+    param($Copies, $Servers, $Sites = @('Site1'), $Executor = $null, $FailedServers = @(),
+          [string]$FailureState = 'ERROR')
     $context = New-EDTestContext -Config $config -Executor $Executor -Servers $Servers `
         -Sites @($Sites | ForEach-Object { [pscustomobject]@{ Name = $_ } }) `
         -Dags @([pscustomobject]@{ Name = 'DAG1'; Members = @($Servers | ForEach-Object { $_.Name }) }) `
         -OutputDir $script:OutputDir
-    $context.Cache['CopyStatus'] = [pscustomobject]@{ Copies = @($Copies); FailedServers = @($FailedServers) }
+    # Failures alani gercek Get-EDCopyStatus'un urettigi seklin aynisidir:
+    # okunamayan sunucunun YALNIZCA adi degil, yurutucunun durumu da tasinir.
+    # Bu olmadan modul 'TIMEOUT' ile 'ERROR' arasindaki farki gorememis olur.
+    $context.Cache['CopyStatus'] = [pscustomobject]@{
+        Copies        = @($Copies)
+        FailedServers = @($FailedServers)
+        Failures      = @($FailedServers | ForEach-Object {
+                            [pscustomobject]@{ Server = $_; State = $FailureState; Error = 'sahte hata' } })
+    }
     return $context
 }
 
@@ -164,6 +180,32 @@ $rows = @(& $m30.Run $badIndexContext)
 $indexRow = Get-EDTestRow $rows 'Icerik indeksi'
 Assert-Equal 'Bozuk indeks FAIL' 'FAIL' $indexRow.Status
 
+# 2f. OKUNAMAYAN SUNUCU "KOPYASI YOK" DEGILDIR.
+# Eskiden M30 yalnizca .Copies'e bakiyordu: okunamayan sunucu icin
+# serverCopies bos cikiyor ve hucre 'N/A' yaziliyordu - "bu sunucuda kopya
+# yok" ile ayni sey. Get-EDCopyStatus FailedServers'i ZATEN tasiyor.
+$m30Failed = New-DagContext -Servers $servers2 -Copies @(
+    (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active)
+) -FailedServers @('MBX2')
+$rows = @(& $m30.Run $m30Failed)
+$healthRow = Get-EDTestRow $rows 'Kopya sagligi'
+Assert-Equal 'M30: okunamayan sunucu hucresi hukum tasiyor' 'ERROR' $healthRow.CellStatus['MBX2']
+Assert-True 'M30: satir N/A ile ozetlenmiyor' ($healthRow.Status -notin @('N/A', 'OK')) $healthRow.Status
+Assert-True 'M30: okunamayan sunucu notta adiyla' ($healthRow.Note -like '*MBX2*') $healthRow.Note
+
+# 2g. HIC KOPYA GELMEDIYSE SEBEP AYRISTIRILIR.
+# 'Count -eq 0' tek basina bir sebep DEGILDIR: sunucular okunamadiysa bu
+# bir olcum basarisizligidir (hukum uretir), gercekten kopya yoksa kavram
+# gecerli degildir (N/A mesrudur).
+$m30AllFailed = New-DagContext -Servers $servers2 -Copies @() -FailedServers @('MBX1', 'MBX2')
+$rows = @(& $m30.Run $m30AllFailed)
+Assert-True 'M30: tum sunucular okunamazsa N/A DONMEZ' ($rows[0].Status -notin @('N/A', 'OK')) $rows[0].Status
+Assert-True 'M30: sebep notta yaziyor' ($rows[0].Note -like '*OLCUM BASARISIZLIGIDIR*') $rows[0].Note
+
+$m30NoCopies = New-DagContext -Servers $servers2 -Copies @() -FailedServers @()
+$rows = @(& $m30.Run $m30NoCopies)
+Assert-Equal 'M30: gercekten kopya yoksa N/A MESRUDUR' 'N/A' $rows[0].Status
+
 # ===========================================================================
 Write-Host "`n=== 3. M31 kopya kuyrugu ve replay kuyrugu ===" -ForegroundColor Cyan
 
@@ -223,6 +265,34 @@ $noPassiveContext = New-DagContext -Servers @((New-EDTestServer -Name 'MBX1')) -
 )
 $rows = @(& $m31.Run $noPassiveContext)
 Assert-Equal 'Pasif kopya yoksa N/A' 'N/A' $rows[0].Status
+
+# 3e. IKI N/A AYNI SEY DEGILDIR.
+# "Pasif kopya yok" (kavram gecerli degil) mesru bir N/A'dir ve DAG'siz /
+# tek uyeli ortamlarda cikis kodunu 0 birakmalidir. Ama bir sunucu
+# OKUNAMADIYSA "pasif kopya yok" cumlesi kurulamaz: okunmamis sunucuda
+# pasif kopya olabilir.
+$m31Unreadable = New-DagContext -Servers $servers2 -Copies @(
+    (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active)
+) -FailedServers @('MBX2')
+$rows = @(& $m31.Run $m31Unreadable)
+Assert-True 'M31: okunamayan sunucu varken "pasif kopya yok" N/A ile gecmiyor' `
+    ($rows[0].Status -notin @('N/A', 'OK')) $rows[0].Status
+Assert-True 'M31: gerekce okunamamak olarak yaziliyor' ($rows[0].Note -like '*OKUNAMADI*') $rows[0].Note
+
+# Pasif kopya VAR ama bir sunucu okunamadi: hucre degeri N/A kalir
+# ("kuyruk sifir" yalani olmaz) ama hukum olcum basarisizligini tasir.
+$m31Partial = New-DagContext -Servers @(
+    (New-EDTestServer -Name 'MBX1'), (New-EDTestServer -Name 'MBX2'), (New-EDTestServer -Name 'MBX3')
+) -Copies @(
+    (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active)
+    (New-Copy -Server 'MBX2' -Database 'DB1' -CopyQueue 0)
+) -FailedServers @('MBX3')
+$rows = @(& $m31.Run $m31Partial)
+$copyRow = Get-EDTestRow $rows 'CopyQueueLength'
+Assert-Equal 'M31: okunamayan sunucunun degeri N/A' 'N/A' $copyRow.Values['MBX3']
+Assert-Equal 'M31: okunamayan sunucunun HUKMU N/A degil' 'ERROR' $copyRow.CellStatus['MBX3']
+Assert-True 'M31: saglikli sunucu OK kaldi' ($copyRow.CellStatus['MBX2'] -eq 'OK') $copyRow.CellStatus['MBX2']
+Assert-True 'M31: satir olcum eksikligini ozetliyor' ($copyRow.Status -eq 'ERROR') $copyRow.Status
 
 # ===========================================================================
 Write-Host "`n=== 4. M32 aktif kopya dagilimi (orgu P8) ===" -ForegroundColor Cyan
@@ -324,10 +394,85 @@ $failedContext = New-DagContext -Servers $servers2 -Copies $readableCopies -Fail
 $rows = @(& $m32.Run $failedContext)
 $activeRow = Get-EDTestRow $rows 'Aktif DB sayisi'
 Assert-Equal 'Okunamayan sunucu 0 DEGIL N/A' 'N/A' $activeRow.Values['MBX2']
-Assert-Equal 'Okunamayan sunucu hucresi N/A' 'N/A' $activeRow.CellStatus['MBX2']
 Assert-True 'Okunamayan sunucu yuzunden UYDURMA dengesizlik yok' `
     ($activeRow.Note -notlike '*DENGESIZ*') $activeRow.Note
 Assert-True 'Saglam sunucu suclanmadi' ($activeRow.CellStatus['MBX1'] -ne 'WARN') $activeRow.CellStatus['MBX1']
+
+# 4e-2. OKUNAMAYAN SUNUCUNUN HUCRESI 'N/A' KALAMAZ.
+#
+# Deger 'N/A' DOGRUDUR (0 yazmak "hic aktif DB yok" yalani olurdu) ama
+# HUKUM 'N/A' olamaz: 'N/A' bir hukum degildir, bulgu tablosuna girmez
+# (Core\Report.ps1) ve cikis kodu eslemesinde hicbir kovaya dusmez. Yani
+# kosum ortasinda Exchange oturumu dusen bir tarama "Bulgular (0)" yazip
+# 0 ile cikiyordu. Yurutucunun kendi durumu yazilir - M14/M15 deseni.
+Assert-Equal 'Okunamayan sunucu hucresi yurutucu durumunu tasiyor' 'ERROR' $activeRow.CellStatus['MBX2']
+Assert-True 'Yarim okunan tablo N/A ile ozetlenmiyor' ($activeRow.Status -notin @('N/A', 'OK', 'PASSIVE')) $activeRow.Status
+Assert-True 'Okunamayan sunucu notta ADIYLA geciyor' ($activeRow.Note -like '*MBX2*') $activeRow.Note
+
+# Zaman asimi ile hata AYRI etiketlerdir; ikisini tek 'N/A'de toplamak
+# kapasite darligini erisim hatasindan ayirt edilemez kilar.
+$timeoutContext = New-DagContext -Servers $servers2 -Copies $readableCopies -FailedServers @('MBX2') -FailureState 'TIMEOUT'
+$rows = @(& $m32.Run $timeoutContext)
+$activeRow = Get-EDTestRow $rows 'Aktif DB sayisi'
+Assert-Equal 'Zaman asimi ERROR degil TIMEOUT yazar' 'TIMEOUT' $activeRow.CellStatus['MBX2']
+
+# 4e-3. HICBIR SUNUCU OKUNAMADIYSA MODUL HUKUM URETMEK ZORUNDA.
+# Eski kod 'Aktif kopya bulunamadi' deyip N/A donuyordu: yani hic veri
+# alinamamis bir kosum, gercekten aktif kopyasi olmayan bir ortamla
+# ayni satiri uretiyordu.
+$allFailedContext = New-DagContext -Servers $servers2 -Copies @() -FailedServers @('MBX1', 'MBX2')
+$rows = @(& $m32.Run $allFailedContext)
+Assert-True 'Tum sunucular okunamazsa M32 N/A DONMEZ' ($rows[0].Status -notin @('N/A', 'OK')) $rows[0].Status
+Assert-True 'Sebep notta: olcum basarisizligi' ($rows[0].Note -like '*OLCUM BASARISIZLIGIDIR*') $rows[0].Note
+
+# 4g. TERCIHI OKUNAMAYAN AKTIF KOPYA (ActivationPreference = $null).
+#
+# Not "ikisinin toplami aktif kopya sayisini verir" diyordu ama kod iki
+# ayri POZITIF filtre kuruyor: Preference -gt 1 ve -eq 1. $null ikisinde
+# de False verir, yani tercihi okunamayan kopya HICBIR kovaya girmiyordu.
+# Olculdu: aktif=2 iken 0+1=1. Ustelik o kopya sessizce "tercihinde"
+# sayilmis gibi hucre OK kaliyordu - okunmamis degerden olumlu hukum.
+#
+# FIXTURE DENGELI KURULUR (MBX1 2, MBX2 2): aksi halde bosalmis dugum
+# zaten 'DENGESIZ YUK' WARN'i uretir ve "hucre OK kalmiyor" iddiasi
+# YANLIS SEBEPTEN gecerdi. Tek degisken tercihin okunamamasi olmali.
+$unknownPrefContext = New-DagContext -Servers $servers2 -Copies @(
+    (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active -Preference 1)
+    (New-Copy -Server 'MBX1' -Database 'DB2' -Status 'Mounted' -Active -Preference $null)
+    (New-Copy -Server 'MBX2' -Database 'DB3' -Status 'Mounted' -Active -Preference 1)
+    (New-Copy -Server 'MBX2' -Database 'DB4' -Status 'Mounted' -Active -Preference 1)
+)
+$rows = @(& $m32.Run $unknownPrefContext)
+$activeRow = Get-EDTestRow $rows 'Aktif DB sayisi'
+$offRow = Get-EDTestRow $rows 'Tercih disi aktif DB'
+$preferredRow = Get-EDTestRow $rows 'Tercih 1 sunucusunda aktif DB'
+Assert-Equal 'Aktif kopya sayisi 2' 2 $activeRow.Values['MBX1']
+Assert-Equal 'Tercihi okunamayan kopya "tercihinde" SAYILMADI' 1 $preferredRow.Values['MBX1']
+Assert-Equal 'Tercihi okunamayan kopya "tercih disi" de SAYILMADI' 0 $offRow.Values['MBX1']
+Assert-True 'Tercihi okunamayan kopya hucreyi OK birakmiyor' `
+    ($activeRow.CellStatus['MBX1'] -ne 'OK') $activeRow.CellStatus['MBX1']
+Assert-Equal 'Tercihi tamamen okunan sunucu OK kaldi' 'OK' $activeRow.CellStatus['MBX2']
+Assert-True 'Dengesizlik UYDURULMADI (tek degisken tercih)' ($activeRow.Note -notlike '*DENGESIZ*') $activeRow.Note
+Assert-True 'Hangi DB oldugu notta yaziyor' ($activeRow.Note -like '*DB2*OKUNAMADI*') $activeRow.Note
+Assert-True 'P8 UYDURULMADI' ($activeRow.Note -notlike '*ORGU P8*') $activeRow.Note
+# ARITMETIK VAADI KOSULA BAGLANDI: not artik tutmayan bir toplam soz vermiyor.
+Assert-True 'Not kosulsuz toplam vaat etmiyor' `
+    ($preferredRow.Note -notlike '*ikisinin toplami aktif kopya sayisini verir*') $preferredRow.Note
+Assert-True 'Eksigin kac tane oldugu SAYIYLA yaziyor' `
+    ($preferredRow.Note -like '*1 aktif kopyanin ActivationPreference degeri OKUNAMADI*') $preferredRow.Note
+
+# Tum tercihler okunuyorsa vaat GERI GELIR ve sayisal olarak da tutar.
+$rows = @(& $m32.Run (New-DagContext -Servers $servers2 -Copies @(
+    (New-Copy -Server 'MBX1' -Database 'DB1' -Status 'Mounted' -Active -Preference 1)
+    (New-Copy -Server 'MBX1' -Database 'DB2' -Status 'Mounted' -Active -Preference 2)
+)))
+$activeRow = Get-EDTestRow $rows 'Aktif DB sayisi'
+$offRow = Get-EDTestRow $rows 'Tercih disi aktif DB'
+$preferredRow = Get-EDTestRow $rows 'Tercih 1 sunucusunda aktif DB'
+Assert-Equal 'Tercihler okunduysa toplam aktif sayiyi verir' `
+    ([int]$activeRow.Values['MBX1']) ([int]$preferredRow.Values['MBX1'] + [int]$offRow.Values['MBX1'])
+Assert-True 'Toplam vaadi bu durumda yaziliyor' `
+    ($preferredRow.Note -like '*ikisinin toplami aktif kopya sayisini verir*') $preferredRow.Note
 
 # 4f. Bosaltilmis dugum "dengeli" DEGILDIR.
 # 10/10/10/0 dagiliminda eski formul (max >= ortalama*1.5) sessiz kaliyordu:

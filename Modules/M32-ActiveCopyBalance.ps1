@@ -41,7 +41,18 @@ Register-EDModule @{
         $active = @($copies | Where-Object { $_.IsActive })
 
         if ($active.Count -eq 0) {
-            return @(New-EDRow -Module 'M32' -Check 'Aktif kopya dagilimi' -Status 'N/A' `
+            # AYIRT EDICI OLCUT 'Count -eq 0' DEGIL, ELDEKI HATA GOSTERGESIDIR.
+            # "Aktif kopya bulunamadi" cumlesi ancak TUM sunucular okunduysa
+            # kurulabilir; okunamayan sunucu varsa bu bir olcum basarisizligidir
+            # ve 'N/A' hukmu kosumun cikis kodunu sessizce 0'da birakirdi.
+            if ($failedServers.Count -gt 0) {
+                $cells = New-EDCopyFailureCells -Inventory $copyStatus
+                return @(New-EDRow -Module 'M32' -Check 'Aktif DB sayisi' -Unit 'adet' -Patterns @('P8') `
+                    -Values $cells.Value -CellStatus $cells.Status `
+                    -Status (Get-EDWorstStatus @($cells.Status.Values)) `
+                    -Note ("Okunabilen sunucularda aktif kopya yok ve {0} OKUNAMADI. Aktif kopya dagilimi hakkinda HICBIR SEY BILINMIYOR - bu bir OLCUM BASARISIZLIGIDIR." -f (Get-EDCopyStatusFailureNote -Inventory $copyStatus)))
+            }
+            return @(New-EDRow -Module 'M32' -Check 'Aktif DB sayisi' -Unit 'adet' -Status 'N/A' `
                 -Note 'Aktif kopya bulunamadi.')
         }
 
@@ -51,22 +62,42 @@ Register-EDModule @{
         $activeValues = @{}; $preferredValues = @{}; $offPreferenceValues = @{}
         $cellStatus = @{}
         $offPreference = @()
+        $unreadable = @()
+        # TERCIHI OKUNAMAYAN AKTIF KOPYALAR. Core\Replication.ps1
+        # ActivationPreference okunamadiginda $null yazar (0 gecerli bir
+        # tercih degildir). $null -gt 1 ve $null -eq 1 IKISI DE False oldugu
+        # icin bu kopyalar eskiden HICBIR kovaya girmiyordu: iki satirin
+        # toplami aktif kopya sayisini vermiyor (olculdu: aktif=2 iken 0+1=1)
+        # ve tercihi bilinmeyen kopya sessizce "sorun yok" sayiliyordu.
+        $unknownPreference = @()
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
             if ($server.Name -in $failedServers) {
+                # Hucre degeri 'N/A' KALIR (0 yazmak "hic aktif DB yok"
+                # yalani olur ve dengesizlik hesabini bozardi) ama HUKUM
+                # 'N/A' OLAMAZ: okunamamak bir olcum basarisizligidir.
+                $failState = Get-EDCopyStatusState -Inventory $copyStatus -Server $server.Name
                 $activeValues[$server.Name] = 'N/A'
                 $preferredValues[$server.Name] = 'N/A'
                 $offPreferenceValues[$server.Name] = 'N/A'
-                $cellStatus[$server.Name] = 'N/A'
+                $cellStatus[$server.Name] = $failState
+                $unreadable += ("{0} ({1})" -f $server.Name, $failState)
                 continue
             }
 
             $serverActive = @($active | Where-Object { $_.Server -eq $server.Name })
             $activeValues[$server.Name] = $serverActive.Count
 
-            $notPreferred = @($serverActive | Where-Object { $_.Preference -gt 1 })
+            # Tercihi OKUNAN kopyalar once ayrilir; geri kalani hukum disidir.
+            $readable = @($serverActive | Where-Object { $null -ne $_.Preference })
+            $unknown = @($serverActive | Where-Object { $null -eq $_.Preference })
+            $notPreferred = @($readable | Where-Object { $_.Preference -ne 1 })
             $offPreferenceValues[$server.Name] = $notPreferred.Count
-            $preferredValues[$server.Name] = @($serverActive | Where-Object { $_.Preference -eq 1 }).Count
+            $preferredValues[$server.Name] = @($readable | Where-Object { $_.Preference -eq 1 }).Count
+
+            foreach ($copy in $unknown) {
+                $unknownPreference += ("{0} aktif {1} uzerinde (ActivationPreference OKUNAMADI)" -f $copy.Database, $copy.Server)
+            }
 
             # PASSIVE etiketi YUK DENGESI icindir; tercih disi aktif kopya
             # tespitini susturmamalidir. Eskiden pasif sitedeki bir failover
@@ -78,7 +109,13 @@ Register-EDModule @{
                 }
             }
 
-            if ($server.IsPassiveSite) {
+            # Tercihi okunamayan kopya PASSIVE etiketiyle de susturulamaz:
+            # PASSIVE "dusuk is yuku normaldir" demektir, "deger okundu"
+            # demek degildir. Okunamayan deger her zaman hukum uretir.
+            if ($unknown.Count -gt 0) {
+                $cellStatus[$server.Name] = 'WARN'
+            }
+            elseif ($server.IsPassiveSite) {
                 $cellStatus[$server.Name] = 'PASSIVE'
             }
             elseif ($notPreferred.Count -gt 0) {
@@ -135,21 +172,45 @@ Register-EDModule @{
             $log.Warn("M32: ORGU P8 - $($offPreference -join ', ')")
         }
         else {
-            $note = 'Tum aktif kopyalar ActivationPreference=1 sunucusunda. ' + $note
+            # "Tum aktif kopyalar tercih 1'de" ancak TUM tercihler OKUNDUYSA
+            # soylenebilir; okunamayan tercih olumlu bir hukme cevrilemez.
+            if ($unknownPreference.Count -gt 0) {
+                $note = ('Tercihi OKUNAN aktif kopyalarin tamami ActivationPreference=1 sunucusunda. ' + $note)
+            }
+            else {
+                $note = 'Tum aktif kopyalar ActivationPreference=1 sunucusunda. ' + $note
+            }
+        }
+        if ($unknownPreference.Count -gt 0) {
+            $note = ('TERCIHI OKUNAMAYAN AKTIF KOPYALAR ({0}): {1}. Bu kopyalar icin "tercihinde" ya da "tercih disi" hukmu VERILMEDI; ikisi de uydurma olurdu. ' -f `
+                        $unknownPreference.Count, ($unknownPreference -join ', ')) + $note
+            $log.Warn("M32: ActivationPreference okunamayan aktif kopyalar - $($unknownPreference -join ', ')")
+        }
+        if ($unreadable.Count -gt 0) {
+            $note = ('KOPYA DURUMU OKUNAMAYAN SUNUCULAR: {0}. Bu sunuculardaki aktif kopyalar hic sayilmadi; N/A hucreleri "hic aktif DB yok" anlamina GELMEZ. ' -f `
+                        ($unreadable -join ', ')) + $note
         }
 
         Save-EDEvidence -Context $Context -Name 'M32-active-distribution' -Data @(
             $active | Sort-Object Server, Database | ForEach-Object {
                 [pscustomobject]@{
-                    Veritabani = $_.Database; AktifSunucu = $_.Server; Tercih = $_.Preference
-                    TercihDisi = ($_.Preference -gt 1); Durum = $_.Status
+                    Veritabani = $_.Database; AktifSunucu = $_.Server
+                    # Tercih okunamadiysa 'N/A' yazilir; bos hucre "1" gibi
+                    # okunur ve kanit dosyasi da hukmu uydurmus olurdu.
+                    Tercih     = $(if ($null -ne $_.Preference) { $_.Preference } else { 'N/A' })
+                    TercihDisi = $(if ($null -eq $_.Preference) { 'N/A' } else { $_.Preference -ne 1 })
+                    Durum      = $_.Status
                 }
             }
         ) | Out-Null
 
         return @(
+            # Hucre tablosu yalnizca topolojideki sunuculari tasir; envanterden
+            # okunamayan bir sunucu hucre uretmeden de kapsami eksiltir.
             New-EDRow -Module 'M32' -Check 'Aktif DB sayisi' -Values $activeValues -CellStatus $cellStatus `
-                -Unit 'adet' -Status (Get-EDWorstStatus @(@($cellStatus.Values) + @($balanceStatus))) -Patterns @('P8') -Note $note
+                -Unit 'adet' -Patterns @('P8') -Note $note `
+                -Status (Get-EDWorstStatus @(@($cellStatus.Values) + @($balanceStatus) +
+                    @($failedServers | ForEach-Object { Get-EDCopyStatusState -Inventory $copyStatus -Server $_ })))
             # P8'in tanimi ("aktif kopyalar ActivationPreference disinda
             # dagilmis") dogrudan bu sayidir; orgu yalnizca aktif DB sayisi
             # satirindaydi ve iddianin kanit satiri etiketsiz kaliyordu.
@@ -164,9 +225,23 @@ Register-EDModule @{
             # yanlis okuma operatoru saglikli bir DB'yi yanlis yerde
             # sanmaya goturur. Gercek DAG uzerindeki ilk kosumda ayrica
             # raporun NOTSUZ TEK satiriydi: adi belirsiz, aciklamasi yok.
+            # NOT KODA UYDURULDU, KOD NOTA DEGIL.
+            # Not "ikisinin toplami aktif kopya sayisini verir" diye KOSULSUZ
+            # bir aritmetik vaat ediyordu; kod ise iki ayri POZITIF filtre
+            # kuruyor (tercih -eq 1 ve tercih -ne 1, ikisi de tercihin
+            # OKUNMUS olmasini sart kosar). Tercihi okunamayan bir kopya
+            # ucuncu bir kumedir ve hicbir satirda sayilmaz. Cozum tercihi
+            # okunamayan kopyayi "tercihinde" saymak OLAMAZDI - o, okunmamis
+            # bir degerden olumlu hukum cikarmaktir; dogrusu vaadi kosula
+            # baglamak ve eksigin kac tane oldugunu SAYIYLA soylemektir.
             New-EDRow -Module 'M32' -Check 'Tercih 1 sunucusunda aktif DB' -Values $preferredValues -Unit 'adet' -Status 'OK' `
                 -Note ('ActivationPreference degeri 1 olan sunucuda calisan aktif kopyalar - yani BEKLENEN yerdekiler. ' +
-                       'Bir ustteki "Tercih disi aktif DB" satirinin tamamlayicisidir; ikisinin toplami aktif kopya sayisini verir. ' +
+                       'Bir ustteki "Tercih disi aktif DB" satirinin tamamlayicisidir. ' +
+                       $(if ($unknownPreference.Count -gt 0) {
+                             'DIKKAT: bu kosumda {0} aktif kopyanin ActivationPreference degeri OKUNAMADI; o kopyalar iki satirin HICBIRINDE sayilmaz, yani toplam aktif kopya sayisindan {0} eksiktir. ' -f $unknownPreference.Count
+                         } else {
+                             'Tum tercihler okundugu icin ikisinin toplami aktif kopya sayisini verir. '
+                         }) +
                        'Ayrinti: M32-active-distribution.csv')
         )
     }

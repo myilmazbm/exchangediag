@@ -40,8 +40,23 @@ Register-EDModule @{
         $failedServers = @($copyStatus.FailedServers)
 
         if ($copies.Count -eq 0) {
-            return @(New-EDRow -Module 'M26' -Check 'Icerik indeksi' -Status 'N/A' `
-                -Note 'Kopya durumu okunamadi; indeks durumu hakkinda hukum verilemez.')
+            # AYIRT EDICI OLCUT 'Count -eq 0' DEGIL, ELDEKI HATA GOSTERGESIDIR.
+            # Hicbir kopya gelmemis olmasinin iki ayri sebebi vardir ve
+            # hukumleri farklidir: sunucular okunamadiysa bu bir OLCUM
+            # BASARISIZLIGIDIR ('N/A' bulgu tablosuna girmez, kod 0 kalir);
+            # sunucular okunup gercekten kopya yoksa kavram gecerli degildir.
+            if ($failedServers.Count -gt 0) {
+                $cells = New-EDCopyFailureCells -Inventory $copyStatus
+                # Satir adi NORMAL yoldakiyle AYNI: Compare motoru satirlari
+                # Modul+Kontrol ile eslestirir, farkli ad "satir KAYBOLDU"
+                # gibi okunur (M15 ile ayni gerekce).
+                return @(New-EDRow -Module 'M26' -Check 'Icerik indeksi durumu' `
+                    -Values $cells.Value -CellStatus $cells.Status `
+                    -Status (Get-EDWorstStatus @($cells.Status.Values)) `
+                    -Note ("HICBIR SUNUCUDAN kopya durumu alinamadi: {0}. Indeks sagligi hakkinda HICBIR SEY BILINMIYOR - bu bir olcum basarisizligidir, 'arama saglikli' DEGILDIR." -f (Get-EDCopyStatusFailureNote -Inventory $copyStatus)))
+            }
+            return @(New-EDRow -Module 'M26' -Check 'Icerik indeksi durumu' -Status 'N/A' `
+                -Note 'Sunucular okundu ancak hic veritabani kopyasi yok; indeks durumu kavrami gecerli degil.')
         }
 
         # 'Unknown' BOZUK DEGILDIR: durumun belirlenemedigi anlamina gelir
@@ -64,8 +79,12 @@ Register-EDModule @{
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
             if ($server.Name -in $failedServers) {
+                # OKUNAMAYAN SUNUCU 'N/A' KALAMAZ. 'N/A' bir hukum degildir:
+                # bulgu tablosuna girmez, satirin ozetini ele gecirmez ve
+                # cikis koduna dokunmaz. Yurutucunun kendi durumu yazilir.
+                $failState = Get-EDCopyStatusState -Inventory $copyStatus -Server $server.Name
                 $stateValues[$server.Name] = 'okunamadi'; $crawlValues[$server.Name] = 'N/A'
-                $cellStatus[$server.Name] = 'N/A'
+                $cellStatus[$server.Name] = $failState
                 continue
             }
 
@@ -160,7 +179,7 @@ Register-EDModule @{
             $note += ($naNotes2 -join ' | ') + '. '
         }
         if ($failedServers.Count -gt 0) {
-            $note += ('KOPYA DURUMU OKUNAMAYAN SUNUCULAR: {0}. Bu sunuculardaki indeksler hakkinda HICBIR SEY BILINMIYOR. ' -f ($failedServers -join ', '))
+            $note += ('KOPYA DURUMU OKUNAMAYAN SUNUCULAR: {0}. Bu sunuculardaki indeksler hakkinda HICBIR SEY BILINMIYOR. ' -f (Get-EDCopyStatusFailureNote -Inventory $copyStatus))
         }
         # "Hepsi saglikli" ancak hepsi GERCEKTEN degerlendirildiyse soylenir.
         # Eskiden bu cumle bir fall-through idi: taninmayan durum yuzunden
@@ -177,9 +196,15 @@ Register-EDModule @{
         }
         $note += 'Ayrinti: M26-content-index.csv'
 
+        # HUKME OKUNAMAYAN SUNUCULAR DA GIRER. Hucre tablosu yalnizca
+        # topolojide bilinen sunuculari tasir; envanterden okunamayan bir
+        # sunucu hucre uretmeden de kapsami eksiltir ve satirin ozeti bunu
+        # soylemek zorundadir - aksi halde yarim okunmus bir ortam "OK".
+        $failStates = @($failedServers | ForEach-Object { Get-EDCopyStatusState -Inventory $copyStatus -Server $_ })
+
         return @(
             New-EDRow -Module 'M26' -Check 'Icerik indeksi durumu' -Values $stateValues -CellStatus $cellStatus `
-                -Status (Get-EDWorstStatus @($cellStatus.Values)) -Note $note
+                -Status (Get-EDWorstStatus @(@($cellStatus.Values) + $failStates)) -Note $note
             New-EDRow -Module 'M26' -Check 'Olusturulan (crawling) indeks' -Values $crawlValues -Unit 'adet' -Status 'OK' `
                 -Note 'Indeks olusturma gecici bir durumdur ama surerken CPU ve disk yukunu artirir.'
         )

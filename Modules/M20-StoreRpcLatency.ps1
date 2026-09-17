@@ -42,13 +42,25 @@ Register-EDModule @{
         $evidence = @()
         $anyData = $false
         $p4Candidates = @()
+        # IKI AYRI "OLCUM YOK" VARDIR VE KARISTIRILAMAZ:
+        #   $unmeasured  - sunucu OKUNAMADI (WinRM yok, zaman asimi). Bu bir
+        #                  olcum BASARISIZLIGIDIR; hukum uretir (ERROR/TIMEOUT).
+        #   $counterless - sunucu okundu ama sayac sinifi yok (eski surum,
+        #                  Store rolu yok). Kavram gecerli degil; gercek N/A.
+        # Ikisi de eskiden ayni kefeye giriyordu ve modul, HICBIR sunucudan
+        # veri alamadigi kosumda bile 'N/A' donuyordu - yani oturumu dusmus
+        # bir tarama "Bulgular (0)" ve cikis kodu 0 ile bitiyordu.
+        $unmeasured = @()
+        $counterless = @()
 
         foreach ($server in @($perf.Keys | Sort-Object)) {
             $entry = $perf[$server]
 
             if ($entry.Error) {
-                foreach ($table in @($latencyValues, $latencyP99Values, $requestValues, $opsValues)) { $table[$server] = 'ERROR' }
-                $cellStatus[$server] = 'ERROR'
+                $state = [string](Get-EDProperty $entry 'State' 'ERROR')
+                foreach ($table in @($latencyValues, $latencyP99Values, $requestValues, $opsValues)) { $table[$server] = $state }
+                $cellStatus[$server] = $state
+                $unmeasured += ("{0} ({1})" -f $server, $entry.Error)
                 continue
             }
 
@@ -56,6 +68,7 @@ Register-EDModule @{
             if (-not $total -or $total.Count -eq 0) {
                 foreach ($table in @($latencyValues, $latencyP99Values, $requestValues, $opsValues)) { $table[$server] = 'N/A' }
                 $cellStatus[$server] = 'N/A'
+                $counterless += $server
                 continue
             }
 
@@ -134,13 +147,30 @@ Register-EDModule @{
         }
 
         if (-not $anyData) {
+            # HIC VERI YOKKEN HUKUM, SEBEBE GORE DEGISIR (M14/M15 deseni).
+            # Sunucular okunamadiysa bu bir olcum basarisizligidir ve satir
+            # hukum uretmek ZORUNDADIR: aksi halde 'N/A' bulgu tablosuna
+            # girmez, cikis kodu 0 kalir ve yarim kalmis bir tarama "temiz"
+            # diye okunur. Sayac sinifinin bulunmamasi ise gercekten N/A'dir
+            # (brief ilke 12: surum duyarlilik).
+            if ($unmeasured.Count -gt 0) {
+                return @(New-EDRow -Module 'M20' -Check 'RPC Average Latency p95' -Values $latencyValues -CellStatus $cellStatus `
+                    -Unit 'ms' -Status (Get-EDWorstStatus @($cellStatus.Values)) -Patterns @('P4') `
+                    -Note ("HICBIR SUNUCUDAN Store sayaci alinamadi - bu bir OLCUM BASARISIZLIGIDIR, 'sorun yok' DEGILDIR. Okunamayan sunucular: {0}. WinRM erisimi ve sunucularin yanit verip vermedigi kontrol edilmeli." -f ($unmeasured -join ' | ')))
+            }
             return @(New-EDRow -Module 'M20' -Check 'RPC Average Latency p95' -Values $latencyValues -CellStatus $cellStatus `
                 -Unit 'ms' -Status 'N/A' -Patterns @('P4') `
-                -Note 'MSExchangeIS Store sayaclari okunamadi. Bu surumde sayac sinifi mevcut olmayabilir veya WinRM erisimi yok.')
+                -Note ("MSExchangeIS Store sayac sinifi bulunamadi ({0}); bu surumde/rolde mevcut olmayabilir. Sunucular OKUNDU, sayac yok." -f ($counterless -join ', ')))
         }
 
         $sampleCount = @($perf.Values | Where-Object { -not $_.Error } | ForEach-Object { $_.SampleCount } | Select-Object -First 1)
         $note = "$($sampleCount) ornek uzerinden. Sayacin kendisi bir ortalamadir; burada raporlanan onun zaman icindeki persentilidir."
+        if ($unmeasured.Count -gt 0) {
+            # Kismi kapsam gizlenmez: tablonun geri kalanina bakip "temiz"
+            # demek, okunmamis sunuculari sagliklilarin arasina saymaktir.
+            $note = ("OLCULEMEYEN SUNUCULAR: {0}. Bu sunucular icin 'RPC gecikmesi normal' DENEMEZ. " -f ($unmeasured -join ' | ')) + $note
+            $log.Warn("M20: olculemeyen sunucular - $($unmeasured -join ' | ')")
+        }
 
         if ($p4Candidates.Count -gt 0) {
             $note = 'ORGU P4: yuksek RPC latency + SAGLIKLI disk + DUSUK kuyruk -> darbogaz depolamada degil, Store icinde. ' +
