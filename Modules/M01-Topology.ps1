@@ -99,8 +99,19 @@ Register-EDModule @{
         }
 
         # --- DAG'lar ---
+        # "DAG okunamadi" ile "DAG yok" AYNI SEY DEGILDIR. Eskiden okuma
+        # basarisiz olunca $dags bos kaliyor, rapor "Ortamda DAG yok (hata
+        # degil)" yaziyor ve M30-M34'un BESI birden "ortamda DAG yok"
+        # gerekcesiyle atlaniyordu. Mesgul bir DAG'de Get-DatabaseAvailability-
+        # Group 120 sn'de zaman asimina ugrarsa tum replikasyon hukmu sessizce
+        # dusuyordu; tek iz bir log satiriydi.
         $dags = @()
-        if ($byKey['dags'].Succeeded) {
+        $dagsReadable = [bool]$byKey['dags'].Succeeded
+        $dagReadError = [string]$byKey['dags'].Error
+        if (-not $dagsReadable) {
+            $log.Warn("M01: DAG listesi OKUNAMADI ($($byKey['dags'].State)) $dagReadError - ortamda DAG olup olmadigi BILINMIYOR.")
+        }
+        if ($dagsReadable) {
             $dags = foreach ($row in $byKey['dags'].Output) {
                 $members = @()
                 foreach ($member in @(Get-EDProperty $row 'Servers' @())) {
@@ -118,8 +129,16 @@ Register-EDModule @{
         }
 
         # --- Veritabanlari ---
+        # Ayni ayrim: okunamayan liste "0 veritabani" DEGILDIR. Eskiden
+        # Get-MailboxDatabase 300 sn'de zaman asimina ugradiginda her sunucu
+        # icin "Aktif (mounted) DB = 0" yaziliyor, satir OK olarak gecirilip
+        # uydurma sifirlar olcum gibi sunuluyordu.
         $databases = @()
-        if ($byKey['databases'].Succeeded) {
+        $databasesReadable = [bool]$byKey['databases'].Succeeded
+        if (-not $databasesReadable) {
+            $log.Warn("M01: veritabani listesi OKUNAMADI ($($byKey['databases'].State)) $([string]$byKey['databases'].Error) - aktif DB sayilari uretilmeyecek.")
+        }
+        if ($databasesReadable) {
             $databases = foreach ($row in $byKey['databases'].Output) {
                 $copies = @()
                 foreach ($copy in @(Get-EDProperty $row 'Servers' @())) {
@@ -194,6 +213,10 @@ Register-EDModule @{
             Sites     = $sites
             Dags      = $dags
             Databases = $databases
+            # Okunabilirlik bayraklari: asagi akistaki moduller "veri yok" ile
+            # "okunamadi" arasindaki farki ancak boyle gorebilir.
+            DagsReadable      = $dagsReadable
+            DatabasesReadable = $databasesReadable
             HasDag    = ($dags.Count -gt 0)
         }
 
@@ -242,10 +265,24 @@ Register-EDModule @{
         $activeValues = @{}
         $activeCellStatus = @{}
         foreach ($server in $discovered) {
+            # Liste okunamadiysa 0 uydurulmaz: 0 bir olcumdur ve P8 orgusu
+            # (yuk dengesizligi) bu sayiya dayanir.
+            if (-not $databasesReadable) {
+                $activeValues[$server.Name] = 'N/A'
+                $activeCellStatus[$server.Name] = 'N/A'
+                continue
+            }
             $activeValues[$server.Name] = $server.ActiveDbs
             if ($server.IsPassiveSite) { $activeCellStatus[$server.Name] = 'PASSIVE' }
         }
-        $rows += New-EDRow -Module 'M01' -Check 'Aktif (mounted) DB' -Values $activeValues -CellStatus $activeCellStatus -Unit 'adet' -Status 'OK' -Patterns @('P8')
+        $activeNote = ''
+        $activeStatus = 'OK'
+        if (-not $databasesReadable) {
+            $activeStatus = 'WARN'
+            $activeNote = 'Veritabani listesi okunamadi; aktif DB sayilari OLCULEMEDI. '
+            $activeNote += 'Bu satirdaki N/A degerler "sifir DB" anlamina GELMEZ.'
+        }
+        $rows += New-EDRow -Module 'M01' -Check 'Aktif (mounted) DB' -Values $activeValues -CellStatus $activeCellStatus -Unit 'adet' -Status $activeStatus -Patterns @('P8') -Note $activeNote
 
         if ($dags.Count -gt 0) {
             $copyValues = @{}
@@ -254,7 +291,15 @@ Register-EDModule @{
                 -Note ('DAG: ' + (@($dags | ForEach-Object { "$($_.Name) [$($_.Members -join ',')]" }) -join ' | '))
         }
         else {
-            $rows += New-EDRow -Module 'M01' -Check 'DAG' -Status 'N/A' -Note 'Ortamda DAG yok - Faz D modulleri gecerli degil (hata degil).'
+            if ($dagsReadable) {
+                $rows += New-EDRow -Module 'M01' -Check 'DAG' -Status 'N/A' -Note 'Ortamda DAG yok - Faz D modulleri gecerli degil (hata degil).'
+            }
+            else {
+                $note = "DAG listesi OKUNAMADI ($dagReadError). Ortamda DAG olup olmadigi BILINMIYOR; "
+                $note += 'replikasyon modulleri (M30-M34) bu yuzden calistirilamadi. Bu bir bulgu YOKLUGU degil, '
+                $note += 'bir olcum eksikligidir - Exchange baglantisini ve yetkileri kontrol edip tekrar calistirin.'
+                $rows += New-EDRow -Module 'M01' -Check 'DAG' -Status 'WARN' -Note $note
+            }
         }
 
         return $rows

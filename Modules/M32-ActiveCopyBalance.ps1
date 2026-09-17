@@ -29,7 +29,15 @@ Register-EDModule @{
         param($Context)
 
         $log = $Context.Log
-        $copies = @((Get-EDCopyStatus -Context $Context).Copies)
+        $copyStatus = Get-EDCopyStatus -Context $Context
+        $copies = @($copyStatus.Copies)
+        # Okunamayan sunucular. M30 ve M31 bunlari dogru sekilde N/A yapiyor,
+        # M32 yapmiyordu: kopya listesi okunamayan sunucu "0 aktif DB" olarak
+        # sayiliyor, bu da ortalamayi dusurup SAGLAM sunucuyu "DENGESIZ YUK"
+        # ile sucluyordu. Iki dugumlu bir DAG'de 20/20 dagilim, MBX2'nin
+        # okumasi zaman asimina ugradiginda "MBX1'de 20 aktif DB var,
+        # ortalama 10" seklinde bir WARN uretiyordu.
+        $failedServers = @($copyStatus.FailedServers)
         $active = @($copies | Where-Object { $_.IsActive })
 
         if ($active.Count -eq 0) {
@@ -45,6 +53,14 @@ Register-EDModule @{
         $offPreference = @()
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
+            if ($server.Name -in $failedServers) {
+                $activeValues[$server.Name] = 'N/A'
+                $preferredValues[$server.Name] = 'N/A'
+                $offPreferenceValues[$server.Name] = 'N/A'
+                $cellStatus[$server.Name] = 'N/A'
+                continue
+            }
+
             $serverActive = @($active | Where-Object { $_.Server -eq $server.Name })
             $activeValues[$server.Name] = $serverActive.Count
 
@@ -52,14 +68,21 @@ Register-EDModule @{
             $offPreferenceValues[$server.Name] = $notPreferred.Count
             $preferredValues[$server.Name] = @($serverActive | Where-Object { $_.Preference -eq 1 }).Count
 
+            # PASSIVE etiketi YUK DENGESI icindir; tercih disi aktif kopya
+            # tespitini susturmamalidir. Eskiden pasif sitedeki bir failover
+            # sonrasi 5 DB tercih 3'te aktif kalsa bile rapor "Tum aktif
+            # kopyalar ActivationPreference=1 sunucusunda" diyordu.
+            if ($notPreferred.Count -gt 0) {
+                foreach ($copy in $notPreferred) {
+                    $offPreference += ("{0} aktif {1} uzerinde (tercih {2})" -f $copy.Database, $copy.Server, $copy.Preference)
+                }
+            }
+
             if ($server.IsPassiveSite) {
                 $cellStatus[$server.Name] = 'PASSIVE'
             }
             elseif ($notPreferred.Count -gt 0) {
                 $cellStatus[$server.Name] = 'WARN'
-                foreach ($copy in $notPreferred) {
-                    $offPreference += ("{0} aktif {1} uzerinde (tercih {2})" -f $copy.Database, $copy.Server, $copy.Preference)
-                }
             }
             else {
                 $cellStatus[$server.Name] = 'OK'
@@ -69,6 +92,7 @@ Register-EDModule @{
         # --- Yuk dengesi (yalnizca pasif olmayan sunucular arasinda) ---
         $balanceNote = ''
         $balanceStatus = 'OK'
+        $eligible = @($eligible | Where-Object { $_.Name -notin $failedServers })
         if ($eligible.Count -ge 2) {
             $counts = @($eligible | ForEach-Object { [double]$activeValues[$_.Name] })
             $maximum = ($counts | Measure-Object -Maximum).Maximum
@@ -76,10 +100,22 @@ Register-EDModule @{
             $average = ($counts | Measure-Object -Average).Average
 
             # Bir sunucu ortalamanin 1.5 katindan fazlasini tasiyorsa dengesiz.
-            if ($average -gt 0 -and $maximum -ge ($average * 1.5) -and ($maximum - $minimum) -ge 2) {
+            # Tamamen bosaltilmis bir dugum (10/10/10/0) eski formulle
+            # "dengeli" cikiyordu: max 10 < ortalama 7.5 * 1.5. Oysa bosaltilmis
+            # dugum, M32'nin yakalamak icin var oldugu "failover sonrasi yeniden
+            # dengelenmemis" durumun ta kendisidir.
+            $drained = ($minimum -eq 0 -and $maximum -gt 0)
+            if ($average -gt 0 -and ($drained -or ($maximum -ge ($average * 1.5) -and ($maximum - $minimum) -ge 2))) {
                 $balanceStatus = 'WARN'
                 $heaviest = @($eligible | Where-Object { [double]$activeValues[$_.Name] -eq $maximum })[0]
-                $balanceNote = ('DENGESIZ YUK: {0} sunucusunda {1} aktif DB var, ortalama {2:N1}. ' -f $heaviest.Name, $maximum, $average)
+                if ($drained) {
+                    $empty = @($eligible | Where-Object { [double]$activeValues[$_.Name] -eq 0 })
+                    $balanceNote = ('DENGESIZ YUK: {0} sunucusunda HIC aktif DB yok, en yuklu {1} sunucusunda {2} var. ' -f `
+                        (@($empty | ForEach-Object { $_.Name }) -join ', '), $heaviest.Name, $maximum)
+                }
+                else {
+                    $balanceNote = ('DENGESIZ YUK: {0} sunucusunda {1} aktif DB var, ortalama {2:N1}. ' -f $heaviest.Name, $maximum, $average)
+                }
                 if ($cellStatus[$heaviest.Name] -eq 'OK') { $cellStatus[$heaviest.Name] = 'WARN' }
             }
             else {

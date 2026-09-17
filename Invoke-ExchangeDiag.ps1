@@ -209,7 +209,14 @@ try {
             $skipReason = 'agir modul; -Heavy ile calistirin'
         }
         elseif ('Dag' -in $moduleInfo.Needs -and $context.Topology.Dags.Count -eq 0) {
-            $skipReason = 'ortamda DAG yok'
+            # "DAG yok" ile "DAG okunamadi" ayri gerekcelerdir; ikincisinde
+            # atlama bir bilgi degil, bir OLCUM EKSIKLIGIDIR ve oyle yazilir.
+            if ($context.Topology.DagsReadable) {
+                $skipReason = 'ortamda DAG yok'
+            }
+            else {
+                $skipReason = 'DAG listesi OKUNAMADI; DAG olup olmadigi bilinmiyor (bkz. M01/DAG satiri)'
+            }
         }
         [pscustomobject]@{ Module = $moduleInfo; SkipReason = $skipReason }
     }

@@ -62,12 +62,12 @@ function New-Copy {
 }
 
 function New-DagContext {
-    param($Copies, $Servers, $Sites = @('Site1'), $Executor = $null)
+    param($Copies, $Servers, $Sites = @('Site1'), $Executor = $null, $FailedServers = @())
     $context = New-EDTestContext -Config $config -Executor $Executor -Servers $Servers `
         -Sites @($Sites | ForEach-Object { [pscustomobject]@{ Name = $_ } }) `
         -Dags @([pscustomobject]@{ Name = 'DAG1'; Members = @($Servers | ForEach-Object { $_.Name }) }) `
         -OutputDir $script:OutputDir
-    $context.Cache['CopyStatus'] = [pscustomobject]@{ Copies = @($Copies); FailedServers = @() }
+    $context.Cache['CopyStatus'] = [pscustomobject]@{ Copies = @($Copies); FailedServers = @($FailedServers) }
     return $context
 }
 
@@ -256,6 +256,34 @@ Assert-Equal 'DR sunucusu PASSIVE isaretlendi' 'PASSIVE' $activeRow.CellStatus['
 Assert-True 'Tek aktif sunucu icin denge iddiasi yok' ($activeRow.Note -like '*Tek aktif sunucu*') $activeRow.Note
 
 # ===========================================================================
+# 4e. OKUNAMAYAN SUNUCU "0 aktif DB" DEGILDIR.
+# Eskiden M32 FailedServers'a hic bakmiyordu: kopya listesi okunamayan
+# sunucu 0 sayiliyor, ortalama dusuyor ve SAGLAM sunucu "DENGESIZ YUK"
+# ile suclaniyordu. M30 ve M31 ayni durumu dogru sekilde N/A yapiyordu.
+$readableCopies = @()
+1..20 | ForEach-Object { $readableCopies += (New-Copy -Server 'MBX1' -Database "DB$_" -Status 'Mounted' -Active -Preference 1) }
+$failedContext = New-DagContext -Servers $servers2 -Copies $readableCopies -FailedServers @('MBX2')
+$rows = @(& $m32.Run $failedContext)
+$activeRow = Get-EDTestRow $rows 'Aktif DB sayisi'
+Assert-Equal 'Okunamayan sunucu 0 DEGIL N/A' 'N/A' $activeRow.Values['MBX2']
+Assert-Equal 'Okunamayan sunucu hucresi N/A' 'N/A' $activeRow.CellStatus['MBX2']
+Assert-True 'Okunamayan sunucu yuzunden UYDURMA dengesizlik yok' `
+    ($activeRow.Note -notlike '*DENGESIZ*') $activeRow.Note
+Assert-True 'Saglam sunucu suclanmadi' ($activeRow.CellStatus['MBX1'] -ne 'WARN') $activeRow.CellStatus['MBX1']
+
+# 4f. Bosaltilmis dugum "dengeli" DEGILDIR.
+# 10/10/10/0 dagiliminda eski formul (max >= ortalama*1.5) sessiz kaliyordu:
+# max 10 < 7.5*1.5. Oysa bosaltilmis dugum, M32'nin yakalamak icin var
+# oldugu "failover sonrasi yeniden dengelenmemis" durumun ta kendisidir.
+$drainedCopies = @()
+1..10 | ForEach-Object { $drainedCopies += (New-Copy -Server 'MBX1' -Database "DA$_" -Status 'Mounted' -Active -Preference 1) }
+$drainedContext = New-DagContext -Servers $servers2 -Copies $drainedCopies
+$rows = @(& $m32.Run $drainedContext)
+$activeRow = Get-EDTestRow $rows 'Aktif DB sayisi'
+Assert-Equal 'Bosaltilmis dugum WARN' 'WARN' $activeRow.Status
+Assert-True 'Bos dugum adiyla gecti' ($activeRow.Note -like '*MBX2*') $activeRow.Note
+Assert-True 'Bos dugum "dengeli" DENMEDI' ($activeRow.Note -notlike '*dengeli*') $activeRow.Note
+
 Write-Host "`n=== 5. M33 Test-ReplicationHealth ===" -ForegroundColor Cyan
 
 function New-HealthContext {
