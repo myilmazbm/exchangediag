@@ -457,6 +457,24 @@ function Get-EDStatus {
         throw "Bozuk esik '$ThresholdName': 'warn' ve 'fail' sayisal olmali (thresholds.json)."
     }
 
+    # ESIT IKI SAYIDAN YON CIKARILAMAZ.
+    #
+    # Yon ayrica tanimlanmaz, warn ile fail'in SIRASINDAN cikarilir. Esitlik
+    # halinde sira yoktur; eski kod sessizce "yuksek kotu" varsayiyordu ve
+    # dusuk-kotu bir olcum icin hukmu TAMAMEN TERSINE ceviriyordu. Olculdu:
+    # diskFreePercent {warn:10, fail:10} ile %50 bos disk FAIL, %1 bos disk
+    # OK. Operator "10'da ariza say" demek isterken tam tersini almis olur
+    # ve bunu soyleyen hicbir sey yoktur.
+    #
+    # Bu, eksik 'fail' anahtarinin sessizce 0 olup yonu ters cevirmesiyle
+    # AYNI SINIFTIR; o kusur icin konan sema dogrulamasi esitligi
+    # kapsamiyordu. Sessiz bir varsayim yerine acik hata: operator yonu
+    # kendisi belirtmek zorunda kalir.
+    if ($warn -eq $fail) {
+        throw ("Bozuk esik '{0}': 'warn' ve 'fail' esit ({1}). Yon bu ikisinin SIRASINDAN cikarilir; esitlikte yon bilinemez. " -f $ThresholdName, $warn) +
+               "Yuksek deger kotuyse warn < fail, dusuk deger kotuyse warn > fail yazin (thresholds.json)."
+    }
+
     # ESIK DAHILDIR (bkz. yukaridaki SINIR SEMANTIGI). Iki bacaktaki
     # karsilastirmalar birbirinin AYNASIDIR: '-ge'/'-le' cifti esige ULASMAYI
     # o kademeye girmek sayar. Birini '-gt'/'-lt' yapmak yalnizca o yondeki

@@ -181,20 +181,38 @@ Assert-Equal 'ondalik: TAM 0.050 (fail) -> FAIL' 'FAIL' (Get-TestStatus 0.050 'o
 Assert-Equal 'ondalik: TAM 0.020 (warn) -> WARN' 'WARN' (Get-TestStatus 0.020 'ondalikYuksek')
 
 # ===========================================================================
-Write-Host "`n=== 4. warn == fail: yon SOYLENEMEZ, WARN bandi YOKTUR ===" -ForegroundColor Cyan
+Write-Host "`n=== 4. warn == fail: yon CIKARILAMAZ, ACIK HATA verilir ===" -ForegroundColor Cyan
 
-# BELGELENEN (savunulan degil) DAVRANIS: iki sayi esitken yon cikarimi
-# "$warn -le $fail" dali sayesinde YUKSEK KOTU'ya duser ve arada WARN
-# kalmadigi icin hukum ikiye bolunur. Burada iddia edilen sey dogrulugu
-# degil, SESSIZ DEGISMEZLIGIDIR: bu dal bir gun acik hataya cevrilirse
-# (ayrilan bir oneridir - esit iki sayidan yon CIKARILAMAZ) bu satirlar
-# kirmizi olur ve karar bilincli alinir.
-Assert-Equal 'esit esik: 9.999 -> OK'    'OK'   (Get-TestStatus 9.999 'esitEsik')
-Assert-Equal 'esit esik: TAM 10 -> FAIL' 'FAIL' (Get-TestStatus 10 'esitEsik')
-Assert-Equal 'esit esik: 10.001 -> FAIL' 'FAIL' (Get-TestStatus 10.001 'esitEsik')
-Assert-True  'esit esik: hicbir deger WARN uretmiyor' `
-    (@(0, 5, 9.999, 10, 10.001, 50 | ForEach-Object { Get-TestStatus $_ 'esitEsik' }) -notcontains 'WARN') `
-    'warn bandi genisligi sifirdir'
+# BU BOLUM BIR KARARIN KAYDIDIR.
+#
+# Yon ayrica tanimlanmaz, warn ile fail'in SIRASINDAN cikarilir. Esitlikte
+# sira yoktur. Eski kod sessizce "yuksek kotu" varsayiyordu ve dusuk-kotu
+# bir olcumde hukmu TAMAMEN TERSINE ceviriyordu. Olculdu: diskFreePercent
+# {warn:10, fail:10} ile %50 bos disk FAIL, %1 bos disk OK - operator
+# "10'da ariza say" demek isterken tam tersini aliyordu ve bunu soyleyen
+# hicbir sey yoktu.
+#
+# Bu, eksik 'fail' anahtarinin sessizce 0 olup yonu ters cevirmesiyle AYNI
+# SINIFTIR; o kusur icin konan sema dogrulamasi esitligi kapsamiyordu.
+# Sessiz varsayim yerine acik hata: operator yonu kendisi belirtir.
+$esitHata = $null
+try { Get-TestStatus 50 'esitEsik' | Out-Null }
+catch { $esitHata = $_.Exception.Message }
+Assert-True 'esit esik ACIK HATA veriyor' ($null -ne $esitHata) $esitHata
+Assert-True 'Hata hangi esik oldugunu soyluyor' ($esitHata -like '*esitEsik*') $esitHata
+Assert-True 'Hata yonun cikarilamadigini soyluyor' ($esitHata -like '*yon bilinemez*') $esitHata
+# Sebebi soylemek yetmez; NE YAPILACAGI da yazilmali.
+Assert-True 'Hata nasil duzeltilecegini soyluyor' `
+    ($esitHata -like '*warn < fail*' -and $esitHata -like '*warn > fail*') $esitHata
+Assert-True 'Hata dosya adini soyluyor' ($esitHata -like '*thresholds.json*') $esitHata
+
+# Esitlik hatasi SESSIZ bir N/A'e donusmemeli: olculemeyen deger ile bozuk
+# YAPILANDIRMA ayri seylerdir ve ikincisi duzeltilmek zorundadir.
+$nullEsitHata = $null
+try { Get-TestStatus $null 'esitEsik' | Out-Null }
+catch { $nullEsitHata = $_.Exception.Message }
+Assert-True 'null deger config hatasini MASKELIYOR (bilinen davranis)' `
+    ($null -eq $nullEsitHata) 'null erken donduruğu icin sema denetlenmez'
 
 # ===========================================================================
 Write-Host "`n=== 5. OLCULEMEYEN girdi hukum uretmez (N/A) ===" -ForegroundColor Cyan
