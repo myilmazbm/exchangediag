@@ -18,7 +18,10 @@
 
     2. N/A SINIRI. "Olculemedi" ile "sifir" ayni sey degildir. N/A'dan bir
        degere gecis IYILESME DEGILDIR; yalnizca artik olcebiliyoruz demektir.
-       Bu gecisler yuzde olarak raporlanmaz.
+       Tersi de dogrudur: FAIL -> N/A, sorunun gectigini degil ARTIK
+       GOREMEDIGIMIZI soyler. Bu gecisler yuzde olarak raporlanmaz, gerileme
+       /iyilesme sayaclarina girmez ve ayri bir OLCUM DEGISIMI kovasinda
+       gosterilir - saklanmazlar.
 
     3. KUCUK SAYIDA BUYUK YUZDE. 0.001 -> 0.002 yuzde olarak %100 artistir
        ama hicbir sey ifade etmez. Mutlak taban altinda kalan degisimler
@@ -35,6 +38,63 @@
 # Yuzde hesabinin anlamli oldugu mutlak taban. Bunun altindaki degerlerde
 # yuzde yaniltir ve yalnizca mutlak fark yazilir.
 $script:EDDeltaFloor = 0.5
+
+# Durumlarin kotuden iyiye siralamasi.
+#
+# DIKKAT: N/A ve PASSIVE bu tabloda YOKTUR. "Olculemedi" bir HUKUM DEGILDIR;
+# OK ile ayni siraya konursa FAIL -> N/A gecisi (yani olcumu KAYBETMEK)
+# matematiksel olarak iyilesme cikar. Rapor o zaman kendi satir metnini
+# yalanlar: satirda "bu bir iyilesme veya gerileme DEGILDIR" yazarken baslik
+# "1 iyilesme" sayar. Hukmu olmayan taraf siraya hic girmez; boyle gecisler
+# ucuncu bir kovada, OLCUM DEGISIMI olarak raporlanir.
+$script:EDStatusRank = @{ 'OK' = 0; 'TIMEOUT' = 1; 'WARN' = 2; 'ERROR' = 3; 'FAIL' = 4 }
+$script:EDNonVerdictStatus = @('N/A', 'PASSIVE')
+
+function Test-EDValueMissing {
+    <#
+        Hucre "olculemedi" mi? Bos, N/A, PASSIVE ve '-' ayni anlama gelir.
+        Sifir DEGILDIR: sifir bir olcumdur, bunlar olcumun yoklugudur.
+    #>
+    param([AllowNull()]$Value)
+
+    $text = "$Value".Trim()
+    return (-not $text -or $text -in @('N/A', 'PASSIVE', '-'))
+}
+
+function Get-EDStatusTransitionKind {
+<#
+    .SYNOPSIS
+        "OK -> FAIL" bicimindeki bir gecisi siniflandirir.
+
+    .OUTPUTS
+        gerileme | iyilesme | olcum | yok
+
+    .DESCRIPTION
+        Tek bir yerde karar verilir; hem ozet sayaclari (Get-EDDeltaHighlights)
+        hem de raporun rengi (Export-EDDeltaHtml) ayni hukmu kullansin diye.
+        Iki yer ayri ayri karar verdiginde baslik bir sey, satir baska bir sey
+        soyler ve operator hangisine inanacagini bilemez.
+#>
+    [CmdletBinding()]
+    param([AllowNull()][string]$Transition)
+
+    if (-not $Transition -or $Transition -notmatch '^(\S+) -> (\S+)$') { return 'yok' }
+    $from = $Matches[1]
+    $to = $Matches[2]
+    if ($from -eq $to) { return 'yok' }
+
+    # Bir taraf hukumsuzse (N/A / PASSIVE) siralama yapilamaz: olcum
+    # yapilabilirligi degismistir, saglik degil.
+    if ($from -in $script:EDNonVerdictStatus -or $to -in $script:EDNonVerdictStatus) { return 'olcum' }
+
+    # Tanimadigimiz bir durum adi ('-', '(yok)', yeni bir etiket) uydurma
+    # siraya sokulmaz; sessizce atlanir.
+    if (-not $script:EDStatusRank.ContainsKey($from) -or -not $script:EDStatusRank.ContainsKey($to)) { return 'yok' }
+
+    if ($script:EDStatusRank[$to] -gt $script:EDStatusRank[$from]) { return 'gerileme' }
+    if ($script:EDStatusRank[$to] -lt $script:EDStatusRank[$from]) { return 'iyilesme' }
+    return 'yok'
+}
 
 function Save-EDRunMeta {
 <#
@@ -85,6 +145,23 @@ function Read-EDRunMeta {
     catch { return $null }
 }
 
+function Get-EDMetaList {
+    <#
+        run-meta.json'daki bir liste alanini guvenle okur.
+
+        Alan HIC OLMAYABILIR: eski surumle uretilmis meta dosyalarinda
+        modules/serverFilter yoktur ve StrictMode altinda dogrudan erisim
+        kiyasi cokertir. Yok olan alan bos liste doner; "bos" ile "yok"
+        ayrimini cagiran yapar.
+    #>
+    param($Meta, [string]$Name)
+
+    if ($null -eq $Meta) { return @() }
+    $property = $Meta.PSObject.Properties[$Name]
+    if (-not $property -or $null -eq $property.Value) { return @() }
+    return @($property.Value | Where-Object { "$_" -ne '' } | Sort-Object)
+}
+
 function Test-EDRunComparable {
 <#
     .SYNOPSIS
@@ -131,6 +208,38 @@ function Test-EDRunComparable {
         $advisory += ("Profil farkli (onceki '{0}', simdiki '{1}'): esikler ve bastirilan bulgular degismis olabilir." -f $Previous.profile, $Current.profile)
     }
 
+    # --- Kapsam: modul kumesi ---
+    # Bu dosya modul listesini run-meta.json'a YAZIYOR ama geri OKUMUYORDU.
+    # Sonuc: -Modules M10,M11 ile alinmis bir taban, tam bir kosuyla
+    # kiyaslandiginda geri kalan her modulu "YENI" (tersinde "KAYBOLDU")
+    # gosteriyor ve operator olmayan bir degisimi okuyordu.
+    $previousModules = @(Get-EDMetaList -Meta $Previous -Name 'modules')
+    $currentModules = @(Get-EDMetaList -Meta $Current -Name 'modules')
+    # Liste bos ise "hicbir modul kosmadi" degil "kaydedilmemis" demektir
+    # (eski meta, ya da timing verilmeden cagrilmis kiyas). Okunamayan
+    # bilgiden fark UYDURULMAZ.
+    if ($previousModules.Count -gt 0 -and $currentModules.Count -gt 0) {
+        $missingModules = @($previousModules | Where-Object { $_ -notin $currentModules })
+        $extraModules = @($currentModules | Where-Object { $_ -notin $previousModules })
+        if ($missingModules.Count -gt 0 -or $extraModules.Count -gt 0) {
+            $parts = @()
+            if ($missingModules.Count -gt 0) { $parts += ("simdi kosmayan: " + ($missingModules -join ', ')) }
+            if ($extraModules.Count -gt 0) { $parts += ("yalnizca simdi kosan: " + ($extraModules -join ', ')) }
+            $advisory += ("Modul kumesi farkli ({0}). Bu modullerin YENI/KAYBOLDU satirlari bir DEGISIM degil KAPSAM farkidir." -f ($parts -join '; '))
+        }
+    }
+
+    # --- Kapsam: sunucu filtresi ---
+    # Bos filtre GERCEK bir degerdir ("suzme yok"), bilinmezlik degil; bu
+    # yuzden modul listesinin aksine bos taraf da kiyasa girer.
+    $previousFilter = @(Get-EDMetaList -Meta $Previous -Name 'serverFilter')
+    $currentFilter = @(Get-EDMetaList -Meta $Current -Name 'serverFilter')
+    if (($previousFilter -join '|') -ne ($currentFilter -join '|')) {
+        $advisory += ("Sunucu filtresi farkli (onceki: {0}, simdiki: {1}): dar kosuda olculmeyen sunucular 'kayboldu' gibi gorunur, sorunun gectigi anlamina gelmez." -f `
+            $(if ($previousFilter.Count -gt 0) { $previousFilter -join ', ' } else { '(yok)' }),
+            $(if ($currentFilter.Count -gt 0) { $currentFilter -join ', ' } else { '(yok)' }))
+    }
+
     # Saat farki: kiyasin AMACI budur, ama yorumlanirken bilinmelidir.
     $previousHour = [int]$Previous.startedHour
     $currentHour = [int]$Current.startedHour
@@ -153,8 +262,8 @@ function Get-EDDeltaKind {
     $previousText = "$Previous".Trim()
     $currentText = "$Current".Trim()
 
-    $previousMissing = (-not $previousText -or $previousText -in @('N/A', 'PASSIVE', '-'))
-    $currentMissing = (-not $currentText -or $currentText -in @('N/A', 'PASSIVE', '-'))
+    $previousMissing = Test-EDValueMissing $previousText
+    $currentMissing = Test-EDValueMissing $currentText
 
     if ($previousMissing -and $currentMissing) { return 'both-missing' }
     if ($previousMissing -or $currentMissing) { return 'measurement-change' }
@@ -195,12 +304,16 @@ function Compare-EDRuns {
     $previousMeta = Read-EDRunMeta -Folder $PreviousFolder
 
     $currentMeta = [pscustomobject]@{
-        windowHours = $Context.WindowHours
-        heavy       = [bool]$Context.Heavy
-        logAccess   = [string]$Context.LogAccess
-        profile     = [string]$Context.Config.Environment['profile']
-        startedHour = [int]$Context.StartTime.Hour
-        servers     = @(@($Context.Topology.Servers | ForEach-Object { $_.Name }) | Sort-Object)
+        windowHours  = $Context.WindowHours
+        heavy        = [bool]$Context.Heavy
+        logAccess    = [string]$Context.LogAccess
+        profile      = [string]$Context.Config.Environment['profile']
+        startedHour  = [int]$Context.StartTime.Hour
+        servers      = @(@($Context.Topology.Servers | ForEach-Object { $_.Name }) | Sort-Object)
+        # Kapsamin geri kalani: Save-EDRunMeta bunlari diske yaziyor, kiyasin
+        # da ayni iki alani karsilastirabilmesi icin buraya konur.
+        serverFilter = @($Context.ServerFilter)
+        modules      = @(@($ModuleTimings | ForEach-Object { $_.Id }) | Sort-Object)
     }
     $scope = Test-EDRunComparable -Previous $previousMeta -Current $currentMeta
 
@@ -239,16 +352,27 @@ function Compare-EDRuns {
         }
 
         $statusChanged = ([string]$previous.Durum -ne [string]$row.Status)
+        # Durum gecisi EN AZ BIR satirda yazildi mi? Gecis yalnizca deger
+        # satirlarina yaziliyordu; o satirlarin hicbiri uretilmezse (butun
+        # degerler N/A, ya da butun sutunlar degismis) gercek bir gerileme
+        # rapordan tamamen dusuyordu.
+        $statusReported = $false
+        $currentColumns = @($row.Values.Keys)
 
-        foreach ($column in @($row.Values.Keys)) {
+        foreach ($column in $currentColumns) {
             # Sutun onceki calistirmada yoksa (yeni sunucu) kiyas kurulmaz.
             if ($column -notin $previousColumns) {
                 $deltas += [pscustomobject]@{
                     Modul = $row.Module; Kontrol = $row.Check; Sunucu = $column
                     Onceki = '(sutun yok)'; Simdiki = "$($row.Values[$column])"; Fark = '-'
-                    Yon = 'YENI'; Durum = ''
+                    # Sutunlar kiyaslanamasa da satirin DURUMU iki calistirmada
+                    # da verilmis bir hukumdur. Burayi bos birakmak, sunucularin
+                    # degistigi bir ortamda OK -> FAIL gecisinin gerileme
+                    # listesine hic ulasmamasi demekti.
+                    Yon = 'YENI'; Durum = $(if ($statusChanged) { "$($previous.Durum) -> $($row.Status)" } else { '' })
                     Aciklama = 'Bu sutun onceki calistirmada yoktu; kiyas kurulamaz.'
                 }
+                if ($statusChanged) { $statusReported = $true }
                 continue
             }
 
@@ -343,15 +467,43 @@ function Compare-EDRuns {
             }
 
             $deltas += [pscustomobject]$record
+            if ($statusChanged) { $statusReported = $true }
         }
 
-        # Degeri olmayan ama durumu degisen satirlar da gorunmeli.
-        if ($statusChanged -and @($row.Values.Keys).Count -eq 0) {
+        # --- Simdiki calistirmada SUTUNU KAYBOLAN sunucular ---
+        # "Yeni sutun" dalinin ayna goruntusu. Olculmus bir deger (orn. 999)
+        # sunucu kapsam disi kaldiginda rapordan sessizce dusuyordu; geriye
+        # yalnizca satirin FAIL -> OK gecisi kaliyor ve sorun cozulmus gibi
+        # gorunuyordu. Onceki degeri okunamayanlar ('' / N/A) yazilmaz:
+        # olmayan olcumun kaybi bir bulgu degildir.
+        foreach ($column in $previousColumns) {
+            if ($column -in $currentColumns) { continue }
+            $previousValue = $previous.$column
+            if (Test-EDValueMissing $previousValue) { continue }
+
+            $deltas += [pscustomobject]@{
+                Modul = $row.Module; Kontrol = $row.Check; Sunucu = $column
+                Onceki = "$previousValue"; Simdiki = '(sutun yok)'; Fark = '-'
+                Yon = 'KAYBOLDU'; Durum = $(if ($statusChanged) { "$($previous.Durum) -> $($row.Status)" } else { '' })
+                Aciklama = 'Bu sunucu simdiki calistirmada olculmedi. Satirin durumu iyilesmis gorunuyorsa sebep bu eksik olcum olabilir; sorunun gectigi anlamina GELMEZ.'
+            }
+            if ($statusChanged) { $statusReported = $true }
+        }
+
+        # Durum degistigi halde hicbir deger satirinin tasiyamadigi gecisler.
+        # DIKKAT: kosul "deger yok" DEGIL "gecis hic yazilmadi" olmalidir;
+        # iki calistirmada da N/A olan bir satirda deger vardir (hucre vardir)
+        # ama kiyasa girmez, ve OK -> FAIL gerilemesi boylece kayboluyordu.
+        if ($statusChanged -and -not $statusReported) {
             $deltas += [pscustomobject]@{
                 Modul = $row.Module; Kontrol = $row.Check; Sunucu = '-'
                 Onceki = "$($previous.Durum)"; Simdiki = "$($row.Status)"; Fark = '-'
                 Yon = 'DURUM'; Durum = "$($previous.Durum) -> $($row.Status)"
-                Aciklama = 'Deger yok, yalnizca durum degisti.'
+                Aciklama = $(if ($currentColumns.Count -eq 0) {
+                    'Deger yok, yalnizca durum degisti.'
+                } else {
+                    'Degerler iki calistirmada da okunamadi (N/A); yalnizca DURUM degisti. Durum gecisi gercektir ve gizlenmez.'
+                })
             }
         }
     }
@@ -379,35 +531,72 @@ function Compare-EDRuns {
 
 function Get-EDDeltaHighlights {
     <#
-        Durum gerilemeleri (OK -> WARN/FAIL) ve iyilesmeler ayri toplanir.
-        Bir delta raporunda ilk okunmasi gereken budur.
+        Durum gerilemeleri (OK -> WARN/FAIL), iyilesmeler ve OLCUM DEGISIMLERI
+        ayri toplanir. Bir delta raporunda ilk okunmasi gereken budur.
+
+        Ucuncu kova sarttir: N/A <-> hukum gecisleri iki kovaya da girmez ama
+        sessizce dusurulmeleri de yanlistir - FAIL -> N/A, sorunun gectigini
+        degil sorunu ARTIK GOREMEDIGIMIZI soyler ve operator bunu bilmelidir.
     #>
     [CmdletBinding()]
     param($Comparison)
 
-    $rank = @{ 'OK' = 0; 'N/A' = 0; 'PASSIVE' = 0; 'TIMEOUT' = 1; 'WARN' = 2; 'ERROR' = 3; 'FAIL' = 4 }
     $regressions = @()
     $improvements = @()
+    $measurementChanges = @()
     $seen = @{}
 
     foreach ($delta in @($Comparison.Deltas)) {
-        if (-not $delta.Durum -or $delta.Durum -notmatch '^(\S+) -> (\S+)$') { continue }
+        if (-not $delta.Durum) { continue }
         $key = "$($delta.Modul)|$($delta.Kontrol)"
         if ($seen.ContainsKey($key)) { continue }
+
+        $kind = Get-EDStatusTransitionKind -Transition $delta.Durum
+        if ($kind -eq 'yok') { continue }
         $seen[$key] = $true
 
-        $from = $Matches[1]; $to = $Matches[2]
-        if (-not $rank.ContainsKey($from) -or -not $rank.ContainsKey($to)) { continue }
-
-        if ($rank[$to] -gt $rank[$from]) {
-            $regressions += [pscustomobject]@{ Modul = $delta.Modul; Kontrol = $delta.Kontrol; Gecis = $delta.Durum }
-        }
-        elseif ($rank[$to] -lt $rank[$from]) {
-            $improvements += [pscustomobject]@{ Modul = $delta.Modul; Kontrol = $delta.Kontrol; Gecis = $delta.Durum }
+        $item = [pscustomobject]@{ Modul = $delta.Modul; Kontrol = $delta.Kontrol; Gecis = $delta.Durum }
+        switch ($kind) {
+            'gerileme' { $regressions += $item }
+            'iyilesme' { $improvements += $item }
+            'olcum'    { $measurementChanges += $item }
         }
     }
 
-    return [pscustomobject]@{ Regressions = @($regressions); Improvements = @($improvements) }
+    return [pscustomobject]@{
+        Regressions        = @($regressions)
+        Improvements       = @($improvements)
+        MeasurementChanges = @($measurementChanges)
+    }
+}
+
+function Get-EDDeltaToneClass {
+<#
+    .SYNOPSIS
+        Bir delta satirinin RENGINI belirler.
+
+    .DESCRIPTION
+        Eskiden renk YONDEN geliyordu: ARTTI kirmizi, AZALDI yesil. Bu, her
+        metrigin "yuksek olan kotudur" oldugunu varsayar ve raporu tersine
+        cevirir: bos disk %40 -> %8, sertifika 30 -> 3 gun ve PercentIdleTime
+        dususleri AZALDI'dir ve YESIL boyaniyordu - operator felaketi iyi
+        haber olarak okuyordu.
+
+        Metrik adindan yon tahmin etmek de kirilgandir: satirda yalnizca
+        Turkce bir etiket vardir, esik tablosu burada yoktur. Oysa satir
+        zaten metrigin KENDI esigine gore verilmis hukmu tasiyor: durum
+        gecisi. Renk oradan alinir.
+
+        Durum gecisi yoksa renk verilmez. Yonu bilmedigimizde tahmin etmek,
+        olculmemis bir degere sifir yazmakla ayni hatadir.
+#>
+    param($Delta)
+
+    switch (Get-EDStatusTransitionKind -Transition $Delta.Durum) {
+        'gerileme' { return 'kotu' }
+        'iyilesme' { return 'iyi' }
+        default    { return 'notr' }
+    }
 }
 
 function Export-EDDeltaHtml {
@@ -442,9 +631,9 @@ function Export-EDDeltaHtml {
  .advisory { background:#fff4d6; border:1px solid #e6c97a; padding:10px 14px; border-radius:4px; margin:12px 0; }
  .blocking h3, .advisory h3 { margin:0 0 6px; font-size:13px; }
  .blocking ul, .advisory ul { margin:4px 0 0 18px; padding:0; font-size:12px; line-height:1.6; }
- .ARTTI   { color:#a51414; font-weight:700; }
- .AZALDI  { color:#1c6b1c; font-weight:700; }
- .OLCUM, .YENI, .KAYBOLDU, .DEGISTI, .DURUM { color:#63278f; font-weight:700; }
+ .kotu { color:#a51414; font-weight:700; }
+ .iyi  { color:#1c6b1c; font-weight:700; }
+ .notr { color:#63278f; font-weight:700; }
  .note { color:#666; font-size:12px; white-space:normal; max-width:460px; }
  .empty { color:#888; font-style:italic; }
 </style>
@@ -482,7 +671,7 @@ function Export-EDDeltaHtml {
     else {
         [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Kontrol</th><th>Gecis</th></tr>')
         foreach ($item in @($highlights.Regressions)) {
-            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $item.Modul)</td><td>$(ConvertTo-EDHtmlEncoded $item.Kontrol)</td><td class=""ARTTI"">$(ConvertTo-EDHtmlEncoded $item.Gecis)</td></tr>")
+            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $item.Modul)</td><td>$(ConvertTo-EDHtmlEncoded $item.Kontrol)</td><td class=""kotu"">$(ConvertTo-EDHtmlEncoded $item.Gecis)</td></tr>")
         }
         [void]$builder.AppendLine('</table>')
     }
@@ -494,7 +683,19 @@ function Export-EDDeltaHtml {
     else {
         [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Kontrol</th><th>Gecis</th></tr>')
         foreach ($item in @($highlights.Improvements)) {
-            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $item.Modul)</td><td>$(ConvertTo-EDHtmlEncoded $item.Kontrol)</td><td class=""AZALDI"">$(ConvertTo-EDHtmlEncoded $item.Gecis)</td></tr>")
+            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $item.Modul)</td><td>$(ConvertTo-EDHtmlEncoded $item.Kontrol)</td><td class=""iyi"">$(ConvertTo-EDHtmlEncoded $item.Gecis)</td></tr>")
+        }
+        [void]$builder.AppendLine('</table>')
+    }
+
+    # --- Olcum degisimleri: ne gerileme ne iyilesme, ama saklanmaz ---
+    $measurementChanges = @($highlights.MeasurementChanges)
+    if ($measurementChanges.Count -gt 0) {
+        [void]$builder.AppendLine("<h2>Olcum degisimleri ($($measurementChanges.Count))</h2>")
+        [void]$builder.AppendLine('<p class="meta">Bu gecislerin bir tarafinda hukum YOKTUR (N/A / PASSIVE). Ne iyilesme ne gerilemedirler; yalnizca olcum yapilabilirligi degismistir. FAIL &rarr; N/A, sorunun gectigini degil ARTIK GORULEMEDIGINI soyler.</p>')
+        [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Kontrol</th><th>Gecis</th></tr>')
+        foreach ($item in $measurementChanges) {
+            [void]$builder.AppendLine("<tr><td>$(ConvertTo-EDHtmlEncoded $item.Modul)</td><td>$(ConvertTo-EDHtmlEncoded $item.Kontrol)</td><td class=""notr"">$(ConvertTo-EDHtmlEncoded $item.Gecis)</td></tr>")
         }
         [void]$builder.AppendLine('</table>')
     }
@@ -508,10 +709,13 @@ function Export-EDDeltaHtml {
     else {
         [void]$builder.AppendLine('<table><tr><th>Modul</th><th>Kontrol</th><th>Sunucu</th><th>Onceki</th><th>Simdiki</th><th>Fark</th><th>Yon</th><th>Durum</th><th>Aciklama</th></tr>')
         foreach ($delta in $deltas) {
-            [void]$builder.AppendLine(("<tr><td>{0}</td><td>{1}</td><td>{2}</td><td class=""num"">{3}</td><td class=""num"">{4}</td><td class=""num"">{5}</td><td class=""{6}"">{6}</td><td>{7}</td><td class=""note"">{8}</td></tr>" -f `
+            # Renk YONDEN degil DURUM GECISINDEN gelir; gerekcesi
+            # Get-EDDeltaToneClass'ta.
+            [void]$builder.AppendLine(("<tr><td>{0}</td><td>{1}</td><td>{2}</td><td class=""num"">{3}</td><td class=""num"">{4}</td><td class=""num"">{5}</td><td class=""{9}"">{6}</td><td>{7}</td><td class=""note"">{8}</td></tr>" -f `
                 (ConvertTo-EDHtmlEncoded $delta.Modul), (ConvertTo-EDHtmlEncoded $delta.Kontrol), (ConvertTo-EDHtmlEncoded $delta.Sunucu),
                 (ConvertTo-EDHtmlEncoded $delta.Onceki), (ConvertTo-EDHtmlEncoded $delta.Simdiki), (ConvertTo-EDHtmlEncoded $delta.Fark),
-                (ConvertTo-EDHtmlEncoded $delta.Yon), (ConvertTo-EDHtmlEncoded $delta.Durum), (ConvertTo-EDHtmlEncoded $delta.Aciklama)))
+                (ConvertTo-EDHtmlEncoded $delta.Yon), (ConvertTo-EDHtmlEncoded $delta.Durum), (ConvertTo-EDHtmlEncoded $delta.Aciklama),
+                (Get-EDDeltaToneClass -Delta $delta)))
         }
         [void]$builder.AppendLine('</table>')
     }
@@ -535,6 +739,7 @@ function Write-EDDeltaConsole {
     $highlights = Get-EDDeltaHighlights -Comparison $Comparison
     $regressions = @($highlights.Regressions)
     $improvements = @($highlights.Improvements)
+    $measurementChanges = @($highlights.MeasurementChanges)
 
     if ($regressions.Count -gt 0) {
         $Log.Warn("Delta: $($regressions.Count) gerileme - " + (@($regressions | ForEach-Object { "$($_.Modul)/$($_.Kontrol) $($_.Gecis)" }) -join ' | '))
@@ -542,7 +747,14 @@ function Write-EDDeltaConsole {
     if ($improvements.Count -gt 0) {
         $Log.Info("Delta: $($improvements.Count) iyilesme - " + (@($improvements | ForEach-Object { "$($_.Modul)/$($_.Kontrol) $($_.Gecis)" }) -join ' | '))
     }
+    # Olcum degisimleri iyilesme sutununa YAZILMAZ ama susulmaz da: FAIL -> N/A
+    # gormeyi kaybettigimiz anlamina gelir ve bu, baslikta gorunmesi gereken
+    # bir bilgidir.
+    if ($measurementChanges.Count -gt 0) {
+        $Log.Info("Delta: $($measurementChanges.Count) olcum degisimi (N/A <-> hukum; iyilesme/gerileme DEGIL) - " +
+            (@($measurementChanges | ForEach-Object { "$($_.Modul)/$($_.Kontrol) $($_.Gecis)" }) -join ' | '))
+    }
     if ($regressions.Count -eq 0 -and $improvements.Count -eq 0) {
-        $Log.Info("Delta: durum gecisi yok; $(@($Comparison.Deltas).Count) deger farki bulundu.")
+        $Log.Info("Delta: durum gerilemesi/iyilesmesi yok; $(@($Comparison.Deltas).Count) deger farki bulundu.")
     }
 }

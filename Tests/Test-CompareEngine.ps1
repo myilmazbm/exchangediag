@@ -64,16 +64,44 @@ function New-PreviousRun {
 }
 
 function New-CompareContext {
-    param([int]$Hour = 3, [double]$WindowHours = 1, [bool]$Heavy = $true, [string]$LogAccess = 'smb', $Servers = $null)
+    param([int]$Hour = 3, [double]$WindowHours = 1, [bool]$Heavy = $true, [string]$LogAccess = 'smb', $Servers = $null,
+          [string[]]$ServerFilter = @())
     if ($null -eq $Servers) { $Servers = @((New-EDTestServer -Name 'MBX1')) }
     $context = New-EDTestContext -Config $config -Executor $null -Servers $Servers `
         -Sites @([pscustomobject]@{ Name = 'Site1' }) -OutputDir $script:Root
     $context.WindowHours = $WindowHours
     $context.Heavy = $Heavy
     $context.LogAccess = $LogAccess
+    $context.ServerFilter = @($ServerFilter)
     $context.StartTime = (Get-Date).Date.AddHours($Hour)
     $context.RunId = 'simdiki'
     return $context
+}
+
+function Get-EDHighlightCount {
+    <#
+        Ozet kovasini ADIYLA sayar. Dogrudan $highlights.X yazmak StrictMode
+        altinda, kova HIC YOKKEN testi "coktu"ye cevirir ve hangi iddianin
+        kaldigi gorunmez; burada eksik kova -1 olarak raporlanir.
+    #>
+    param($Highlights, [string]$Name)
+    $property = $Highlights.PSObject.Properties[$Name]
+    if (-not $property) { return -1 }
+    return @($property.Value).Count
+}
+
+function Get-EDFirstField {
+    <#
+        Ilk satirin bir alanini okur. Dogrudan $rows[0].Alan yazmak, satir HIC
+        YOKKEN (aranan satirin uretilmedigi hata durumunda) StrictMode altinda
+        paketi coktururdu; boyle bir cokme hangi iddianin kaldigini gizler.
+    #>
+    param($Rows, [string]$Name)
+    $first = @($Rows) | Select-Object -First 1
+    if ($null -eq $first) { return '(satir yok)' }
+    $property = $first.PSObject.Properties[$Name]
+    if (-not $property) { return '(alan yok)' }
+    return "$($property.Value)"
 }
 
 # ===========================================================================
@@ -166,6 +194,22 @@ $delta = @($comparison.Deltas)[0]
 Assert-True 'Degisen degere "ayni" DENMEDI' ($delta.Aciklama -notlike '*Deger ayni*') $delta.Aciklama
 Assert-True 'Fark yine de yazildi' ($delta.Fark -like ('*+' + ('{0:N1}' -f 65.8) + '*')) $delta.Fark
 
+# 3f. IKI calistirmada da deger okunamadi ama DURUM degisti.
+# Deger yoksa satiri tamamen atlamak gercek bir gerilemeyi rapordan siler:
+# ornekte OK -> FAIL gecisi hic yazilmiyor, DELTA.html "Durum gerilemesi yok"
+# diyordu. "Olculemedi" olcumun kaybi demektir, hukmun kaybi degil.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M30' -Check 'Kopya kuyrugu' -Values @{ SRV1 = 'N/A'; SRV2 = 'N/A' } -Status 'OK')
+) -Columns @('SRV1', 'SRV2')
+$current = @((New-EDRow -Module 'M30' -Check 'Kopya kuyrugu' -Values @{ SRV1 = 'N/A'; SRV2 = 'N/A' } -Status 'FAIL'))
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current `
+    -Context (New-CompareContext -Servers @((New-EDTestServer -Name 'SRV1'), (New-EDTestServer -Name 'SRV2')))
+$statusRows = @($comparison.Deltas | Where-Object { $_.Durum -eq 'OK -> FAIL' })
+Assert-Equal 'Degerler N/A olsa da durum satiri uretildi' 1 $statusRows.Count
+Assert-Equal 'Yon DURUM' 'DURUM' (Get-EDFirstField $statusRows 'Yon')
+$highlights = Get-EDDeltaHighlights -Comparison $comparison
+Assert-Equal 'Gerileme ozete girdi' 1 @($highlights.Regressions).Count
+
 # ===========================================================================
 Write-Host "`n=== 4. Kapsam korumasi ===" -ForegroundColor Cyan
 
@@ -208,6 +252,32 @@ $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Conte
 Assert-True 'Eksilen sunucu bildirildi' ((@($comparison.Scope.Advisory) -join ' ') -like '*MBX2*') (@($comparison.Scope.Advisory) -join ' ')
 Assert-True 'Sunucu farki kiyasi gecersiz kilmaz' ($comparison.Scope.Comparable)
 
+# 4g. MODUL KUMESI farki bildirilir.
+# run-meta.json'a modul listesi YAZILIYOR ama geri OKUNMUYORDU: -Modules M10,M11
+# ile alinmis bir taban tam bir kosuyla kiyaslandiginda diger butun moduller
+# "YENI", tersinde "KAYBOLDU" gorunuyor ve tek bir uyari cikmiyordu.
+$previous = New-PreviousRun -Rows $rows -Meta @{ modules = @('M10', 'M11', 'M12', 'M14', 'M20') }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext) `
+    -ModuleTimings @([pscustomobject]@{ Id = 'M10'; Seconds = 1 })
+$advisory = @($comparison.Scope.Advisory) -join ' '
+Assert-True 'Modul kumesi farki bildirildi' ($advisory -like '*Modul kumesi farkli*') $advisory
+Assert-True 'Eksik moduller sayildi' ($advisory -like '*M11*') $advisory
+Assert-True 'Modul farki kiyasi gecersiz KILMAZ' ($comparison.Scope.Comparable)
+
+# 4h. Modul listesi bilinmiyorsa (eski meta / timing verilmedi) uydurma uyari cikmaz.
+$previous = New-PreviousRun -Rows $rows -Meta @{ modules = @('M10', 'M11') }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext)
+Assert-True 'Bilinmeyen modul listesi uyari uretmez' ((@($comparison.Scope.Advisory) -join ' ') -notlike '*Modul kumesi*') `
+    (@($comparison.Scope.Advisory) -join ' ')
+
+# 4i. SUNUCU FILTRESI farki bildirilir: -Servers ile daraltilmis bir kosu,
+# tam kosuyla kiyaslandiginda eksik sunuculari "kayboldu" gibi gosterir.
+$previous = New-PreviousRun -Rows $rows -Meta @{ serverFilter = @('MBX1') }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $rows -Context (New-CompareContext -ServerFilter @())
+$advisory = @($comparison.Scope.Advisory) -join ' '
+Assert-True 'Sunucu filtresi farki bildirildi' ($advisory -like '*Sunucu filtresi farkli*') $advisory
+Assert-True 'Filtre farki kiyasi gecersiz kilmaz' ($comparison.Scope.Comparable)
+
 # ===========================================================================
 Write-Host "`n=== 5. Yeni / kaybolan kontroller ===" -ForegroundColor Cyan
 
@@ -242,6 +312,34 @@ $newColumn = @($comparison.Deltas | Where-Object { $_.Sunucu -eq 'MBX2' })
 Assert-Equal 'Yeni sutun icin kiyas kurulmadi' 1 $newColumn.Count
 Assert-True 'Sutun yoktu denildi' ($newColumn[0].Aciklama -like '*kiyas kurulamaz*') $newColumn[0].Aciklama
 
+# 5d. KAYBOLAN SUTUN (5c'nin ayna goruntusu): onceki calistirmada olculmus
+# 999 degeri rapordan tamamen dusuyordu. Geriye yalnizca "FAIL -> OK" satiri
+# kaliyor ve operator sorunun cozuldugunu saniyordu; oysa sorunlu sunucu
+# artik hic olculmuyor.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10; MBX2 = 999 } -Status 'FAIL')
+) -Columns @('MBX1', 'MBX2')
+$current = @((New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10 } -Status 'OK'))
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
+$lost = @($comparison.Deltas | Where-Object { $_.Sunucu -eq 'MBX2' })
+Assert-Equal 'Kaybolan sutun icin satir uretildi' 1 $lost.Count
+Assert-Equal 'Onceki deger korundu' '999' (Get-EDFirstField $lost 'Onceki')
+Assert-Equal 'Yon KAYBOLDU' 'KAYBOLDU' (Get-EDFirstField $lost 'Yon')
+Assert-True 'Sorun gecti sanilmasin' ((Get-EDFirstField $lost 'Aciklama') -like '*anlamina GELMEZ*') (Get-EDFirstField $lost 'Aciklama')
+
+# 5e. Sutunlar TAMAMEN degistiginde (sunucu degisimi) durum gerilemesi yine
+# ozete girmelidir. "Yeni sutun" dali Durum'u bos biraktigi icin 900 ms'lik
+# gerileme gerileme listesinde hic gorunmuyordu.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M20' -Check 'RPC gecikmesi' -Values @{ SRV1 = 12; SRV2 = 14 } -Unit 'ms' -Status 'OK')
+) -Columns @('SRV1', 'SRV2')
+$current = @((New-EDRow -Module 'M20' -Check 'RPC gecikmesi' -Values @{ SRV3 = 900; SRV4 = 950 } -Unit 'ms' -Status 'FAIL'))
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current `
+    -Context (New-CompareContext -Servers @((New-EDTestServer -Name 'SRV3'), (New-EDTestServer -Name 'SRV4')))
+$highlights = Get-EDDeltaHighlights -Comparison $comparison
+Assert-Equal 'Sutunlar degisse de gerileme ozete girdi' 1 @($highlights.Regressions).Count
+Assert-Equal 'Gecis yazildi' 'OK -> FAIL' (Get-EDFirstField $highlights.Regressions 'Gecis')
+
 # ===========================================================================
 Write-Host "`n=== 6. Gerileme / iyilesme ozeti ===" -ForegroundColor Cyan
 
@@ -263,13 +361,30 @@ Assert-Equal 'Gecis yazildi' 'OK -> FAIL' @($highlights.Regressions)[0].Gecis
 Assert-Equal 'Bir iyilesme' 1 @($highlights.Improvements).Count
 Assert-Equal 'Iyilesen modul M14' 'M14' @($highlights.Improvements)[0].Modul
 
-# N/A -> OK gerileme veya iyilesme SAYILMAZ (ikisi de "hukum yok" tarafinda)
+# N/A <-> hukum gecisi UCUNCU bir kovaya girer: ne gerileme ne iyilesme.
+#
+# DIKKAT: eski test yalnizca "N/A -> OK iyilesme sayilmadi" diyordu ve bu
+# iddia, N/A ile OK ayni siraya konuldugu SURECE de geciyordu; yani hatayi
+# gormesi yapisal olarak imkansizdi. Sinav ters yonde verilir: FAIL -> N/A.
 $previous = New-PreviousRun -Rows @((New-EDRow -Module 'M26' -Check 'Indeks' -Values @{ MBX1 = 'N/A' } -Status 'N/A'))
 $current = @((New-EDRow -Module 'M26' -Check 'Indeks' -Values @{ MBX1 = 'Healthy' } -Status 'OK'))
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
 $highlights = Get-EDDeltaHighlights -Comparison $comparison
 Assert-Equal 'N/A -> OK iyilesme sayilmadi' 0 @($highlights.Improvements).Count
 Assert-Equal 'N/A -> OK gerileme de sayilmadi' 0 @($highlights.Regressions).Count
+Assert-Equal 'N/A -> OK olcum degisimi olarak sayildi' 1 (Get-EDHighlightCount $highlights 'MeasurementChanges')
+
+# FAIL -> N/A OLCUMUN KAYBIDIR, iyilesme DEGILDIR. Eskiden N/A, OK ile ayni
+# sirada oldugu icin bu gecis "iyilesme" sayiliyordu; satirin kendi metni
+# "iyilesme veya gerileme DEGILDIR" derken baslik 1 iyilesme gosteriyordu.
+$previous = New-PreviousRun -Rows @((New-EDRow -Module 'M20' -Check 'RPC' -Values @{ MBX1 = 900 } -Unit 'ms' -Status 'FAIL'))
+$current = @((New-EDRow -Module 'M20' -Check 'RPC' -Values @{ MBX1 = 'N/A' } -Status 'N/A'))
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
+$highlights = Get-EDDeltaHighlights -Comparison $comparison
+Assert-Equal 'FAIL -> N/A iyilesme SAYILMADI' 0 @($highlights.Improvements).Count
+Assert-Equal 'FAIL -> N/A gerileme de sayilmadi' 0 @($highlights.Regressions).Count
+Assert-Equal 'FAIL -> N/A olcum degisimi olarak sayildi' 1 (Get-EDHighlightCount $highlights 'MeasurementChanges')
+Assert-Equal 'Satir metni ile baslik ayni seyi soyluyor' 'OLCUM' @($comparison.Deltas)[0].Yon
 
 # ===========================================================================
 Write-Host "`n=== 7. Rapor uretimi ===" -ForegroundColor Cyan
@@ -280,6 +395,35 @@ Assert-True 'DELTA.html yazildi' (Test-Path $htmlPath)
 $html = Get-Content $htmlPath -Raw -Encoding UTF8
 Assert-True 'Onceki calistirma kimligi raporda' ($html -like '*onceki*') 'runId gecti'
 Assert-True 'Uyari bolumu var' ($html -like '*sebep gostermez*')
+
+# 7b. DUSMESI KOTU olan metrikte AZALDI yesile boyanmaz.
+# Bos disk %40 -> %8 bir felakettir; "AZALDI = yesil" kurali her metrigin
+# "yuksek kotudur" oldugunu varsayar ve raporu tersine cevirir.
+$previous = New-PreviousRun -Rows @((New-EDRow -Module 'M21' -Check 'Bos disk' -Values @{ MBX1 = 40 } -Unit '%' -Status 'OK'))
+$current = @((New-EDRow -Module 'M21' -Check 'Bos disk' -Values @{ MBX1 = 8 } -Unit '%' -Status 'FAIL'))
+$toneComparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
+$tonePath = Join-Path $script:Root 'DELTA-tone.html'
+Export-EDDeltaHtml -Comparison $toneComparison -Path $tonePath -Context (New-CompareContext) | Out-Null
+$toneHtml = Get-Content $tonePath -Raw -Encoding UTF8
+Assert-True 'Gerileyen AZALDI iyilesme rengi ALMADI' ($toneHtml -notlike '*class="iyi">AZALDI*') 'yesil degil'
+Assert-True 'Gerileyen AZALDI gerileme rengi aldi' ($toneHtml -like '*class="kotu">AZALDI*') 'kirmizi'
+
+# 7c. Gercek iyilesmede yesil korunur (gecikme 60 -> 12, WARN -> OK)
+$previous = New-PreviousRun -Rows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 60 } -Unit 'sn' -Status 'WARN'))
+$current = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 12 } -Unit 'sn' -Status 'OK'))
+$toneComparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
+Export-EDDeltaHtml -Comparison $toneComparison -Path $tonePath -Context (New-CompareContext) | Out-Null
+$toneHtml = Get-Content $tonePath -Raw -Encoding UTF8
+Assert-True 'Iyilesen AZALDI yesil kaldi' ($toneHtml -like '*class="iyi">AZALDI*') 'yesil'
+
+# 7d. DURUM gecisi yoksa yon RENKLE yorumlanmaz: hangi yonun kotu oldugunu
+# bilmiyoruz ve bilmedigimiz seyi renkle uydurmayiz.
+$previous = New-PreviousRun -Rows @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
+$current = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 25 } -Unit 'sn' -Status 'OK'))
+$toneComparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $current -Context (New-CompareContext)
+Export-EDDeltaHtml -Comparison $toneComparison -Path $tonePath -Context (New-CompareContext) | Out-Null
+$toneHtml = Get-Content $tonePath -Raw -Encoding UTF8
+Assert-True 'Durumsuz ARTTI notr birakildi' ($toneHtml -like '*class="notr">ARTTI*') 'notr'
 
 # Blocking uyarisi raporun ustunde gorunmeli
 $previous = New-PreviousRun -Rows $rows -Meta @{ windowHours = 1 }
