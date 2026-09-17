@@ -295,8 +295,8 @@ Get-MailboxDatabaseCopyStatus   Get-MailboxFolderStatistics   Test-ServiceHealth
 |---|---|---|
 | `Test-TrackingLogParser` | 137 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
 | `Test-CoreUnits` | 130 | C# çekirdek: `PercentileEngine`, `StatsAccumulator`, `CsvLineSplitter` |
-| `Test-LatencyModules` | 47 | M10-M13 uçtan uca — **canlı Exchange uç noktası ister** |
-| `Test-LatencyPatterns` | 69 | Örgü P1/P2/P3/P7'nin karar mantığı (sahte yürütücü) |
+| `Test-LatencyModules` | 48 | M10-M13 uçtan uca — **canlı Exchange uç noktası ister** |
+| `Test-LatencyPatterns` | 119 | Örgü P1/P2/P3/P7'nin karar mantığı (sahte yürütücü) |
 | `Test-TransportModules` | 71 | M14-M16 |
 | `Test-PerfModules` | 52 | M20-M22, örgü P4 ve P5 |
 | `Test-StoreModules` | 50 | M23-M24, yorum tablosu |
@@ -309,7 +309,7 @@ Get-MailboxDatabaseCopyStatus   Get-MailboxFolderStatistics   Test-ServiceHealth
 | `Test-ModuleContracts` | 33 | Yapısal sözleşme: makine verisi isteyen modül ve Core toplayıcısı hedef sunucuya gidiyor mu |
 | `Test-TimeoutVerdict` | 28 | `TIMEOUT` sıralaması ve etrafındaki kararlar |
 
-**15 paket × 2 kültür = 2384 doğrulama.** `Test-LatencyModules` dışındaki paketler gerçek sunucuya hiç sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır — hiçbir paket depo içine yazmaz.
+**15 paket × 2 kültür = 2486 doğrulama.** `Test-LatencyModules` dışındaki paketler gerçek sunucuya hiç sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır — hiçbir paket depo içine yazmaz.
 
 Örgülerin **karar** mantığı `Test-LatencyModules`'te değil `Test-LatencyPatterns`'ta sınanır: iki sunuculu, pasif siteli, tek örneklemli, düşük hacimli tepe saatli senaryolar canlı bir ortamda üretilemez.
 
