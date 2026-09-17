@@ -154,9 +154,23 @@ function Export-EDSummaryCsv {
             $record[$column] = ConvertTo-EDCsvSafeText $cell
         }
         $record['Durum'] = ConvertTo-EDCsvSafeText $row.Status
+        # Orgu etiketi AYRI BIR SUTUN DEGIL, notun basina yazilir.
+        #
+        # NEDEN: Compare.ps1 onceki SUMMARY.csv'nin basliklarindan sabit bir
+        # liste ('Modul','Kontrol','Birim','Durum','Not') disinda kalan HER
+        # sutunu BIR SUNUCU sayar. 'Orgu' adinda bir sutun eklenseydi, simdiki
+        # calistirmanin satirlarinda boyle bir sunucu olmadigi icin delta
+        # motoru orgusu olan her satir icin "bu sunucu simdiki calistirmada
+        # olculmedi" diye UYDURMA bir KAYBOLDU kaydi uretirdi. Notun basi,
+        # hem Excel'de ilk gorunen yer hem de kiyas motorunun zaten hesaba
+        # katmadigi alan. (Compare.ps1 o listeye 'Orgu' eklediginde bu tercih
+        # birinci sinif bir sutuna donusturulebilir.)
+        $patternText = Format-EDPatternList -Patterns (Get-EDRowPatterns $row)
+        $note = [string]$row.Note
+        if ($patternText) { $note = ("[ORGU {0}] {1}" -f $patternText, $note).Trim() }
         # Not alani Exchange metnini en sik tasiyan alandir (LastError,
         # ContentIndexErrorMessage, mesaj konusu).
-        $record['Not']   = ConvertTo-EDCsvSafeText $row.Note
+        $record['Not']   = ConvertTo-EDCsvSafeText $note
         [pscustomobject]$record
     }
 
@@ -216,6 +230,9 @@ function Export-EDSummaryHtml {
  .NA, .PASSIVE { background:#f0f0f4 !important; color:#777; }
  .outlier { outline: 2px solid #d43b3b; outline-offset: -2px; font-weight: 700; }
  .note { color:#666; font-size: 12px; white-space: normal; max-width: 420px; }
+ /* Orgu hucresi: etiket + brief'teki anlami. Sarmalanmazsa tek satirda
+    tabloyu yatay kaydirmaya zorlar ve aciklama ekranin disinda kalir. */
+ .orgu { font-size: 12px; white-space: normal; max-width: 300px; color:#3a4a8a; }
  .empty { color:#888; font-style: italic; }
 </style>
 '@)
@@ -241,9 +258,19 @@ function Export-EDSummaryHtml {
         [void]$builder.AppendLine('<p class="empty">Esikleri asan bulgu yok.</p>')
     }
     else {
-        [void]$builder.AppendLine('<table><tr><th>Durum</th><th>Modul</th><th>Kontrol</th><th>Aciklama</th></tr>')
+        # ORGU SUTUNU: brief Bolum 3'un P1-P8 orgusu, bulgunun yaninda ve
+        # ANLAMIYLA BIRLIKTE yazilir. Etiket tek basina ('P6') operatore
+        # hicbir sey soylemez; aciklama Framework.ps1'deki tek sozlukten
+        # gelir, modul basina tekrarlanmaz. Orgusu olmayan satirda hucre
+        # BOS kalir - '-' ya da 'YOK' yazmak, bir orgunun arastirilip
+        # bulunamadigi izlenimi verirdi.
+        [void]$builder.AppendLine('<table><tr><th>Durum</th><th>Modul</th><th>Kontrol</th><th>Orgu</th><th>Aciklama</th></tr>')
         foreach ($row in ($findings | Sort-Object @{ e = { @{FAIL=0;ERROR=1;TIMEOUT=2;WARN=3}[$_.Status] } }, Module)) {
-            [void]$builder.AppendLine("<tr><td class=""st $(ConvertTo-EDStatusClass $row.Status)"">$($row.Status)</td><td>$(ConvertTo-EDHtmlEncoded $row.Module)</td><td>$(ConvertTo-EDHtmlEncoded $row.Check)</td><td class=""note"">$(ConvertTo-EDHtmlEncoded $row.Note)</td></tr>")
+            # Bir satirin birden fazla orgusu olabilir; her biri kendi
+            # satirinda yazilir ki uzun aciklamalar birbirine karismasin.
+            $patternCell = (@(Get-EDPatternLines -Patterns (Get-EDRowPatterns $row)) |
+                ForEach-Object { ConvertTo-EDHtmlEncoded $_ }) -join '<br>'
+            [void]$builder.AppendLine("<tr><td class=""st $(ConvertTo-EDStatusClass $row.Status)"">$($row.Status)</td><td>$(ConvertTo-EDHtmlEncoded $row.Module)</td><td>$(ConvertTo-EDHtmlEncoded $row.Check)</td><td class=""orgu"">$patternCell</td><td class=""note"">$(ConvertTo-EDHtmlEncoded $row.Note)</td></tr>")
         }
         [void]$builder.AppendLine('</table>')
     }

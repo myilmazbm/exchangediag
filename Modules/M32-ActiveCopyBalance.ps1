@@ -150,8 +150,11 @@ Register-EDModule @{
         return @(
             New-EDRow -Module 'M32' -Check 'Aktif DB sayisi' -Values $activeValues -CellStatus $cellStatus `
                 -Unit 'adet' -Status (Get-EDWorstStatus @(@($cellStatus.Values) + @($balanceStatus))) -Patterns @('P8') -Note $note
+            # P8'in tanimi ("aktif kopyalar ActivationPreference disinda
+            # dagilmis") dogrudan bu sayidir; orgu yalnizca aktif DB sayisi
+            # satirindaydi ve iddianin kanit satiri etiketsiz kaliyordu.
             New-EDRow -Module 'M32' -Check 'Tercih disi aktif DB' -Values $offPreferenceValues -Unit 'adet' -Status 'OK' `
-                -Note 'ActivationPreference degeri 1 olmayan sunucuda calisan aktif kopyalar. Ayrinti: M32-active-distribution.csv'
+                -Patterns @('P8') -Note 'ActivationPreference degeri 1 olmayan sunucuda calisan aktif kopyalar. Ayrinti: M32-active-distribution.csv'
             New-EDRow -Module 'M32' -Check 'Tercih 1 uzerinde aktif' -Values $preferredValues -Unit 'adet' -Status 'OK'
         )
     }

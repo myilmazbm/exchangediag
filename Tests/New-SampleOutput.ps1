@@ -114,11 +114,12 @@ $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p50' -Unit 'sn' -Statu
 $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p95' -Unit 'sn' -Status 'FAIL' `
     -Values @{ MBX01 = 22.4; MBX02 = 186.5; MBX03 = 24.1; DR01 = 'N/A' } `
     -CellStatus @{ MBX01 = 'OK'; MBX02 = 'FAIL'; MBX03 = 'OK'; DR01 = 'N/A' } `
-    -Patterns @('P1') `
+    -Patterns @('P1', 'P6') `
     -Note 'ORGU P1: MBX02 diger sunuculardan belirgin yavas (p95 186.5 sn, ortam medyani 23.3 sn - 8.0x). Okuma yolu: smb. Ayrinti: M10-latency.csv'
 $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p99' -Unit 'sn' -Status 'FAIL' `
     -Values @{ MBX01 = 48.0; MBX02 = 240.3; MBX03 = 51.7; DR01 = 'N/A' } `
-    -CellStatus @{ MBX01 = 'OK'; MBX02 = 'FAIL'; MBX03 = 'OK'; DR01 = 'N/A' }
+    -CellStatus @{ MBX01 = 'OK'; MBX02 = 'FAIL'; MBX03 = 'OK'; DR01 = 'N/A' } `
+    -Patterns @('P6')
 $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi ortalama' -Unit 'sn' -Status 'OK' `
     -Values @{ MBX01 = 4.1; MBX02 = 8.0; MBX03 = 4.3; DR01 = 'N/A' } `
     -Patterns @('P6') `
@@ -130,7 +131,8 @@ $rows += New-EDRow -Module 'M11' -Check 'Baskin faz' -Status 'WARN' `
     -Note 'ORGU P2: MBX02 sunucusunda gecikme STORE fazinda (DeliveryToMailbox) yogunlasiyor. Darbogaz transport degil Store tarafi - arastirmayi M20 (RPC latency), M21 (disk latency) ve M22 (paylasilan volume) ile surdurun.'
 $rows += New-EDRow -Module 'M11' -Check 'Store fazi p95' -Unit 'sn' -Status 'FAIL' `
     -Values @{ MBX01 = 6.2; MBX02 = 171.8; MBX03 = 7.0; DR01 = 'N/A' } `
-    -CellStatus @{ MBX01 = 'OK'; MBX02 = 'FAIL'; MBX03 = 'OK'; DR01 = 'N/A' }
+    -CellStatus @{ MBX01 = 'OK'; MBX02 = 'FAIL'; MBX03 = 'OK'; DR01 = 'N/A' } `
+    -Patterns @('P2')
 $rows += New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Unit 'teslim' -Status 'WARN' `
     -Values @{ DB01 = 42; DB02 = 88; DB03 = 1174; DB04 = 31 } `
     -CellStatus @{ DB01 = 'OK'; DB02 = 'OK'; DB03 = 'WARN'; DB04 = 'OK' } `
@@ -163,6 +165,7 @@ $rows += New-EDRow -Module 'M20' -Check 'Store RPC latency (p95)' -Unit 'ms' -St
 $rows += New-EDRow -Module 'M21' -Check 'En kotu volume - yazma' -Unit 'sn' -Status 'WARN' `
     -Values @{ MBX01 = 0.0041; MBX02 = 0.0043; MBX03 = 0.0312; DR01 = 0.0038 } `
     -CellStatus @{ MBX01 = 'OK'; MBX02 = 'OK'; MBX03 = 'WARN'; DR01 = 'OK' } `
+    -Patterns @('P4') `
     -Note 'MBX03/E:: okuma 0.0289 sn, yazma 0.0312 sn, kuyruk 3.1. _Total DEGIL en kotu volume gosterilir; on diskten dokuzu saglikliyken biri bogulmus olabilir.'
 $rows += New-EDRow -Module 'M22' -Check 'DB paylasan volume sayisi' -Unit 'adet' -Status 'WARN' `
     -Values @{ MBX01 = 0; MBX02 = 0; MBX03 = 1; DR01 = 0 } `
