@@ -255,13 +255,50 @@ $patternCsv = Join-Path $script:Root 'SUMMARY-orgu.csv'
 Export-EDSummaryCsv -Rows $patternRows -Columns @('MBX1') -Path $patternCsv | Out-Null
 $patternBack = @(Import-Csv -LiteralPath $patternCsv -Encoding UTF8)
 
-Assert-True 'CSV: orgu etiketi satirda gorunuyor' ($patternBack[0].Not -match 'P1') $patternBack[0].Not
-Assert-True 'CSV: ikinci orgu de yazildi (tek orgu varsayilmiyor)' ($patternBack[0].Not -match 'P6') $patternBack[0].Not
-Assert-True 'CSV: etiketin ne anlama geldigi de yazildi' ($patternBack[0].Not -like '*tail olayi*') $patternBack[0].Not
-Assert-True 'CSV: satirin kendi notu kaybolmadi' ($patternBack[0].Not -like '*ortancanin 4 kati*') $patternBack[0].Not
+$patternHeaders = @($patternBack[0].PSObject.Properties.Name)
+
+function Get-EDCsvField {
+    <#
+        Olmayan sutunu COKMEDEN okur. StrictMode altinda var olmayan bir
+        ozelligi okumak exception firlatir ve paketin TAMAMI orada oludur:
+        geriye bilgilendirici bir [KALDI] listesi yerine ciplak bir "COKTU"
+        kalir. "Beklenen sutun uretilmedi" tam da bir testin GORMESI gereken
+        seydir - ozellikle duzeltme geri alinip kirmizi kosum okunurken.
+    #>
+    param($Record, [string]$Name)
+    if ($null -eq $Record -or $null -eq $Record.PSObject.Properties[$Name]) { return '(sutun yok)' }
+    return [string]$Record.$Name
+}
+
+# Orgu artik BIRINCI SINIF bir sutun: anlam sutunda, kanit notta durur.
+Assert-True 'CSV: Orgu sutunu var' ('Orgu' -in $patternHeaders) ($patternHeaders -join ', ')
+$orguMulti = Get-EDCsvField $patternBack[0] 'Orgu'
+$orguNone = Get-EDCsvField $patternBack[1] 'Orgu'
+$orguUnknown = Get-EDCsvField $patternBack[2] 'Orgu'
+
+Assert-True 'CSV: orgu etiketi sutunda' ($orguMulti -like '*P1*') $orguMulti
+Assert-True 'CSV: ikinci orgu de yazildi (tek orgu varsayilmiyor)' ($orguMulti -like '*P6*') $orguMulti
+Assert-True 'CSV: etiketin ne anlama geldigi de yazildi' ($orguMulti -like '*tail olayi*') $orguMulti
+# Not alani ARTIK ONEK TASIMAZ: aksi halde ayni cumle hem sutunda hem notta
+# tekrarlanir ve kanit metni okunmaz hale gelir.
+Assert-Equal 'CSV: not alani orgu onekiyle kirletilmiyor' 'MBX1 ortancanin 4 kati.' $patternBack[0].Not
 # Orgusu olmayan satira 'YOK'/'-' gibi bir doldurma degeri YAZILMAZ.
+Assert-Equal 'CSV: orgusuz satirin Orgu hucresi BOS' '' $orguNone
 Assert-Equal 'CSV: orgusuz satirin notu dokunulmadan geciyor' 'Kuyruk esigi asti.' $patternBack[1].Not
-Assert-Equal 'CSV: bilinmeyen etikete anlam uydurulmuyor' '[ORGU P99]' $patternBack[2].Not
+Assert-Equal 'CSV: bilinmeyen etikete anlam uydurulmuyor' 'P99' $orguUnknown
+
+# YAZAN ile OKUYAN ayni listeyi kullanmalidir. Rapor kendi kopyasini tutarsa,
+# buraya eklenen bir ust veri sutunu Compare.ps1 tarafinda tanimsiz kalir.
+$strayHeaders = @($patternHeaders | Where-Object { $_ -ne 'MBX1' -and $_ -notin $script:EDSummaryMetaColumns })
+Assert-Equal 'CSV: paylasilan liste disinda ust veri sutunu yok' 0 $strayHeaders.Count
+$missingMeta = @($script:EDSummaryMetaColumns | Where-Object { $_ -notin $patternHeaders })
+Assert-Equal 'CSV: paylasilan listedeki her sutun yaziliyor' 0 $missingMeta.Count
+# Sira da paylasilan listeden gelir; 'Orgu' sunucu sutunlarindan once durur.
+$metaOrder = @($patternHeaders | Where-Object { $_ -in $script:EDSummaryMetaColumns })
+Assert-Equal 'CSV: ust veri sutunlarinin sirasi paylasilan listeyle ayni' `
+    ($script:EDSummaryMetaColumns -join ',') ($metaOrder -join ',')
+Assert-True 'CSV: Orgu sunucu sutunundan once' `
+    ([array]::IndexOf($patternHeaders, 'Orgu') -lt [array]::IndexOf($patternHeaders, 'MBX1')) ($patternHeaders -join ', ')
 
 $patternHtml = Get-ReportHtml -Rows $patternRows -Columns @('MBX1')
 Assert-True 'HTML: bulgu tablosunda Orgu sutunu var' ($patternHtml -match '<th>Orgu</th>') 'bulgu tablosu basligi'
@@ -269,10 +306,24 @@ Assert-True 'HTML: etiket ve anlami bulgu satirinda' ($patternHtml -like '*P1: B
 Assert-True 'HTML: ikinci orgu de gorunuyor' ($patternHtml -like '*P6: Ortalama dusuk*') 'P6 hucresi'
 Assert-True 'HTML: orgusuz bulgunun hucresi BOS' ($patternHtml -match '<td class="orgu"></td>') 'uydurma deger yok'
 Assert-True 'HTML: bilinmeyen etiket ciplak yaziliyor' ($patternHtml -match '<td class="orgu">P99</td>') 'anlam uydurulmuyor'
+# HTML ozet tablosu ile CSV ayni veriyi anlatmalidir: hukmu OK oldugu icin
+# bulgu tablosuna hic girmeyen bir orgu satiri, ozet tabloda gorunmelidir.
+$okPatternRow = @(New-EDRow -Module 'M10' -Check 'Ortalama (tek basina YANILTIR)' -Values @{ MBX1 = 8 } `
+    -Unit 'sn' -Status 'OK' -Patterns @('P6'))
+$okPatternHtml = Get-ReportHtml -Rows $okPatternRow -Columns @('MBX1')
+Assert-True 'HTML: ozet tablosunda da Orgu sutunu var' ($okPatternHtml -match '<th>Orgu</th>') 'ozet tablosu basligi'
+Assert-True 'HTML: OK durumlu orgu satiri ozette gorunuyor' ($okPatternHtml -like '*P6: Ortalama dusuk*') 'ozet hucresi'
+Assert-True 'HTML: bulgu yokken bulgu tablosu hala bos' ($okPatternHtml -match 'Esikleri asan bulgu yok') 'yalnizca ozetten geldi'
 
 # Aciklamalar TEK sozlukten gelmelidir: her modul kendi cumlesini yazarsa
 # ayni orgu raporda iki farkli anlamla cikar.
 $reportText = Get-Content -LiteralPath (Join-Path $projectRoot 'Core\Report.ps1') -Raw -Encoding UTF8
+# Sutun adlarinin kopyasi: kusurun ilk cikis sebebi yazan ve okuyan tarafin
+# AYRI listeler tasimasiydi. Ciktiyi dogrulayan iddia bu kopyayi gormez -
+# iki liste bugun tesadufen ayni olabilir - o yuzden kaynak da denetlenir.
+Assert-True 'Report.ps1 paylasilan ust veri listesini kullaniyor' `
+    ($reportText -like '*$script:EDSummaryMetaColumns*') 'kendi kopyasini tutmuyor'
+
 $modulePaths = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Modules') -Filter 'M*.ps1' -File)
 $duplicated = @()
 foreach ($id in @('P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8')) {
