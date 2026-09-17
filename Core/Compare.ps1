@@ -513,76 +513,124 @@ function Test-EDPreviousCsvShape {
     return [pscustomobject]@{ StatusReadable = $true; BlockingNote = $null }
 }
 
+function Get-EDMeasuredEntityName {
+<#
+    .SYNOPSIS
+        Simdiki kosumda GERCEKTEN olcum anahtari olarak kullanilan adlari toplar.
+
+    .DESCRIPTION
+        SUMMARY.csv'nin ust veri disindaki sutunlari SUNUCU DEGIL, VARLIK
+        sutunlaridir: satira gore sunucu (M10), veritabani (M12, M23) ya da
+        volume olabilir. Kavrami "sunucu" sanmak bir kusur uretmisti - DB
+        adiyla anahtarlanmis satirlar topolojide bulunmadigi icin kiyas disi
+        kalmis, M12'de olculmus 3 -> 1174 gibi gercek bir degisim delta
+        raporundan dusmustu.
+
+        Bir ad, simdiki kosumun satirlarinda olcum anahtari olarak geciyorsa
+        o ad KESINLIKLE bir varliktir. Bu bir tahmin degil GOZLEMDIR: degeri
+        uretip o anahtara yazan, aracin kendisidir.
+#>
+    [CmdletBinding()]
+    param($Rows)
+
+    $names = @()
+    foreach ($row in @($Rows)) {
+        if ($null -eq $row) { continue }
+        $values = Get-EDProperty -InputObject $row -Name 'Values'
+        if ($null -eq $values) { continue }
+        $names += @($values.Keys)
+    }
+    return @($names | Where-Object { "$_" -ne '' } | Select-Object -Unique)
+}
+
 function Get-EDPreviousColumnScan {
 <#
     .SYNOPSIS
-        Onceki SUMMARY.csv'nin sutunlarini ust veri / sunucu / TANIMSIZ diye ayirir.
+        Onceki SUMMARY.csv'nin sutunlarini ust veri / VARLIK / TANIMSIZ diye ayirir.
 
     .DESCRIPTION
-        Sunucu sutunu artik TAHMIN EDILMEZ. Eskiden kural "sabit bir ust veri
-        listesinde olmayan her sutun sunucudur" idi; yani CSV'ye eklenen her
-        yeni ust veri sutunu sessizce bir sunucuya donusuyordu. Boyle bir
-        sutun onceki kosumda olup simdikinde olmayinca "bu sunucu simdiki
-        calistirmada olculmedi" diyen UYDURMA bir KAYBOLDU deltasi
-        uretiliyordu: hic var olmamis bir sunucu adina, hic yapilmamis bir
-        olcum hakkinda.
+        Varlik sutunu (olcum anahtari) TAHMIN EDILMEZ. Eskiden kural "sabit
+        bir ust veri listesinde olmayan her sutun bir varliktir" idi; yani
+        CSV'ye eklenen her yeni ust veri sutunu sessizce bir varliga
+        donusuyordu. Boyle bir sutun onceki kosumda olup simdikinde
+        olmayinca "bu sunucu simdiki calistirmada olculmedi" diyen UYDURMA
+        bir KAYBOLDU deltasi uretiliyordu: hic var olmamis bir varlik
+        adina, hic yapilmamis bir olcum hakkinda.
 
-        Iki yanlisin agirligi esit degildir. Bir sunucuyu ust veri sanmak
+        Iki yanlisin agirligi esit degildir. Bir varligi ust veri sanmak
         yalnizca bir olcumu gozden kacirir (ve bu, kapsam notuyla soylenir);
-        ust veriyi sunucu sanmak ise olmayan bir sey hakkinda hukum uretir -
+        ust veriyi varlik sanmak ise olmayan bir sey hakkinda hukum uretir -
         aracin "okunamayan degeri uydurma" ilkesinin dogrudan ihlali. O yuzden
-        siniflandirma POZITIF tarafta yapilir: sutun, adi BILINEN bir
-        sunucuyla eslesiyorsa sunucudur.
+        siniflandirma POZITIF tarafta yapilir: sutun, adi BILINEN bir varlikla
+        eslesiyorsa varliktir.
 
-        Bilinen ad kaynaklarinin ikisi de tahmin degildir:
+        Bilinen ad kaynaklarinin ucu de tahmin degildir:
+          - simdiki kosumun satirlarinda GOZLENEN olcum anahtarlari (sunucu,
+            DB, volume - hangisi olursa; degeri yazan aracin kendisidir),
           - simdiki kosumun topolojisi (Context'ten gelir, kesindir),
           - onceki kosumun run-meta.json'indaki servers alani.
+
+        DIKKAT: kume yalnizca GOZLENMIS adlarla genisletilir. "Ust veri
+        listesinde olmayan her sey varliktir" kuralina geri donmek, tam da
+        uydurma KAYBOLDU kusurunu geri getirirdi.
 
         Hicbirine uymayan sutun TANIMSIZDIR: kiyasa sokulmaz ama SUSULMAZ.
         run-meta'da servers alani eksikse tahmine GERI DONULMEZ; siniflamanin
         dogrulanamadigi notta acikca yazar.
 
+        KALDIRILMIS VARLIK NEDEN AYRI ELE ALINMIYOR: silinmis bir DB simdiki
+        kosumda hicbir satirda gecmez, topolojide de yoktur; yani TANIMSIZ
+        kovasina duser. Elimizdeki veriyle bu durumu "yeni surumun ekledigi
+        bir ust veri sutunu"ndan AYIRT EDECEK bir kanit yok - ikisi de
+        "onceki CSV'de var, simdiki kosumda hicbir izi yok" seklinde
+        gorunur. Ayirt edemedigimiz iki durumdan birini secip satir basina
+        KAYBOLDU uretmek uydurma olurdu; bu yuzden tek bir kapsam notu
+        verilir ve not, KALDIRILMIS VARLIK okumasini acikca soyler:
+        degerleri kiyaslanmadi ve bu, sorunun gectigi anlamina gelmez.
+        (Kesin ayrim ancak run-meta.json olculen varlik adlarini da
+        yazarsa mumkun olur - bkz. rapor.)
+
     .OUTPUTS
-        ServerColumns  : kiyasa girecek sunucu sutunlari
+        EntityColumns  : kiyasa girecek varlik (olcum anahtari) sutunlari
         UnknownColumns : tanimlanamayan sutunlar (kiyasa GIRMEZ)
         AdvisoryNote   : tanimsiz sutun varsa kapsam notu, yoksa $null
 #>
     [CmdletBinding()]
-    param($PreviousRows, $PreviousMeta, $CurrentServers)
+    param($PreviousRows, $PreviousMeta, $KnownEntities)
 
     $rows = @($PreviousRows)
     if ($rows.Count -eq 0) {
-        return [pscustomobject]@{ ServerColumns = @(); UnknownColumns = @(); AdvisoryNote = $null }
+        return [pscustomobject]@{ EntityColumns = @(); UnknownColumns = @(); AdvisoryNote = $null }
     }
 
     # Ust veri listesi Framework'te, YAZAN tarafla ortak tanimlanir.
     $columns = @($rows[0].PSObject.Properties.Name | Where-Object { $_ -notin $script:EDSummaryMetaColumns })
 
     $metaServers = Get-EDMetaFieldState -Meta $PreviousMeta -Name 'servers'
-    $knownServers = @(@($CurrentServers) | Where-Object { "$_" -ne '' })
+    $known = @(@($KnownEntities) | Where-Object { "$_" -ne '' })
     if ($metaServers.Present) {
-        $knownServers += @(@($metaServers.Value) | Where-Object { "$_" -ne '' })
+        $known += @(@($metaServers.Value) | Where-Object { "$_" -ne '' })
     }
-    $knownServers = @($knownServers | Select-Object -Unique)
+    $known = @($known | Select-Object -Unique)
 
-    $serverColumns = @($columns | Where-Object { $_ -in $knownServers })
-    $unknownColumns = @($columns | Where-Object { $_ -notin $knownServers })
+    $entityColumns = @($columns | Where-Object { $_ -in $known })
+    $unknownColumns = @($columns | Where-Object { $_ -notin $known })
 
     $note = $null
     if ($unknownColumns.Count -gt 0) {
-        # Eksik servers alani "sunucu degil" demek degildir; sadece
+        # Eksik servers alani "varlik degil" demek degildir; sadece
         # dogrulayamadigimiz anlamina gelir ve bu ayrim yazilir.
         $verification = $(if ($metaServers.Present) {
             ''
         } else {
             " Onceki meta'da 'servers' alani YOK, bu yuzden siniflandirma DOGRULANAMADI."
         })
-        $note = ("Onceki SUMMARY.csv'de TANIMSIZ sutun var: {0}. Bu sutunlar ne ust veri listesinde ne de bilinen sunucu adlari arasinda; kiyasa GIRMEDILER. Sunucu iseler o sunucularin degerleri karsilastirilmamistir; yeni bir ust veri sutunu iseler dislanmalari dogrudur. Sunucu OLDUKLARI VARSAYILMADI: olmayan bir sunucu adina 'olculmedi' kaydi uretmek uydurma olurdu.{1}" -f `
+        $note = ("Onceki SUMMARY.csv'de TANIMSIZ sutun var: {0}. Bu sutunlar ne ust veri listesinde ne de simdiki kosumda olculen varliklar (sunucu/DB/volume) arasinda; kiyasa GIRMEDILER. KALDIRILMIS bir varliksa (orn. silinmis DB) onceki degerleri karsilastirilmamistir ve bu, sorunun gectigi anlamina GELMEZ; yeni bir ust veri sutunuysa dislanmalari dogrudur. Varlik OLDUKLARI VARSAYILMADI: olmayan bir varlik adina 'olculmedi' kaydi uretmek uydurma olurdu.{1}" -f `
             ($unknownColumns -join ', '), $verification)
     }
 
     return [pscustomobject]@{
-        ServerColumns  = $serverColumns
+        EntityColumns  = $entityColumns
         UnknownColumns = $unknownColumns
         AdvisoryNote   = $note
     }
@@ -631,10 +679,18 @@ function Compare-EDRuns {
     }
     $scope = Test-EDRunComparable -Previous $previousMeta -Current $currentMeta
 
-    # Sutunlarin siniflandirmasi: hangisi sunucu, hangisi ust veri, hangisi
-    # TANIMSIZ. Tahmin yok - gerekcesi Get-EDPreviousColumnScan'ta.
+    # Sutunlarin siniflandirmasi: hangisi VARLIK (olcum anahtari), hangisi
+    # ust veri, hangisi TANIMSIZ. Tahmin yok - gerekcesi
+    # Get-EDPreviousColumnScan'ta.
+    #
+    # Bilinen varlik kumesi iki GOZLEMIN birlesimidir: topolojideki sunucular
+    # ve simdiki kosumun satirlarinda gercekten kullanilmis olcum anahtarlari.
+    # Ikincisi sart: M12/M23 gibi moduller satirlarini DB adiyla anahtarlar,
+    # o adlar topolojide YOKTUR ve yalnizca sunucuya bakan bir kume onlari
+    # kiyas disi birakip olculmus gercek degisimleri rapordan dusuruyordu.
+    $knownEntities = @(@($currentMeta.servers) + @(Get-EDMeasuredEntityName -Rows $CurrentRows))
     $columnScan = Get-EDPreviousColumnScan -PreviousRows $previousRows -PreviousMeta $previousMeta `
-        -CurrentServers $currentMeta.servers
+        -KnownEntities $knownEntities
 
     # CSV'den gelen notlar kapsam denetiminin sonucuna EKLENIR, ayri bir
     # kanaldan verilmez: operator "kiyas guvenilir mi?" sorusunun cevabini
@@ -659,7 +715,7 @@ function Compare-EDRuns {
 
     # --- Onceki satirlari (Modul, Kontrol) ile indeksle ---
     $previousIndex = @{}
-    $previousColumns = @($columnScan.ServerColumns)
+    $previousEntityColumns = @($columnScan.EntityColumns)
     # Modul/Kontrol burada korumasiz okunabilir: Test-EDPreviousCsvShape
     # bu iki kolon yoksa YUKARIDA istisna firlatti. Anahtari olmayan bir
     # dosyadan indeks kurmak zaten anlamsizdi.
@@ -704,8 +760,12 @@ function Compare-EDRuns {
         $currentColumns = @($row.Values.Keys)
 
         foreach ($column in $currentColumns) {
-            # Sutun onceki calistirmada yoksa (yeni sunucu) kiyas kurulmaz.
-            if ($column -notin $previousColumns) {
+            # Sutun onceki calistirmada yoksa (yeni varlik: sunucu, DB ya da
+            # volume) kiyas kurulmaz.
+            # NOT: delta kaydinin alan adi tarihsel olarak 'Sunucu'dur ve
+            # DELTA.csv/HTML basligi odur; tasidigi deger ise satirin OLCUM
+            # ANAHTARIDIR. Sema disariya acik oldugu icin ad degistirilmedi.
+            if ($column -notin $previousEntityColumns) {
                 $deltas += [pscustomobject]@{
                     Modul = $row.Module; Kontrol = $row.Check; Sunucu = $column
                     Onceki = '(sutun yok)'; Simdiki = "$($row.Values[$column])"; Fark = '-'
@@ -816,11 +876,11 @@ function Compare-EDRuns {
 
         # --- Simdiki calistirmada SUTUNU KAYBOLAN sunucular ---
         # "Yeni sutun" dalinin ayna goruntusu. Olculmus bir deger (orn. 999)
-        # sunucu kapsam disi kaldiginda rapordan sessizce dusuyordu; geriye
+        # varlik kapsam disi kaldiginda rapordan sessizce dusuyordu; geriye
         # yalnizca satirin FAIL -> OK gecisi kaliyor ve sorun cozulmus gibi
         # gorunuyordu. Onceki degeri okunamayanlar ('' / N/A) yazilmaz:
         # olmayan olcumun kaybi bir bulgu degildir.
-        foreach ($column in $previousColumns) {
+        foreach ($column in $previousEntityColumns) {
             if ($column -in $currentColumns) { continue }
             $previousValue = $previous.$column
             if (Test-EDValueMissing $previousValue) { continue }

@@ -555,7 +555,7 @@ if ($null -ne $emptyComparison) {
 }
 
 # ===========================================================================
-Write-Host "`n=== 4D. Sunucu sutunu TAHMIN EDILMEZ ===" -ForegroundColor Cyan
+Write-Host "`n=== 4D. Varlik (olcum anahtari) sutunu TAHMIN EDILMEZ ===" -ForegroundColor Cyan
 
 # Kiyas motoru sunucu sutununu "sabit listede olmamak" ile tanimliyordu:
 # CSV'ye eklenen her yeni ust veri sutunu sessizce bir SUNUCU sayiliyordu ve
@@ -567,23 +567,23 @@ Write-Host "`n=== 4D. Sunucu sutunu TAHMIN EDILMEZ ===" -ForegroundColor Cyan
 $columnRow = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
 $columnCurrent = @((New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK'))
 
-# 4D-a. Paylasilan ust veri listesindeki bir sutun ('Orgu') SUNUCU SAYILMAZ.
+# 4D-a. Paylasilan ust veri listesindeki bir sutun ('Orgu') VARLIK SAYILMAZ.
 $previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Orgu = 'P1' }
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
 $fabricated = @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Orgu' })
-Assert-Equal "Ust veri sutunundan uydurma sunucu deltasi uretilmedi" 0 $fabricated.Count
+Assert-Equal "Ust veri sutunundan uydurma varlik deltasi uretilmedi" 0 $fabricated.Count
 Assert-Equal 'Ust veri sutunu hic delta uretmedi' 0 @($comparison.Deltas).Count
 Assert-True 'Taninan ust veri sutunu icin uyari da cikmaz' `
     ((@($comparison.Scope.Advisory) -join ' ') -notlike '*TANIMSIZ*') (Get-EDDetailSnippet (@($comparison.Scope.Advisory) -join ' '))
 
-# 4D-b. TANIMADIGI bir sutun: ne ust veridir ne de bilinen bir sunucu adi.
-# Sunucu SAYILMAZ (uydurma delta yok) ama SUSULMAZ da.
+# 4D-b. TANIMADIGI bir sutun: ne ust veridir ne de bilinen bir varlik adi.
+# Varlik SAYILMAZ (uydurma delta yok) ama SUSULMAZ da.
 $previous = New-PreviousRun -Rows $columnRow -ExtraCsvColumns @{ Tuhaf = 'deger' }
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurrent -Context (New-CompareContext)
-Assert-Equal 'Tanimsiz sutundan uydurma sunucu deltasi uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
+Assert-Equal 'Tanimsiz sutundan uydurma varlik deltasi uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
 $columnAdvisory = @($comparison.Scope.Advisory) -join ' '
 Assert-True 'Tanimsiz sutun ADIYLA bildirildi' ($columnAdvisory -like '*Tuhaf*') (Get-EDDetailSnippet $columnAdvisory)
-Assert-True 'Sunucu oldugu VARSAYILMADI denildi' ($columnAdvisory -like '*VARSAYILMADI*') (Get-EDDetailSnippet $columnAdvisory)
+Assert-True 'Varlik oldugu VARSAYILMADI denildi' ($columnAdvisory -like '*VARSAYILMADI*') (Get-EDDetailSnippet $columnAdvisory)
 # Tanimsiz sutun raporlanan hicbir seyi yanlislamaz; kiyas gecerli kalir.
 Assert-True 'Tanimsiz sutun kiyasi gecersiz KILMAZ' ($comparison.Scope.Comparable) 'blocking yok'
 
@@ -595,9 +595,9 @@ $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows $columnCurre
 # uyarisiyla karisirsa test, olcmedigi bir seyi gecmis sayar.
 $columnNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
 Assert-True 'Servers yoksa siniflamanin dogrulanamadigi yazildi' ($columnNote -like '*DOGRULANAMADI*') (Get-EDDetailSnippet $columnNote)
-Assert-Equal 'Servers yoksa da uydurma sunucu deltasi yok' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
+Assert-Equal 'Servers yoksa da uydurma varlik deltasi yok' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'Tuhaf' }).Count
 
-# 4D-d. GERCEK bir sunucunun kaybolmasi hala raporlanir - tahmin kaldirilirken
+# 4D-d. GERCEK bir sunucunun (varligin) kaybolmasi hala raporlanir - tahmin kaldirilirken
 # olculmus bir degerin kaybi da susturulmus olmamali.
 $previous = New-PreviousRun -Rows @(
     (New-EDRow -Module 'M14' -Check 'Kuyruk' -Values @{ MBX1 = 10; MBX2 = 999 } -Status 'FAIL')
@@ -607,7 +607,52 @@ $comparison = Compare-EDRuns -PreviousFolder $previous `
     -Context (New-CompareContext)
 Assert-Equal 'Kaybolan GERCEK sunucu hala raporlaniyor' 1 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'MBX2' }).Count
 
-# 4D-e. YAZAN ile OKUYAN ayni kaynaga bakiyor mu? Export-EDSummaryCsv'nin
+# 4D-e. SUNUCU ADI TASIMAYAN mesru olcum sutunlari da kiyaslanir.
+#
+# Rapor satirlarinin anahtari her zaman sunucu DEGILDIR: M12 satirlarini
+# DB adiyla (DB01..DB04), M23 de oyle anahtarlar. Bu adlar ne ust veri
+# listesinde ne topolojide ne de run-meta.servers icindedir. "Bilinen
+# varlik = sunucu" denildiginde bu sutunlar TANIMSIZ'a dusuyor ve olculmus
+# gercek bir degisim (ornek raporda M12/DB03: 3 -> 1174, %+39033) delta
+# raporundan tamamen dusuyordu - uzerine "YENI sutun" etiketi yaziliyordu.
+#
+# Kume GOZLEM ile genisletilir: bir ad simdiki kosumun satirlarinda olcum
+# anahtari olarak geciyorsa o ad kesinlikle bir varliktir (degeri o anahtara
+# yazan aracin kendisidir). Bu tahmin degildir; "listede olmayan her sey
+# varliktir" kuralina geri donus de degildir.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1; DB03 = 3 } -Status 'OK')
+) -Columns @('MBX1', 'DB01', 'DB03') -Meta @{ servers = @('MBX1') }   # meta YALNIZCA sunuculari tasir
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows @(
+    (New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1; DB03 = 1174 } -Status 'WARN')
+) -Context (New-CompareContext)
+$dbDeltas = @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'DB03' })
+Assert-Equal 'DB anahtarli sutun icin delta uretildi' 1 $dbDeltas.Count
+Assert-Equal 'Onceki DB degeri GERCEKTEN okundu' '3' (Get-EDFirstField $dbDeltas 'Onceki')
+Assert-Equal 'DB sutunu YENI sanilmadi, kiyaslandi' 'ARTTI' (Get-EDFirstField $dbDeltas 'Yon')
+Assert-True 'DB gerilemesi ozete girdi' (@((Get-EDDeltaHighlights -Comparison $comparison).Regressions).Count -ge 1) 'gerileme goruldu'
+Assert-True 'Mesru DB sutunu TANIMSIZ diye disarida birakilmadi' `
+    ((@($comparison.Scope.Advisory) -join ' ') -notlike '*DB03*') (Get-EDDetailSnippet (@($comparison.Scope.Advisory) -join ' '))
+
+# 4D-f. Simdiki kosumda HIC gecmeyen bir sutun (orn. kaldirilmis DB) yine
+# TANIMSIZ'dir: elimizde onu "yeni surumun ust veri sutunu"ndan ayirt edecek
+# kanit yoktur ve ayirt edemedigimiz iki durumdan birini secip satir basina
+# KAYBOLDU uretmek uydurma olurdu. Ama not, kaldirilmis varlik okumasini
+# acikca soyler - susmak da yanlis olurdu.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1; DB09 = 500 } -Status 'WARN')
+) -Columns @('DB01', 'DB09') -Meta @{ servers = @('MBX1') }
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows @(
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1 } -Status 'OK')
+) -Context (New-CompareContext)
+Assert-Equal 'Kaldirilmis varlik icin uydurma satir uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'DB09' }).Count
+$removedNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
+Assert-True 'Kaldirilmis varlik adiyla bildirildi' ($removedNote -like '*DB09*') (Get-EDDetailSnippet $removedNote)
+Assert-True 'Sorun gecti sanilmasin uyarisi var' ($removedNote -like '*anlamina GELMEZ*') (Get-EDDetailSnippet $removedNote)
+
+# 4D-g. YAZAN ile OKUYAN ayni kaynaga bakiyor mu? Export-EDSummaryCsv'nin
 # urettigi her baslik ya bir sunucu adi ya da paylasilan ust veri
 # listesindedir. Bu iddia, rapor katmani yeni bir sutun ekleyip listeyi
 # guncellemedigi gun KALIR - kusur sessizce delta motoruna sizmadan once.
@@ -619,7 +664,7 @@ $unlisted = @($contractHeaders | Where-Object { $_ -ne 'MBX1' -and $_ -notin $sc
 Assert-Equal 'CSV yazicisinin ust veri sutunlari paylasilan listede' 0 $unlisted.Count
 Assert-True "Paylasilan liste 'Orgu' sutununun onunu aciyor" ('Orgu' -in $script:EDSummaryMetaColumns) 'rapor katmani sutunu acabilir'
 
-# 4D-f. Okuyan taraf listeyi KENDI kopyasindan okumasin: tek kaynak kurali
+# 4D-h. Okuyan taraf listeyi KENDI kopyasindan okumasin: tek kaynak kurali
 # yorumla degil, kodla korunur.
 $compareText = Get-Content -LiteralPath (Join-Path $projectRoot 'Core\Compare.ps1') -Raw -Encoding UTF8
 Assert-True 'Compare.ps1 paylasilan listeyi kullaniyor' ($compareText -like '*$script:EDSummaryMetaColumns*') 'referans var'
