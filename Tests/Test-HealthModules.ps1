@@ -238,14 +238,17 @@ $rows = @(& $m41.Run $truncatedContext)
 $errorRow = Get-EDTestRow $rows 'Hata olayi'
 Assert-True 'Tavana ulasildigi notta yazili' ($errorRow.Note -like '*TAVANA ULASILDI*') $errorRow.Note
 Assert-True 'Hangi sunucuda oldugu yazili' ($errorRow.Note -like '*MBX1*') $errorRow.Note
-Assert-True 'Sayilarin eksik olabilecegi soylendi' ($errorRow.Note -like '*eksik olabilir*') $errorRow.Note
-# DIKKAT - BILINEN ACIK, M41'DE: bayragin kendisi
-# ($totalScanned -ge $MaxEvents * 2) ile hesaplanir. Tavan gunluk BASINA
-# 4000'dir ve iki gunluk (Application + System) taranir; bu yuzden bayrak
-# ancak IKI gunluk birden tavana vurursa kalkar. Application 4000'de kesilip
-# System 10 olay dondurdugunde toplam 4010 olur, bayrak $false kalir ve eksik
-# sayim SESSIZ gecer. Burasi M41'in sahibine bildirildi; bu paket bayragin
-# rapora DOGRU tasindigini sabitler, hesabini degil.
+# Metin "eksik OLABILIR" degil "eksik" der: tavan gunluk BASINA uygulandigi
+# icin bir gunluk tavana vurdugunda olaylarin dusdugu KESINDIR, olasi degil.
+Assert-True 'Sayilarin eksik oldugu soylendi' ($errorRow.Note -like '*sayilar eksik*') $errorRow.Note
+Assert-True 'Ne yapilacagi soylendi' ($errorRow.Note -like '*daraltin*') $errorRow.Note
+# NOT: bu paketin yazildigi sirada bayragin HESABI yanlisti
+# ($totalScanned -ge $MaxEvents * 2, oysa tavan gunluk basina). Application
+# 4000'de kesilip System 10 olay dondurdugunde toplam 4010 kaliyor, bayrak
+# $false oluyor ve eksik sayim SESSIZ geciyordu. M41 sahibi bunu duzeltti:
+# artik her gunluk kendi tavanina karsi kontrol ediliyor ve HANGI gunlugun
+# kesildigi de tasiniyor. Bu paket bayragin rapora dogru tasindigini
+# sabitler; hesabin kendisi Core testlerinde degil M41'in kendi yolunda.
 
 # ===========================================================================
 Write-Host "`n=== 3. M42 AV dislamalari ===" -ForegroundColor Cyan
