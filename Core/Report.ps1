@@ -108,12 +108,16 @@ function ConvertTo-EDStatusClass {
         Sinif adi jetonlastirilir: bosluk iceren bir durum adi ikinci bir
         sinif jetonuna bolunur ve ayni sekilde kaybolurdu.
 
-        -creplace ZORUNLUDUR. -replace buyuk/kucuk harf duyarsizdir ve .NET
-        bu karsilastirmayi GECERLI KULTURLE yapar: tr-TR'de 'I' harfinin
-        kucugu 'ı'dir, yani 'I' [A-Za-z] araligiyla eslesmez ve elenir.
-        Turkce bir Exchange sunucusunda PASSIVE -> 'PASSVE', FAIL -> 'FAL'
-        olur; iki sinif da stil sayfasinda yoktur ve hucreler yine renksiz
-        kalirdi - duzeltilen hatanin Turkce ortamda aynen geri gelmesi.
+        -creplace kullanilir cunku CSS sinif adi buyuk/kucuk harfe DUYARLI
+        bir tanimlayicidir; burada harf katlamasinin bir anlami yoktur ve
+        kulture bagli davranis riskini bastan almamak dogrudur.
+        NOT: "Turkce I" tuzagi bu desende OLCULDU ve BULUNMADI - tr-TR
+        altinda -replace da PASSIVE/FAIL degerlerini bozmuyor, cunku .NET
+        ASCII araliklarinda bu katlamayi ozel olarak ele aliyor. Tuzak
+        GERCEKTIR ama baska islemlerde: .ToUpper()/.ToLower() cagrilari
+        tr-TR'de 'i' -> 'İ' ve 'I' -> 'ı' uretir. Durum adlarini bir yerde
+        buyuk/kucuk harfe cevirip sonra [A-Za-z] ile suzen bir kod eklenirse
+        sinif adlari orada bozulur.
 #>
     param([AllowNull()][string]$Status)
 
