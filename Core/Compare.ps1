@@ -111,12 +111,34 @@ function Save-EDRunMeta {
         Delta motorunun "bu iki calistirma kiyaslanabilir mi?" sorusunu
         cevaplayabilmesi icin gereklidir. Bu dosya olmadan yapilan kiyas,
         farkli pencerelerle alinmis olcumleri sessizce yan yana koyar.
+
+    .NOTES
+        entities ALANI NEDEN VAR (servers YETMIYOR)
+        -------------------------------------------
+        SUMMARY.csv'nin olcum sutunlari yalnizca sunucu degildir: M12 ve M23
+        satirlarini DB adiyla anahtarlar. Yalnizca servers yazildiginda kiyas
+        motoru, onceki kosumda olculmus ama simdi hic gecmeyen bir DB sutununu
+        "tanimadigim sutun" ile ayni kovaya koymak zorunda kaliyordu. Oysa
+        ikisi operator icin ayni sey DEGIL: "olculmustu, artik yok" gercek bir
+        kapsam degisikligidir ve KAYBOLDU sinyalini hak eder; "hic tanimadim"
+        ise bir bicim sorusudur. Bu ayrimi kanitsiz yapmak uydurma olurdu -
+        kanit bu alandir.
+
+        servers KALDIRILMADI: sunucu kumesi ile olculen varlik kumesi ayni
+        sey degildir ve ayri sorulara cevap verirler (biri topoloji, digeri
+        kapsam).
+
+        Satir verilmezse alan BOS yazilir. Okuyan taraf bos listeyi
+        "varlik yok" degil "KAYDEDILMEMIS" sayar - aksi halde alani hic
+        doldurmayan bir cagri, ayrim yapilmis gibi gorunup kaldirilmis
+        varligi sessizce yutardi.
 #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][string]$Path,
-        $ModuleTimings = @()
+        $ModuleTimings = @(),
+        $Rows = @()
     )
 
     $servers = @()
@@ -132,6 +154,9 @@ function Save-EDRunMeta {
         logAccess      = [string]$Context.LogAccess
         serverFilter   = @($Context.ServerFilter)
         servers        = @($servers | Sort-Object)
+        # Olculen VARLIK adlari: sunucu, DB, volume - satirin olcum anahtari
+        # ne ise o. Gerekcesi .NOTES'ta.
+        entities       = @(Get-EDMeasuredEntityName -Rows $Rows | Sort-Object)
         profile        = [string]$Context.Config.Environment['profile']
         modules        = @(@($ModuleTimings | ForEach-Object { $_.Id }) | Sort-Object)
     }
@@ -578,30 +603,40 @@ function Get-EDPreviousColumnScan {
         run-meta'da servers alani eksikse tahmine GERI DONULMEZ; siniflamanin
         dogrulanamadigi notta acikca yazar.
 
-        KALDIRILMIS VARLIK NEDEN AYRI ELE ALINMIYOR: silinmis bir DB simdiki
-        kosumda hicbir satirda gecmez, topolojide de yoktur; yani TANIMSIZ
-        kovasina duser. Elimizdeki veriyle bu durumu "yeni surumun ekledigi
-        bir ust veri sutunu"ndan AYIRT EDECEK bir kanit yok - ikisi de
-        "onceki CSV'de var, simdiki kosumda hicbir izi yok" seklinde
-        gorunur. Ayirt edemedigimiz iki durumdan birini secip satir basina
-        KAYBOLDU uretmek uydurma olurdu; bu yuzden tek bir kapsam notu
-        verilir ve not, KALDIRILMIS VARLIK okumasini acikca soyler:
-        degerleri kiyaslanmadi ve bu, sorunun gectigi anlamina gelmez.
-        (Kesin ayrim ancak run-meta.json olculen varlik adlarini da
-        yazarsa mumkun olur - bkz. rapor.)
+        KALDIRILMIS VARLIK: silinmis bir DB simdiki kosumda hicbir satirda
+        gecmez, topolojide de yoktur. Bir sure bu durum TANIMSIZ ile ayni
+        kovaya dusuyordu, cunku ayirt edecek kanit yoktu. Kanit artik var:
+        onceki kosumun run-meta.json'i OLCULEN VARLIK adlarini (entities)
+        yaziyor. Sutun o listede geciyorsa "olculmustu, artik yok"
+        demektir - gercek bir kapsam degisikligidir ve KAYBOLDU sinyalini
+        hak eder. Listede de yoksa "hic tanimadim" demektir ve TANIMSIZ
+        kalir. Iki soru ayri sorulardir; ayni kovaya konmalari, aracin
+        "olculmedi ile olculdu-ve-degisti ayrimini koru" ilkesinin
+        gevsemesiydi.
+
+        entities alani eksik (ya da bos) ise ayrim YAPILAMAZ. Bu durumda
+        eski davranisa duselir ama SESSIZCE degil: notta ayrimin
+        yapilamadigi yazar. Bos liste "hicbir varlik olculmedi" degil
+        "kaydedilmemis" demektir - alani doldurmayan bir cagri, ayrim
+        yapilmis gibi gorunup kaldirilmis varligi yutardi.
 
     .OUTPUTS
         EntityColumns  : kiyasa girecek varlik (olcum anahtari) sutunlari
+        RemovedColumns : onceki kosumda OLCULMUS ama simdi hic gecmeyen varliklar
         UnknownColumns : tanimlanamayan sutunlar (kiyasa GIRMEZ)
         AdvisoryNote   : tanimsiz sutun varsa kapsam notu, yoksa $null
+        RemovedNote    : kaldirilmis varlik varsa kapsam notu, yoksa $null
 #>
     [CmdletBinding()]
     param($PreviousRows, $PreviousMeta, $KnownEntities)
 
-    $rows = @($PreviousRows)
-    if ($rows.Count -eq 0) {
-        return [pscustomobject]@{ EntityColumns = @(); UnknownColumns = @(); AdvisoryNote = $null }
+    $empty = [pscustomobject]@{
+        EntityColumns = @(); RemovedColumns = @(); UnknownColumns = @()
+        AdvisoryNote = $null; RemovedNote = $null
     }
+
+    $rows = @($PreviousRows)
+    if ($rows.Count -eq 0) { return $empty }
 
     # Ust veri listesi Framework'te, YAZAN tarafla ortak tanimlanir.
     $columns = @($rows[0].PSObject.Properties.Name | Where-Object { $_ -notin $script:EDSummaryMetaColumns })
@@ -613,26 +648,49 @@ function Get-EDPreviousColumnScan {
     }
     $known = @($known | Select-Object -Unique)
 
+    # Onceki kosumda OLCULMUS varlik adlari. Bos liste "varlik yok" degil
+    # KAYDEDILMEMIS sayilir; ayrimi yapabilmek icin en az bir ad gerekir.
+    $previousEntities = @(Get-EDMetaList -Meta $PreviousMeta -Name 'entities')
+    $entitiesRecorded = ($previousEntities.Count -gt 0)
+
     $entityColumns = @($columns | Where-Object { $_ -in $known })
-    $unknownColumns = @($columns | Where-Object { $_ -notin $known })
+    $leftover = @($columns | Where-Object { $_ -notin $known })
+
+    # Ayrim yalnizca KANIT varsa yapilir; yoksa hepsi eski kovada kalir.
+    $removedColumns = @()
+    $unknownColumns = $leftover
+    if ($entitiesRecorded) {
+        $removedColumns = @($leftover | Where-Object { $_ -in $previousEntities })
+        $unknownColumns = @($leftover | Where-Object { $_ -notin $previousEntities })
+    }
+
+    $removedNote = $null
+    if ($removedColumns.Count -gt 0) {
+        $removedNote = ("Onceki kosumda OLCULMUS ama simdiki kosumda hic gecmeyen varlik: {0}. Bu varliklar kaldirilmis olabilir (orn. silinmis DB). Onceki degerleri satir bazinda KAYBOLDU olarak isaretlendi; satirin durumu iyilesmis gorunuyorsa sebep bu eksik olcum olabilir, sorunun gectigi anlamina GELMEZ." -f `
+            ($removedColumns -join ', '))
+    }
 
     $note = $null
     if ($unknownColumns.Count -gt 0) {
-        # Eksik servers alani "varlik degil" demek degildir; sadece
+        # Eksik alan "varlik degil" demek degildir; yalnizca
         # dogrulayamadigimiz anlamina gelir ve bu ayrim yazilir.
-        $verification = $(if ($metaServers.Present) {
-            ''
-        } else {
-            " Onceki meta'da 'servers' alani YOK, bu yuzden siniflandirma DOGRULANAMADI."
-        })
-        $note = ("Onceki SUMMARY.csv'de TANIMSIZ sutun var: {0}. Bu sutunlar ne ust veri listesinde ne de simdiki kosumda olculen varliklar (sunucu/DB/volume) arasinda; kiyasa GIRMEDILER. KALDIRILMIS bir varliksa (orn. silinmis DB) onceki degerleri karsilastirilmamistir ve bu, sorunun gectigi anlamina GELMEZ; yeni bir ust veri sutunuysa dislanmalari dogrudur. Varlik OLDUKLARI VARSAYILMADI: olmayan bir varlik adina 'olculmedi' kaydi uretmek uydurma olurdu.{1}" -f `
+        $verification = ''
+        if (-not $entitiesRecorded) {
+            $verification += " Onceki meta'da olculen varlik listesi ('entities') YOK ya da bos; KALDIRILMIS VARLIK ile TANIMADIGIM SUTUN ayrimi bu kiyasta YAPILAMADI."
+        }
+        if (-not $metaServers.Present) {
+            $verification += " Onceki meta'da 'servers' alani da YOK, bu yuzden siniflandirma DOGRULANAMADI."
+        }
+        $note = ("Onceki SUMMARY.csv'de TANIMSIZ sutun var: {0}. Bu sutunlar ne ust veri listesinde ne de simdiki kosumda olculen varliklar (sunucu/DB/volume) arasinda; kiyasa GIRMEDILER. KALDIRILMIS bir varliksa onceki degerleri karsilastirilmamistir ve bu, sorunun gectigi anlamina GELMEZ; yeni bir ust veri sutunuysa dislanmalari dogrudur. Varlik OLDUKLARI VARSAYILMADI: olmayan bir varlik adina 'olculmedi' kaydi uretmek uydurma olurdu.{1}" -f `
             ($unknownColumns -join ', '), $verification)
     }
 
     return [pscustomobject]@{
         EntityColumns  = $entityColumns
+        RemovedColumns = $removedColumns
         UnknownColumns = $unknownColumns
         AdvisoryNote   = $note
+        RemovedNote    = $removedNote
     }
 }
 
@@ -704,6 +762,7 @@ function Compare-EDRuns {
     $extraBlocking = @()
     $extraAdvisory = @()
     if ($csvShape.BlockingNote) { $extraBlocking += $csvShape.BlockingNote }
+    if ($columnScan.RemovedNote) { $extraAdvisory += $columnScan.RemovedNote }
     if ($columnScan.AdvisoryNote) { $extraAdvisory += $columnScan.AdvisoryNote }
     if ($extraBlocking.Count -gt 0 -or $extraAdvisory.Count -gt 0) {
         $scope = [pscustomobject]@{
@@ -715,7 +774,11 @@ function Compare-EDRuns {
 
     # --- Onceki satirlari (Modul, Kontrol) ile indeksle ---
     $previousIndex = @{}
-    $previousEntityColumns = @($columnScan.EntityColumns)
+    # Kaybolan varliklar da satir kiyasina GIRER: "olculmustu, artik yok"
+    # gercek bir kapsam degisikligidir ve KAYBOLDU satirini hak eder.
+    # TANIMSIZ sutunlar girmez - onlarin varlik oldugu kanitlanmis degil.
+    $removedEntityColumns = @($columnScan.RemovedColumns)
+    $previousEntityColumns = @(@($columnScan.EntityColumns) + $removedEntityColumns)
     # Modul/Kontrol burada korumasiz okunabilir: Test-EDPreviousCsvShape
     # bu iki kolon yoksa YUKARIDA istisna firlatti. Anahtari olmayan bir
     # dosyadan indeks kurmak zaten anlamsizdi.
@@ -874,7 +937,7 @@ function Compare-EDRuns {
             if ($statusChanged) { $statusReported = $true }
         }
 
-        # --- Simdiki calistirmada SUTUNU KAYBOLAN sunucular ---
+        # --- Simdiki calistirmada SUTUNU KAYBOLAN varliklar ---
         # "Yeni sutun" dalinin ayna goruntusu. Olculmus bir deger (orn. 999)
         # varlik kapsam disi kaldiginda rapordan sessizce dusuyordu; geriye
         # yalnizca satirin FAIL -> OK gecisi kaliyor ve sorun cozulmus gibi
@@ -889,7 +952,15 @@ function Compare-EDRuns {
                 Modul = $row.Module; Kontrol = $row.Check; Sunucu = $column
                 Onceki = "$previousValue"; Simdiki = '(sutun yok)'; Fark = '-'
                 Yon = 'KAYBOLDU'; Durum = $(if ($statusChanged) { "$previousStatus -> $($row.Status)" } else { '' })
-                Aciklama = 'Bu sunucu simdiki calistirmada olculmedi. Satirin durumu iyilesmis gorunuyorsa sebep bu eksik olcum olabilir; sorunun gectigi anlamina GELMEZ.'
+                # Iki ayri sebep, iki ayri cumle: varlik hala olculuyor ama bu
+                # satirda yok mu, yoksa varligin KENDISI mi kapsamdan cikti?
+                # Ikisini ayni cumleyle gecistirmek, operatorun kaldirilmis bir
+                # DB'yi "sunucu olculmedi" diye okumasina yol acardi.
+                Aciklama = $(if ($column -in $removedEntityColumns) {
+                    'Bu varlik (sunucu/DB/volume) simdiki kosumda HIC olculmedi; onceki kosumda olculmustu, artik kapsamda degil - kaldirilmis olabilir. Satirin durumu iyilesmis gorunuyorsa sebep bu eksik olcum olabilir; sorunun gectigi anlamina GELMEZ.'
+                } else {
+                    'Bu varlik simdiki calistirmada olculmedi. Satirin durumu iyilesmis gorunuyorsa sebep bu eksik olcum olabilir; sorunun gectigi anlamina GELMEZ.'
+                })
             }
             if ($statusChanged) { $statusReported = $true }
         }

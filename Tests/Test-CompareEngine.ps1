@@ -92,6 +92,9 @@ function New-PreviousRun {
             runId = 'onceki'; startedLocal = '2026-09-17 03:00:00'; startedHour = 3
             utcOffsetHours = 3; windowHours = 1; heavy = $true; logAccess = 'smb'
             serverFilter = @(); servers = @($Columns); profile = 'production'; modules = @('M10')
+            # Gercek kosumda entities, satirlarda kullanilan olcum
+            # anahtarlarindan uretilir; fixture'da bu CSV sutunlariyla aynidir.
+            entities = @($Columns)
         }
         foreach ($key in $Meta.Keys) { $defaults[$key] = $Meta[$key] }
         foreach ($field in $OmitMetaFields) { $defaults.Remove($field) }
@@ -636,23 +639,48 @@ Assert-True 'DB gerilemesi ozete girdi' (@((Get-EDDeltaHighlights -Comparison $c
 Assert-True 'Mesru DB sutunu TANIMSIZ diye disarida birakilmadi' `
     ((@($comparison.Scope.Advisory) -join ' ') -notlike '*DB03*') (Get-EDDetailSnippet (@($comparison.Scope.Advisory) -join ' '))
 
-# 4D-f. Simdiki kosumda HIC gecmeyen bir sutun (orn. kaldirilmis DB) yine
-# TANIMSIZ'dir: elimizde onu "yeni surumun ust veri sutunu"ndan ayirt edecek
-# kanit yoktur ve ayirt edemedigimiz iki durumdan birini secip satir basina
-# KAYBOLDU uretmek uydurma olurdu. Ama not, kaldirilmis varlik okumasini
-# acikca soyler - susmak da yanlis olurdu.
+# 4D-f. KALDIRILMIS VARLIK ile TANIMADIGIM SUTUN artik ayri seylerdir.
+#
+# Ikisi bir sure ayni kovaya dusuyordu cunku ayirt edecek kanit yoktu. Kanit
+# artik var: run-meta.json olculen varlik adlarini (entities) yaziyor. Onceki
+# kosumda OLCULMUS ama simdi hic gecmeyen bir sutun "olculmustu, artik yok"
+# demektir - gercek bir kapsam degisikligi ve KAYBOLDU sinyalini hak eder.
+# Operator icin bu iki durum ayni DEGILDIR ve aracin butun degeri
+# "olculmedi" ile "olculdu ve degisti" arasindaki farki korumaktan gelir.
 $previous = New-PreviousRun -Rows @(
     (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1; DB09 = 500 } -Status 'WARN')
-) -Columns @('DB01', 'DB09') -Meta @{ servers = @('MBX1') }
+) -Columns @('DB01', 'DB09') -Meta @{ servers = @('MBX1') }   # entities = DB01, DB09
 $comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows @(
     (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1 } -Status 'OK')
 ) -Context (New-CompareContext)
-Assert-Equal 'Kaldirilmis varlik icin uydurma satir uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'DB09' }).Count
-$removedNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
-Assert-True 'Kaldirilmis varlik adiyla bildirildi' ($removedNote -like '*DB09*') (Get-EDDetailSnippet $removedNote)
-Assert-True 'Sorun gecti sanilmasin uyarisi var' ($removedNote -like '*anlamina GELMEZ*') (Get-EDDetailSnippet $removedNote)
+$removedDeltas = @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'DB09' })
+Assert-Equal 'Kaldirilmis varlik icin GERCEK KAYBOLDU satiri uretildi' 1 $removedDeltas.Count
+Assert-Equal 'Kaldirilmis varligin olculmus degeri korundu' '500' (Get-EDFirstField $removedDeltas 'Onceki')
+Assert-Equal 'Yon KAYBOLDU' 'KAYBOLDU' (Get-EDFirstField $removedDeltas 'Yon')
+Assert-True 'Kaldirilmis varlik oldugu satirda yaziyor' ((Get-EDFirstField $removedDeltas 'Aciklama') -like '*kaldirilmis olabilir*') `
+    (Get-EDDetailSnippet (Get-EDFirstField $removedDeltas 'Aciklama'))
+Assert-True 'Sorun gecti sanilmasin uyarisi var' ((Get-EDFirstField $removedDeltas 'Aciklama') -like '*anlamina GELMEZ*') 'satirda yaziyor'
+# TANIMSIZ kovasina DUSMEDI: ayrim gercekten ayirt ediyor.
+$unknownNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
+Assert-True 'Kaldirilmis varlik TANIMSIZ advisory sine dusmedi' ($unknownNote -notlike '*DB09*') (Get-EDDetailSnippet $unknownNote)
+$removedNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*OLCULMUS ama simdiki kosumda hic gecmeyen*' }) -join ' '
+Assert-True 'Kapsam degisikligi ozette de bildirildi' ($removedNote -like '*DB09*') (Get-EDDetailSnippet $removedNote)
 
-# 4D-g. YAZAN ile OKUYAN ayni kaynaga bakiyor mu? Export-EDSummaryCsv'nin
+# 4D-g. entities alani EKSIK olan eski meta: ayrim yapilamaz, eski davranisa
+# duselir - ama SESSIZCE degil. Eksik alan "varlik yok" demek degil "ayrim
+# yapilamadi" demektir.
+$previous = New-PreviousRun -Rows @(
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1; DB09 = 500 } -Status 'WARN')
+) -Columns @('DB01', 'DB09') -Meta @{ servers = @('MBX1') } -OmitMetaFields @('entities')
+$comparison = Compare-EDRuns -PreviousFolder $previous -CurrentRows @(
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB01 = 1 } -Status 'OK')
+) -Context (New-CompareContext)
+Assert-Equal 'Kanit yokken uydurma KAYBOLDU uretilmedi' 0 @(@($comparison.Deltas) | Where-Object { $_.Sunucu -eq 'DB09' }).Count
+$unknownNote = @(@($comparison.Scope.Advisory) | Where-Object { $_ -like '*TANIMSIZ sutun*' }) -join ' '
+Assert-True 'Kanit yoksa sutun TANIMSIZ kaliyor' ($unknownNote -like '*DB09*') (Get-EDDetailSnippet $unknownNote)
+Assert-True 'Ayrimin yapilamadigi acikca yazildi' ($unknownNote -like '*YAPILAMADI*') (Get-EDDetailSnippet $unknownNote)
+
+# 4D-h. YAZAN ile OKUYAN ayni kaynaga bakiyor mu? Export-EDSummaryCsv'nin
 # urettigi her baslik ya bir sunucu adi ya da paylasilan ust veri
 # listesindedir. Bu iddia, rapor katmani yeni bir sutun ekleyip listeyi
 # guncellemedigi gun KALIR - kusur sessizce delta motoruna sizmadan once.
@@ -664,11 +692,33 @@ $unlisted = @($contractHeaders | Where-Object { $_ -ne 'MBX1' -and $_ -notin $sc
 Assert-Equal 'CSV yazicisinin ust veri sutunlari paylasilan listede' 0 $unlisted.Count
 Assert-True "Paylasilan liste 'Orgu' sutununun onunu aciyor" ('Orgu' -in $script:EDSummaryMetaColumns) 'rapor katmani sutunu acabilir'
 
-# 4D-h. Okuyan taraf listeyi KENDI kopyasindan okumasin: tek kaynak kurali
+# 4D-i. Okuyan taraf listeyi KENDI kopyasindan okumasin: tek kaynak kurali
 # yorumla degil, kodla korunur.
 $compareText = Get-Content -LiteralPath (Join-Path $projectRoot 'Core\Compare.ps1') -Raw -Encoding UTF8
 Assert-True 'Compare.ps1 paylasilan listeyi kullaniyor' ($compareText -like '*$script:EDSummaryMetaColumns*') 'referans var'
 Assert-True 'Compare.ps1 kendi sutun kopyasini tasimiyor' ($compareText -notlike "*'Modul', 'Kontrol', 'Birim'*") 'yerel kopya yok'
+
+# 4D-j. Kaniti URETEN taraf: Save-EDRunMeta olculen varlik adlarini yaziyor
+# ve sunucu kumesini de KORUYOR (ikisi ayri sorulara cevap verir).
+$entityMetaPath = Join-Path $script:Root 'run-meta-varliklar.json'
+Save-EDRunMeta -Context (New-CompareContext) -Path $entityMetaPath -Rows @(
+    (New-EDRow -Module 'M12' -Check 'Yavas teslimlerin DB dagilimi' -Values @{ DB02 = 2; DB01 = 1 } -Status 'OK')
+    (New-EDRow -Module 'M10' -Check 'p95' -Values @{ MBX1 = 10 } -Unit 'sn' -Status 'OK')
+) | Out-Null
+$writtenMeta = Get-Content -LiteralPath $entityMetaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+Assert-Equal 'Meta olculen VARLIK adlarini yaziyor' 'DB01, DB02, MBX1' (@(Get-EDMetaList -Meta $writtenMeta -Name 'entities') -join ', ')
+Assert-Equal 'servers alani KALDIRILMADI' 'MBX1' (@(Get-EDMetaList -Meta $writtenMeta -Name 'servers') -join ', ')
+
+# Satir verilmezse alan BOS yazilir; okuyan taraf bunu "varlik yok" degil
+# "kaydedilmemis" sayar (4D-g bu davranisi test ediyor).
+Save-EDRunMeta -Context (New-CompareContext) -Path $entityMetaPath | Out-Null
+$writtenMeta = Get-Content -LiteralPath $entityMetaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+Assert-Equal 'Satir verilmezse varlik listesi bos' 0 @(Get-EDMetaList -Meta $writtenMeta -Name 'entities').Count
+
+# Ana giris satirlari gercekten geciyor mu? Gecmezse alan her kosumda bos
+# kalir ve ayrim hicbir zaman kurulamaz - sessizce.
+$invokeText = Get-Content -LiteralPath (Join-Path $projectRoot 'Invoke-ExchangeDiag.ps1') -Raw -Encoding UTF8
+Assert-True 'Ana giris satirlari meta yazicisina veriyor' ($invokeText -like '*Save-EDRunMeta*-Rows $allRows*') 'cagri satirlari gecirir'
 
 # ===========================================================================
 Write-Host "`n=== 5. Yeni / kaybolan kontroller ===" -ForegroundColor Cyan

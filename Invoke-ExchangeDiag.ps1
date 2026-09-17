@@ -411,7 +411,13 @@ try {
 
     # Kapsam kaydi: -CompareWith'in "bu iki calistirma kiyaslanabilir mi?"
     # sorusunu cevaplayabilmesi icin HER calistirmada yazilir.
-    Save-EDRunMeta -Context $context -Path (Join-Path $outputDir 'run-meta.json') -ModuleTimings $timings | Out-Null
+    #
+    # Satirlar da verilir: meta, olculen VARLIK adlarini (sunucu, DB, volume)
+    # buradan cikarir. Bu olmadan sonraki kiyas, kaldirilmis bir DB ile
+    # tanimadigi bir sutunu ayirt edemez ve "olculmustu, artik yok" bilgisi
+    # rapordan duser.
+    Save-EDRunMeta -Context $context -Path (Join-Path $outputDir 'run-meta.json') `
+        -ModuleTimings $timings -Rows $allRows | Out-Null
 
     if ($CompareWith) {
         $previousFolder = $CompareWith
