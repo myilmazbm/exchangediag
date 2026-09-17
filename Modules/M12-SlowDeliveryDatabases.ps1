@@ -195,12 +195,34 @@ Register-EDModule @{
         # --- P3: yogunlasma var mi? ---
         $top = @($byDatabase.Values | Sort-Object -Property SlowDeliveries -Descending)[0]
         $topShare = ($top.SlowDeliveries / [math]::Max($mappedDeliveries, 1)) * 100
+
+        # YOGUNLASMA, veritabani SAYISINA GORE normalize edilmelidir.
+        # Sabit %50 esigi iki veritabanli bir ortamda MATEMATIKSEL OLARAK
+        # garantidir: 51/49 gibi tamamen dengeli bir dagilim bile "yavas
+        # teslimlerin %51'i tek bir veritabaninda toplaniyor" FAIL'i uretir
+        # ve operatoru M22/M23/M24'e yollar. Beklenen pay 1/N'dir; iddia
+        # ancak bunun belirgin uzerindeyse anlamlidir.
+        $databaseCount = @($byDatabase.Values).Count
+        $expectedShare = 100 / [math]::Max($databaseCount, 1)
+        # Esik: beklenenin 2 kati, ama hicbir zaman %50'nin altina inmez
+        # (iki DB'de beklenen %50, iki kati %100 olurdu - o yuzden tavan da
+        # gerekir: cok sayida DB'de %50 zaten guclu bir yogunlasmadir).
+        $concentrationThreshold = [math]::Min([math]::Max($expectedShare * 2, 50), 80)
         $status = 'WARN'
         $note = ''
 
-        if ($byDatabase.Count -ge 2 -and $topShare -ge 50) {
+        if ($byDatabase.Count -ge 2 -and $topShare -ge $concentrationThreshold) {
             $status = 'FAIL'
-            $note = ('ORGU P3: yavas teslimlerin %{0:N0} kadari tek bir veritabaninda ({1}) toplaniyor. ' -f $topShare, $top.Database)
+            # ORNEKLEM UYARISI cumlenin ICINDE olmali: yuzde, eslestirilebilen
+            # alt kumeye aittir. Eskiden iddia kosulsuz kuruluyor, kapsam
+            # orani ayri bir cumlede kaliyordu: 10.300 yavas teslimin 300
+            # tanesi sorgulanmisken "yavas teslimlerin %70'i" deniyordu -
+            # gercek oran %6 iken.
+            $note = ('ORGU P3: ESLESTIRILEBILEN {0} teslimin %{1:N0} kadari tek bir veritabaninda ({2}) toplaniyor ' -f $mappedDeliveries, $topShare, $top.Database)
+            $note += ('(beklenen pay %{0:N0}, {1} veritabani; esik %{2:N0}). ' -f $expectedShare, $databaseCount, $concentrationThreshold)
+            if ($mappedDeliveries -lt $totalSlowDeliveries) {
+                $note += ('DIKKAT: bu oran TUM yavas teslimlerin ({0}) degil, alicisi veritabaniyla eslestirilebilen {1} tanesinin oranidir. ' -f $totalSlowDeliveries, $mappedDeliveries)
+            }
             $note += 'Kok neden DB seviyesinde - M22 (paylasilan volume), M23 (agir kullanicilar), M24 (buyuk klasorler) ile surdurun.'
             $log.Warn("M12: $note")
         }
@@ -208,7 +230,8 @@ Register-EDModule @{
             $note = ("Yavas teslimlerin tamami tek veritabaninda ({0}) - ancak ortamda karsilastirilacak baska DB bulunamadigi icin bu tek basina yogunlasma kaniti degildir." -f $top.Database)
         }
         else {
-            $note = ('Gecikme {0} veritabanina yayilmis; en yuksek pay %{1:N0} ({2}). Tek bir DB kok neden gibi gorunmuyor.' -f $byDatabase.Count, $topShare, $top.Database)
+            $note = ('Gecikme {0} veritabanina yayilmis; en yuksek pay %{1:N0} ({2}), beklenen pay %{3:N0}. Tek bir DB kok neden gibi gorunmuyor.' -f `
+                $byDatabase.Count, $topShare, $top.Database, $expectedShare)
         }
 
         $coverageNote = "Esik ${threshold} sn. $totalSlowDeliveries yavas teslim, $($ranked.Count) benzersiz alici; $($lookupTargets.Count) tanesi sorgulandi (%$coverage kapsam)."

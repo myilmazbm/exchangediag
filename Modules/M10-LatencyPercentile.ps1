@@ -205,6 +205,10 @@ Register-EDModule @{
                 -Unit 'sn' -Status $noDataStatus -Patterns @('P1', 'P6') -Note $detail) + $contextRows
         }
 
+        # P1 kiyasina girmek icin gereken en az olcum sayisi. Tek teslimden
+        # persentil cikmaz; bu esik "istatistik" ile "anekdot" arasindaki sinir.
+        $minimumSamplesForComparison = 20
+
         # --- P1: bir sunucu digerlerinden kat kat yavas mi? ---
         $numericP95 = @{}
         foreach ($server in @($p95.Keys)) {
@@ -212,16 +216,65 @@ Register-EDModule @{
         }
 
         $outlierNote = ''
-        if ($numericP95.Count -ge 2) {
-            $sorted = @($numericP95.GetEnumerator() | Sort-Object -Property Value)
-            $median = $sorted[[int]([math]::Floor($sorted.Count / 2))].Value
+        # ORGU P1: bir sunucu digerlerinden kat kat yavas mi?
+        #
+        # KIYAS KUMESI pasif siteyi DISLAR. Pasif sitede dusuk hacim ve yuksek
+        # gecikme normaldir (modul bunu zaten PASSIVE etiketiyle kabul ediyor);
+        # ayni sunucuyu hem "dusuk hacim normal" deyip hem de ortancayi
+        # bozmasina izin verip sonra "200x yavas" diye suclamak kendi icinde
+        # celiskiydi - ustelik satir OK kaldigi icin iddia bulgu tablosuna
+        # hic girmiyor, yalnizca detay notunda gomulu kaliyordu.
+        $comparable = @{}
+        foreach ($server in @($numericP95.Keys)) {
+            if ($cellStatus.ContainsKey($server) -and $cellStatus[$server] -eq 'PASSIVE') { continue }
+            # ORNEK SAYISI ESIGI: tek teslimden persentil cikmaz. n=1 iken
+            # PercentileEngine her persentil icin o tek degeri dondurur, yani
+            # az kullanilan bir sunucudaki TEK bir NDR "150x yavas" iddiasina
+            # donusebiliyordu - "yanlis persentil yanlis sunucuyu suclar"in
+            # ta kendisi.
+            if ([int]$counts[$server] -lt $minimumSamplesForComparison) { continue }
+            $comparable[$server] = $numericP95[$server]
+        }
+
+        $excludedFromComparison = @($numericP95.Keys | Where-Object { -not $comparable.ContainsKey($_) })
+
+        if ($comparable.Count -ge 3) {
+            # Ortanca yalnizca 3+ sunucuda anlamlidir. Iki sunucuda "ortanca"
+            # diye bir sey yoktur: eski kod $sorted[floor(2/2)] = $sorted[1]
+            # ile BUYUK elemani seciyordu, yani oran DAIMA 1.0 cikiyor ve P1
+            # iki dugumlu ortamda hic tetiklenemiyordu. 30x fark bile gorunmez
+            # kaliyordu.
+            $sorted = @($comparable.GetEnumerator() | Sort-Object -Property Value)
+            $middle = $sorted.Count / 2
+            $median = $(if ($sorted.Count % 2 -eq 1) {
+                $sorted[[int][math]::Floor($middle)].Value
+            } else {
+                ($sorted[[int]$middle - 1].Value + $sorted[[int]$middle].Value) / 2
+            })
             $slowestEntry = $sorted[-1]
             if ($median -gt 0 -and ($slowestEntry.Value / $median) -ge 3) {
                 $ratio = [math]::Round($slowestEntry.Value / $median, 1)
-                $outlierNote = "ORGU P1: $($slowestEntry.Key) diger sunuculardan ${ratio}x yavas (p95 $($slowestEntry.Value) sn, ortanca $median sn). Sorun topolojide degil, bu sunucuda."
+                $outlierNote = "ORGU P1: $($slowestEntry.Key) diger sunuculardan ${ratio}x yavas (p95 $($slowestEntry.Value) sn, ortanca $([math]::Round($median, 2)) sn, $($comparable.Count) sunucu kiyaslandi). Sorun topolojide degil, bu sunucuda."
                 $log.Warn("M10: $outlierNote")
-                if ($cellStatus[$slowestEntry.Key] -eq 'OK') { $cellStatus[$slowestEntry.Key] = 'WARN' }
+                $cellStatus[$slowestEntry.Key] = Get-EDWorstStatus @($cellStatus[$slowestEntry.Key], 'WARN')
             }
+        }
+        elseif ($comparable.Count -eq 2) {
+            # Iki sunucuda ortanca yok ama DOGRUDAN kiyas anlamlidir.
+            # Iddia daha temkinli kurulur: "digerlerinden" degil "digerinden".
+            $sorted = @($comparable.GetEnumerator() | Sort-Object -Property Value)
+            $faster = $sorted[0]; $slowestEntry = $sorted[1]
+            if ($faster.Value -gt 0 -and ($slowestEntry.Value / $faster.Value) -ge 3) {
+                $ratio = [math]::Round($slowestEntry.Value / $faster.Value, 1)
+                $outlierNote = "ORGU P1: $($slowestEntry.Key) sunucusu $($faster.Key) sunucusundan ${ratio}x yavas (p95 $($slowestEntry.Value) sn / $($faster.Value) sn). Iki sunuculu ortamda ortanca yoktur; bu DOGRUDAN kiyastir. Sorun topolojide degil, bu sunucuda."
+                $log.Warn("M10: $outlierNote")
+                $cellStatus[$slowestEntry.Key] = Get-EDWorstStatus @($cellStatus[$slowestEntry.Key], 'WARN')
+            }
+        }
+
+        if ($excludedFromComparison.Count -gt 0 -and $numericP95.Count -ge 2) {
+            $outlierNote += (" Kiyas disi birakilan sunucular: {0} (pasif site veya {1} olcumden az)." -f `
+                ($excludedFromComparison -join ', '), $minimumSamplesForComparison)
         }
 
         # --- P6: ortalama tail'i ne kadar gizliyor? ---

@@ -85,6 +85,8 @@ Register-EDModule @{
         $cellStatus = @{}
         $evidence = @()
         $storeDominant = @()
+        # Store baskin ama gecikme esik icinde olan sunucular: WARN degil bilgi.
+        $storeDominantHealthy = @()
         $partialServers = @()
         $coverageValues = @{}
         $coverageStatus = @{}
@@ -134,9 +136,32 @@ Register-EDModule @{
             $totalValues[$server]     = $(if ($breakdown.Total.Count -gt 0)     { [math]::Round($breakdown.Total.P95, 2) }     else { 'N/A' })
             $dominantValues[$server]  = $breakdown.DominantPhase
 
-            if ($breakdown.DominantPhase -eq 'Store') {
+            # BASKIN FAZ GORELIDIR, bir buyukluk tabani YOKTUR.
+            #
+            # Ic Exchange trafigi normalde Store agirliklidir: uctan uca 0.45
+            # saniyede teslim edilen saglikli bir sistemde bile Store fazi en
+            # buyuk paydir. Magnitude kontrolu olmadan bu, her saglikli tek
+            # sunuculu kurulumda "ORGU P2: darbogaz Store tarafinda" WARN'i
+            # uretiyor ve operatoru disk gecikmesi avina yolluyordu.
+            #
+            # Esik, teslim gecikmesinin kendi esigidir: uctan uca gecikme
+            # "iyi" sayilan bandin altindaysa ortada darbogaz YOKTUR, yalnizca
+            # fazlarin gorece dagilimi vardir.
+            # Taban: WARN esiginin YARISI. Bunun altinda fazlar arasindaki
+            # dagilim bir darbogaz degil, hizli bir teslimin ic oranidir.
+            $latencyWarn = [double]$Context.Config.Thresholds['deliveryLatencyP95Sec']['warn']
+            $meaningfulFloor = $latencyWarn / 2
+            $hasMeaningfulLatency = ($breakdown.Total.Count -gt 0 -and $breakdown.Total.P95 -ge $meaningfulFloor)
+
+            if ($breakdown.DominantPhase -eq 'Store' -and $hasMeaningfulLatency) {
                 $cellStatus[$server] = 'WARN'
                 $storeDominant += $server
+            }
+            elseif ($breakdown.DominantPhase -eq 'Store') {
+                # Store baskin ama uctan uca gecikme esik icinde: bu bilgidir,
+                # bulgu degil.
+                $cellStatus[$server] = 'OK'
+                $storeDominantHealthy += $server
             }
             else {
                 $cellStatus[$server] = 'OK'
@@ -196,6 +221,11 @@ Register-EDModule @{
             $note = "ORGU P2: $($storeDominant -join ', ') sunucusunda gecikme STORE fazinda (DeliveryToMailbox) yogunlasiyor. "
             $note += 'Darbogaz transport degil Store tarafi - arastirmayi M20 (RPC latency), M21 (disk latency) ve M22 (paylasilan volume) ile surdurun.'
             $log.Warn("M11: $note")
+        }
+        elseif ($storeDominantHealthy.Count -gt 0) {
+            $note = ("{0} sunucusunda en buyuk pay Store fazinda, ANCAK uctan uca teslim gecikmesi esik icinde. " -f ($storeDominantHealthy -join ', '))
+            $note += 'Ic Exchange trafiginde Store payinin en buyuk olmasi NORMALDIR; bu tek basina darbogaz DEGILDIR '
+            $note +='ve bu yuzden P2 orgusu kurulmadi.'
         }
         else {
             $note = 'Baskin faz Store disinda; transport tarafi icin M14 (kuyruklar) ve M16 (teslim paralelligi) bakilmali.'

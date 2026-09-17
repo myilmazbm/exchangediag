@@ -47,6 +47,11 @@ Register-EDModule @{
         $peakNotes = @()
         $anyData = $false
         $shortWindow = @()
+        # Tek bir saatin tum trafigi tasidigi ortamlar: kiyas kurulamaz.
+        $noComparison = @()
+        # Gecikme tepesi DUSUK hacimli bir saatte olan sunucular: tepe
+        # gercektir ama sebebi kapasite DEGILDIR.
+        $peakNotBusy = @()
 
         foreach ($server in @($analyses.Keys | Sort-Object)) {
             $analysis = $analyses[$server]
@@ -79,9 +84,26 @@ Register-EDModule @{
             }
 
             $anyData = $true
+
+            # GECIKME TEPESI ile YUK TEPESI AYRI SEYLERDIR.
+            #
+            # Tepe saat gecikmeye gore bulunur - bu gercek bir sinyaldir ve
+            # raporlanmalidir. Ama P7'nin iddiasi "yuk arttikca gecikme
+            # artiyor, kapasite/eszamanlilik siniri suphesi" seklindedir ve
+            # bu iddia ancak o saat GERCEKTEN yogunsa kurulabilir. Eskiden
+            # hacme hic bakilmiyordu: gece 03:00'te 20 teslimden biri yavas
+            # oldugunda, trafigin %0.1'ini tasiyan saat "yogun saat" ilan
+            # ediliyor ve operator MaxConcurrentMailboxDeliveries ayarlamaya
+            # yollaniyordu.
             $sorted = @($hours | Sort-Object -Property { $_.Stats.P95 })
             $quiet = $sorted[0]
             $peak = $sorted[-1]
+
+            # Tepe saat, saatlik hacim ortancasinin altindaysa bu bir YUK
+            # egrisi degildir; gecikmenin sebebi baska yerdedir.
+            $volumes = @($hours | ForEach-Object { [double]$_.Stats.Count } | Sort-Object)
+            $medianVolume = $volumes[[int][math]::Floor($volumes.Count / 2)]
+            $peakIsBusy = ([double]$peak.Stats.Count -ge $medianVolume)
 
             $peakHourValues[$server]  = ('{0:00}:00' -f $peak.Hour)
             $peakP95Values[$server]   = [math]::Round($peak.Stats.P95, 2)
@@ -92,10 +114,14 @@ Register-EDModule @{
             $ratioValues[$server] = [math]::Round($ratio, 1)
 
             # Tepe/sakin orani 3x ve uzeriyse bu bir yuk egrisidir.
+            # Hacim bilgisi de notta yer alir: iddia "yuk arttikca gecikme
+            # artiyor" oldugu icin okuyucunun iki sayiyi birlikte gormesi sart.
             if ($ratio -ge 3) {
                 $cellStatus[$server] = 'WARN'
-                $peakNotes += ('{0}: {1} -> p95 {2:N1} sn, {3} -> p95 {4:N1} sn ({5:N1}x)' -f `
-                    $server, $peakHourValues[$server], $peak.Stats.P95, $quietHourValues[$server], $quiet.Stats.P95, $ratio)
+                if (-not $peakIsBusy) { $peakNotBusy += $server }
+                $peakNotes += ('{0}: {1} ({2:N0} teslim) -> p95 {3:N1} sn, {4} ({5:N0} teslim) -> p95 {6:N1} sn ({7:N1}x)' -f `
+                    $server, $peakHourValues[$server], $peak.Stats.Count, $peak.Stats.P95, `
+                    $quietHourValues[$server], $quiet.Stats.Count, $quiet.Stats.P95, $ratio)
             }
             else {
                 $cellStatus[$server] = 'OK'
@@ -117,14 +143,26 @@ Register-EDModule @{
 
         $note = ''
         if ($peakNotes.Count -gt 0) {
-            $note = 'ORGU P7: yogun saatte belirgin tepe var - ' + ($peakNotes -join ' | ') + '. '
-            $note += 'Kapasite/eszamanlilik siniri suphesi: M16 (MaxConcurrentMailboxDeliveries) ve M14 (kuyruk derinligi) ile surdurun.'
+            $note = 'Saatlik gecikme tepesi: ' + ($peakNotes -join ' | ') + '. '
+            if ($peakNotBusy.Count -lt @($peakNotes).Count) {
+                $note += 'ORGU P7 - tepe saat ayni zamanda YOGUN saat: kapasite/eszamanlilik siniri suphesi. '
+                $note += 'M16 (MaxConcurrentMailboxDeliveries) ve M14 (kuyruk derinligi) ile surdurun. '
+            }
+            if ($peakNotBusy.Count -gt 0) {
+                $note += ("DIKKAT ({0}): tepe saat DUSUK hacimli - gecikme yuk kaynakli DEGIL. " -f ($peakNotBusy -join ', '))
+                $note += 'Kapasite ayari bu tepeyi ACIKLAMAZ; o saatte calisan yedekleme, bakim isi veya toplu tasima arayin (M45, M23). '
+            }
             $log.Warn("M13: $note")
         }
         else {
             $note = 'Yogun ve sakin saat arasinda 3x uzeri fark yok; gecikme gun icine yayilmis. Kapasite siniri gorunmuyor.'
         }
-        $note += " (Pencere $($Context.WindowHours) saat, saat basina en az $minimumSamples ornek arandi.)"
+        $note += " (Pencere $($Context.WindowHours) saat, saat basina en az $minimumSamples ornek arandi. "
+        $note += 'Yogun saat TRAFIGE gore secilir; kiyas saati ise yogun saatin en az dortte biri kadar teslim tasiyan '
+        $note += 'saatler arasindan secilir - aksi halde "yogun vs. neredeyse bos" kiyasi yapilmis olurdu.)'
+        if ($noComparison.Count -gt 0) {
+            $note += (" KIYAS KURULAMADI ({0}): trafigin tamami tek bir saatte toplandigi icin yogun/sakin karsilastirmasi yapilamadi." -f ($noComparison -join ', '))
+        }
 
         $rows = @()
         $rows += New-EDRow -Module 'M13' -Check 'Yogun/sakin p95 orani' -Values $ratioValues -CellStatus $cellStatus `
