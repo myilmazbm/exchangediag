@@ -90,6 +90,9 @@ Register-EDModule @{
         $partialServers = @()
         # Faz hukmu eksik nufustan verilen sunucular.
         $incompleteServers = @()
+        # Tek bir mesajin bile zinciri kurulamayan sunucular: bu, eksik
+        # nufus degil KURULAMAYAN OLCUMDUR ve ayri anlatilir.
+        $noChainServers = @()
         # Semaya uymayan satirlar: olcum eksikligi DEGIL, veri bozuklugu.
         $malformed = @()
         $coverageValues = @{}
@@ -121,7 +124,26 @@ Register-EDModule @{
             # sistematik olarak Store'a kayiyordu. Tek nufus bu yanliligi
             # kaldirdi ama bir bedeli var: zinciri eksik mesajlar artik faz
             # kiyasinda YOK. Bu bedel gizlenmemeli.
-            if ([bool](Get-EDProperty $breakdown 'PhaseVerdictIncomplete' $false)) {
+            # ZINCIR HIC KURULAMADI ile ZINCIR KISMEN EKSIK AYRI SEYLERDIR.
+            #
+            # Pencere kenari etkisi mesajlarin BIR KISMINI disarida birakir;
+            # %100'unu birden silemez, cunku pencerenin ortasinda teslim
+            # edilmis bir mesajin RECEIVE'i de pencere icindedir. Dolayisiyla
+            # hicbir mesajin zinciri kurulamadiysa sebep pencere DEGILDIR ve
+            # "-WindowHours ile genisletin" tavsiyesi operatoru cikmaza
+            # sokar: ne kadar genisletirse genisletsin sonuc degismez.
+            #
+            # Gercek sebep tipik olarak sudur: bu kurulumda posta kutusu
+            # tarafi RECEIVE olayi (MSGTRKMD) hic uretilmiyor - MSGTRKMD
+            # yalnizca DELIVER/STOREDRIVER tasiyor. Tek sunuculu / yerel
+            # teslimde gorulen bir durumdur. Uc fazi ayirmak icin gereken
+            # ara nokta yoktur, yani faz kirilimi bu ortamda KURULAMAZ.
+            $phaseSamples = [double](Get-EDProperty $breakdown 'PhaseSamples' 0)
+            $withTotal = [double](Get-EDProperty $breakdown 'MessagesWithTotal' 0)
+            if ($phaseSamples -le 0 -and $withTotal -gt 0) {
+                $noChainServers += $server
+            }
+            elseif ([bool](Get-EDProperty $breakdown 'PhaseVerdictIncomplete' $false)) {
                 $incompleteServers += $server
             }
             if ([bool](Get-EDProperty $breakdown 'MalformedLines' 0) -gt 0) {
@@ -251,11 +273,27 @@ Register-EDModule @{
             $note += 'Ic Exchange trafiginde Store payinin en buyuk olmasi NORMALDIR; bu tek basina darbogaz DEGILDIR '
             $note +='ve bu yuzden P2 orgusu kurulmadi.'
         }
+        elseif ($noChainServers.Count -gt 0) {
+            # OLCULMEMIS BIR SEY HAKKINDA HUKUM KURULMAZ.
+            # Burada eskiden "baskin faz Store disinda" yaziyordu. Zincir
+            # hic kurulamadiginda ortada baskin faz YOKTUR; bu cumle sifir
+            # ornekten hukum uretiyor ve operatoru bos yere M14/M16'ya
+            # yonlendiriyordu - yani okunmamis veriden yon tarifi.
+            $note = 'Faz kirilimi kurulamadi; baskin faz hakkinda HICBIR IDDIA yok.'
+        }
         else {
             $note = 'Baskin faz Store disinda; transport tarafi icin M14 (kuyruklar) ve M16 (teslim paralelligi) bakilmali.'
         }
 
         $phaseStatus = Get-EDWorstStatus @($cellStatus.Values)
+        if ($noChainServers.Count -gt 0) {
+            $note = ("FAZ KIRILIMI KURULAMADI ({0}): uctan uca teslim OLCULDU ama hicbir mesajin faz zinciri kurulamadi. " -f ($noChainServers -join ', ')) +
+                    'Bu bir pencere sorunu DEGILDIR - pencere kenari mesajlarin bir kismini disarida birakir, hepsini birden degil. ' +
+                    'Beklenen sebep: posta kutusu tarafi RECEIVE olayi uretilmiyor (MSGTRKMD yalnizca DELIVER tasiyor), ' +
+                    'ki bu tek sunuculu / yerel teslimde normaldir. Pencereyi GENISLETMEK SONUCU DEGISTIRMEZ. ' +
+                    'Uctan uca gecikme icin M10 gecerlidir; faz ayrimi bu ortamda yapilamaz. ' + $note
+            $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
+        }
         if ($incompleteServers.Count -gt 0) {
             $note = ("BASKIN FAZ HUKMU EKSIK: {0} sunucusunda zinciri tam olmayan mesajlar faz kiyasina GIRMEDI " -f ($incompleteServers -join ', ')) +
                     've bunlar tipik olarak EN YAVAS mesajlardir (transport RECEIVE olayi pencereden once dusmustur). ' +

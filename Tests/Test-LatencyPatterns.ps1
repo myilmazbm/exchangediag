@@ -146,6 +146,79 @@ Assert-True 'Pasif site sunucusu P1 ile suclanmiyor' ($p95Row.Note -notlike '*DR
 Assert-Equal 'Pasif sunucu hucresi PASSIVE kaliyor' 'PASSIVE' $p95Row.CellStatus['DR01']
 
 # ===========================================================================
+Write-Host "`n=== 1d. M11: zincir hic kurulamadiginda TESHIS dogru olmali ===" -ForegroundColor Cyan
+
+# GERCEK ORTAMDA BULUNDU (tek sunuculu kurulum, gercek tracking log).
+#
+# MSGTRKMD yalnizca DELIVER/STOREDRIVER tasiyordu; posta kutusu tarafi
+# RECEIVE olayi hic uretilmiyordu. Yani uc fazi ayirmak icin gereken ara
+# nokta YOKTU ve hicbir mesajin zinciri kurulamadi. Arac bunu dogru sekilde
+# N/A raporladi AMA sebebini yanlis soyledi: "transport RECEIVE olayi
+# pencereden once dusmustur, pencereyi -WindowHours ile GENISLETIP tekrar
+# calistirin." Ikisi de yanlisti - RECEIVE olaylarinin 45'i de pencere
+# icindeydi ve pencereyi genisletmek sonucu asla degistirmezdi.
+#
+# Ustelik sifir ornekle "baskin faz Store disinda" deniyor, operator bos
+# yere M14/M16'ya yonlendiriliyordu: olculmemis bir seyden yon tarifi.
+#
+# Ayirt edici olcut: pencere kenari mesajlarin BIR KISMINI disarida birakir,
+# hepsini birden degil. PhaseSamples = 0 iken sebep pencere olamaz.
+function New-PhaseStubExecutor {
+    param([hashtable]$BreakdownByServer)
+    $stub = [pscustomobject]@{ ExchangeConnection = 'stub'; Parallelism = 1; Data = $BreakdownByServer }
+    $stub | Add-Member -MemberType ScriptMethod -Name RunLocal -Value {
+        param($Tasks)
+        $out = @()
+        foreach ($task in $Tasks) {
+            $r = New-Object ExchangeDiag.ExecResult
+            $r.Key = $task.Key
+            $r.Output = [System.Management.Automation.PSObject[]]@([psobject]$this.Data[$task.Key])
+            $out += $r
+        }
+        return $out
+    }
+    return $stub
+}
+
+$noChain = New-Object ExchangeDiag.PhaseBreakdown
+$noChain.Server = 'SRV1'
+$noChain.Total = [ExchangeDiag.PercentileEngine]::Compute([double[]]@(0.1, 0.2, 0.7, 8.4))
+$noChain.MessagesWithTotal = 45
+$noChain.PhaseSamples = 0          # HICBIR mesajin zinciri kurulamadi
+$noChain.UnreconciledSamples = 45
+$noChain.FilesScanned = 2
+$noChain.FilesProcessed = 2
+
+$context = New-PatternContext -Servers @((New-PatternServer 'SRV1'))
+$context.Executor = New-PhaseStubExecutor -BreakdownByServer @{ 'SRV1' = $noChain }
+# Log konumu kesfi onbellege konur: bu test AYRISTIRICIYI degil, modulun
+# TESHIS METNINI siniyor. Kesfi de taklit etmek testi kendi amacindan
+# uzaklastirir ve kirilgan yapar.
+$context.Cache['TrackingLogLocation'] = @([pscustomobject]@{
+    Server = 'SRV1'; Enabled = $true; LocalPath = 'C:\logs'; UncPath = '\SRV1\logs'
+    Accessible = $true; FileCount = 2; Error = $null
+})
+$rows = @(& $m11.Run $context)
+$dominantRow = Get-EDTestRow $rows 'Baskin faz'
+
+Assert-True 'Baskin faz satiri uretildi' ($null -ne $dominantRow) 'satir'
+if ($null -eq $dominantRow) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True 'Pencereyi genisletme tavsiyesi VERILMIYOR' `
+        ($dominantRow.Note -notlike '*GENISLETIP*') $dominantRow.Note
+    Assert-True 'Bunun bir pencere sorunu OLMADIGI soyleniyor' `
+        ($dominantRow.Note -like '*pencere sorunu DEGILDIR*') $dominantRow.Note
+    Assert-True 'Beklenen gercek sebep adlandirildi (MSGTRKMD)' `
+        ($dominantRow.Note -like '*MSGTRKMD*') $dominantRow.Note
+    Assert-True 'Baskin faz hakkinda IDDIA KURULMUYOR' `
+        ($dominantRow.Note -notlike '*Baskin faz Store disinda*') $dominantRow.Note
+    Assert-True 'Uctan uca olcumun gecerli kaldigi soyleniyor' `
+        ($dominantRow.Note -like '*M10*') $dominantRow.Note
+}
+
+# ===========================================================================
 Write-Host "`n=== 2. ORGU P7: gecikme tepesi ile yuk tepesi ===" -ForegroundColor Cyan
 
 function New-HourlyAnalysis {
