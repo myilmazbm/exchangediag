@@ -571,6 +571,8 @@ Bunlar **sürümden bağımsız, tekrar tekrar yanlış yapılan** noktalar. Mod
     > M04'ün enum çözümlemesi ve M25'in bayt ayrıştırması canlı ortamdan **doğrulanarak** yazıldı. M25 ve M26, kasıtlı olarak **iddia etmeyi reddettikleri** şeylerle tanımlanır: whitespace'e eşik uygulanmaz, bozuk indeks teslimle ilişkilendirilmez. M05 çalışma süresini bulgu değil **bağlam** olarak raporlar.
 12. ✅ **HTML/CSV rapor + `-CompareWith` delta motoru**
     > Delta motorunun asıl işi fark hesaplamak değil, **hangi farkın anlamsız olduğunu söylemektir**: kapsam farkı (`run-meta.json`), `N/A` sınırı, küçük sayıda büyük yüzde, saat farkı.
+
+    > ⚠️ **Satır adı (`Kontrol`) bir EŞLEŞTİRME ANAHTARIDIR.** Delta motoru satırları `Modül|Kontrol` ikilisiyle eşler. Bir satırı yeniden adlandırmak, eski bir taban ile karşılaştırıldığında bir **KAYBOLDU + YENİ çifti** üretir; modül atlanmamış ve kapsam değişmemişken **uydurma bir kapsam değişikliği iddiası**dır. Ayrıca `ignoreFindings` desenleri `Kontrol` alanına karşı denenir: eski adı yazan bir bastırma **sessizce çalışmayı bırakır**. Bu yüzden ad değişikliği **bir kereye mahsus bir bedeldir** ve yalnızca eski ad yanıltıcıysa yapılır; yapıldığında commit mesajında açıkça yazılır.
 13. ~~Zamanlanmış görev + yoğun saat otomasyonu~~ — *kapsam dışı bırakıldı (kullanıcı kararı)*
 14. ✅ **`Tests\Assert-ReadOnly.ps1`** — 1. ilkenin otomatik güvencesi
     > AST tarar (grep değil: M32 düzeltme komutunu **metin olarak** raporlar, düz arama yanlış alarm üretir). Exchange kanalından çağrılan **15 cmdlet'in tamamı `Get-`/`Test-`**. Denetimin kendisi de sınanır (`Tests\Test-ReadOnlyLint.ps1`): düşmanca bir sahte depoya karşı koşturulduğunda yirmi kadar yazma yolundan yalnızca ikisini yakaladığı görüldü ve sertleştirildi — **bir denetim betiğinin sessizliği, temizlikten ayırt edilemediği için en kötü başarısızlık biçimidir.**
@@ -583,24 +585,24 @@ Paketler geliştiricinin makinesinde (çoğunlukla en-US) koşuyordu ve **tek bi
 
 **Geçmek yetmez, iki kültürde de geçmek gerekir.** Bir iddia yalnızca tek kültürde geçiyorsa ya ürün kültüre bağımlıdır (hata) ya da iddianın kendisi geliştiricinin ondalık ayracını varsayıyordur (test hatası); ikisi de düzeltilir. Sonuç satırı üretmeyen bir paket "0 hata" sayılmaz, `COKTU` olarak raporlanır.
 
-Bugünkü durum — **15 paket × 2 kültür = 1988 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
+Bugünkü durum — **15 paket × 2 kültür = 2384 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
 
 | Paket | Doğrulama | Kapsam |
 |---|---|---|
-| `Test-TrackingLogParser` | 95 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
+| `Test-TrackingLogParser` | 137 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
 | `Test-CoreUnits` | 130 | C# çekirdek birim testleri: `PercentileEngine`, `StatsAccumulator`, `CsvLineSplitter` |
 | `Test-LatencyModules` | 47 | M10-M13 uçtan uca (**canlı Exchange uç noktası ister**) |
-| `Test-LatencyPatterns` | 14 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
+| `Test-LatencyPatterns` | 69 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
 | `Test-TransportModules` | 71 | M14-M16 |
-| `Test-PerfModules` | 31 | M20-M22, örgü P4 ve P5 |
+| `Test-PerfModules` | 52 | M20-M22, örgü P4 ve P5 |
 | `Test-StoreModules` | 50 | M23-M24, yorum tablosu |
-| `Test-BaselineModules` | 98 | M04, M05, M25, M26 |
-| `Test-DagModules` | 64 | M30-M34 (sentetik DAG) |
-| `Test-HealthModules` | 67 | M40-M45 |
+| `Test-BaselineModules` | 103 | M04, M05, M25, M26 |
+| `Test-DagModules` | 100 | M30-M34 (sentetik DAG) |
+| `Test-HealthModules` | 79 | M40-M45 |
 | `Test-CompareEngine` | 145 | Delta motoru ve kapsam koruması |
-| `Test-ReportLayer` | 90 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
+| `Test-ReportLayer` | 110 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
 | `Test-ReadOnlyLint` | 38 | Salt okunurluk denetiminin **kendi** testi |
-| `Test-ModuleContracts` | 26 | Yapısal sözleşme: `RunLocal` kullanan modül ve Core toplayıcısı hedefe gidiyor mu |
+| `Test-ModuleContracts` | 33 | Yapısal sözleşme: `RunLocal` kullanan modül ve Core toplayıcısı hedefe gidiyor mu |
 | `Test-TimeoutVerdict` | 28 | `TIMEOUT` sıralaması: `N/A` < `TIMEOUT` < `WARN` < `ERROR` < `FAIL` |
 
 > `Test-LatencyModules` dışındaki paketler gerçek sunucuya sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır. `Test-LatencyModules` ise bağlanır ve M01'i koşturur; bu yüzden örgülerin **karar** mantığı orada değil `Test-LatencyPatterns`'ta sınanır — iki sunuculu, pasif siteli, tek örneklemli senaryolar canlı ortamda üretilemez.
