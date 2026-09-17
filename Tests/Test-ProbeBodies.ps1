@@ -430,8 +430,12 @@ $edgeContext = New-ProbeContext -Servers @((New-EDTestServer -Name 'MBX1'), $edg
 $edgeContext.Cache['PerfSamples'] = @{ 'MBX1' = (New-M05PerfEntry -Server 'MBX1') }
 $m05Failure = ''
 try { & $m05.Run $edgeContext | Out-Null } catch { $m05Failure = $_.Exception.Message }
-Assert-True 'KUSUR: perf ornegi olmayan sunucuda M05 patliyor' `
-    ($m05Failure -like "*'PerfEntry'*") $m05Failure
+# DUZELTILDI: Get-EDPerfStat/Get-EDPerfInstances govdesi $null'u zaten
+# karsiliyordu ama [Parameter(Mandatory)] onu BAGLAMADA reddediyordu.
+# M05 TUM sunuculari gezer, Get-EDPerfSamples ise Edge'i disarida birakir:
+# Edge Transport barindiran her ortamda M05 satir uretmeden ERROR'a dusuyordu.
+Assert-True 'Perf ornegi olmayan sunucuda M05 PATLAMIYOR' `
+    ($m05Failure -eq '') $m05Failure
 
 # ===========================================================================
 Write-Host "`n=== 3. M41 sondasi: gurultu filtresi ve gruplama ===" -ForegroundColor Cyan
@@ -472,9 +476,10 @@ $script:Events['System'] = @(
 $rows = @(& $m41.Run (New-ProbeContext -WindowHours 24))
 $errorRow = Get-EDTestRow $rows 'Hata olayi'
 Assert-Equal 'Sondaya WinRM ile gidildi' 'MBX1' ($script:InvokedComputers -join ',')
-# 3 x MSExchangeTransport + ESENT + 'ESE BACKUP' + 2 x StorPort = 7.
-# 'Microsoft-Windows-ESE' bilincli olarak sayimin DISINDA - bkz. 3a.
-Assert-Equal 'Ilgisiz uygulama sayilmadi' 7 $errorRow.Values['MBX1']
+# 3 x MSExchangeTransport + ESENT + 'ESE BACKUP' + 'Microsoft-Windows-ESE'
+# + 2 x StorPort = 8. Microsoft-Windows-ESE bir sure desendeki ankraj
+# yuzunden sayimin disinda kaliyordu (bkz. 3a); duzeltildi.
+Assert-Equal 'Ilgisiz uygulama sayilmadi' 8 $errorRow.Values['MBX1']
 $evidenceProviders = @(Import-EDTestEvidence -Path (Join-Path $script:OutputDir 'M41-event-groups.csv') | ForEach-Object { $_.Kaynak })
 Assert-True 'ESENT yakalandi' ($evidenceProviders -contains 'ESENT') ($evidenceProviders -join ', ')
 Assert-True 'Bosluklu ESE saglayicisi yakalandi' ($evidenceProviders -contains 'ESE BACKUP') ($evidenceProviders -join ', ')
@@ -487,9 +492,9 @@ Assert-True 'Ilgisiz uygulama kanita da girmedi' ($evidenceProviders -notcontain
 # ile degil; '^ESE( |NT|$)' dali da ankrajli oldugu icin tutmaz. Sonuc:
 # ESE (JET) I/O gecikme uyarilari - bu modulun basligindaki ornegin ta
 # kendisi - sessizce sayimin disinda kalir. Bu iddia bugunku davranisi
-# sabitler; desen duzeltildiginde KIRMIZI olur ve bu yorum okunur.
-Assert-True 'KUSUR: Microsoft-Windows-ESE olaylari sayilmiyor' `
-    ($evidenceProviders -notcontains 'Microsoft-Windows-ESE') ($evidenceProviders -join ', ')
+# DUZELTILDI: desene '-ESE$' dali eklendi.
+Assert-True 'Microsoft-Windows-ESE olaylari SAYILIYOR' `
+    ($evidenceProviders -contains 'Microsoft-Windows-ESE') ($evidenceProviders -join ', ')
 Assert-Equal 'Uyari ayri sayildi' 1 (Get-EDTestRow $rows 'Uyari olayi').Values['MBX1']
 Assert-Equal 'En sik tekrarlayan gruplanarak bulundu' 'MSExchangeTransport #1000 (3x)' `
     (Get-EDTestRow $rows 'En sik tekrarlayan hata').Values['MBX1']

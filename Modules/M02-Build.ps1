@@ -133,7 +133,12 @@ Register-EDModule @{
         $shared = @{}
         foreach ($key in @($buildValues.Keys)) {
             $value = [string]$buildValues[$key]
-            if ($value -and $value -ne 'N/A') { $shared[$key] = $value }
+            # 'N/A' TEK BASINA YETMIYOR: okunamayan sunucunun hucre metni
+            # 'TIMEOUT' ya da 'ERROR' olur ve bunlar da build DEGILDIR.
+            # Sizdiginda M43 onlari surum numarasi sanip kiyasa sokuyor,
+            # yani okunamamis bir sunucu "yamasi farkli" diye raporlanabilir.
+            # Ayni liste Test-EDValueDrift -IgnoreValues varsayilaninda da var.
+            if ($value -and $value -notin @('N/A', 'TIMEOUT', 'ERROR')) { $shared[$key] = $value }
         }
         $Context.Cache['ServerBuilds'] = $shared
 

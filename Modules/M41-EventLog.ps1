@@ -58,7 +58,11 @@ Register-EDModule @{
                 # gevsek tutulur. Eski desen bu sunucuda GERCEKTEN bulunan
                 # ESENT, 'ESE BACKUP', 'Microsoft Exchange Server' ve
                 # 'Microsoft-Windows-ESE' saglayicilarini kaciriyordu.
-                $relevant = '(MSExchange|^ESE( |NT|$)|ExchangeStore|Microsoft.?Exchange)'
+                # 'Microsoft-Windows-ESE' ANKRAJA TAKILIYORDU: '^ESE...' basa
+                # bagli, 'Microsoft.?Exchange' ise 'ESE' ile eslesmiyor. Sonuc:
+                # ESE (JET) I/O gecikme uyarilari - bu modulun basliginda ORNEK
+                # olarak verdigi olay sinifi - sessizce sayim disi kaliyordu.
+                $relevant = '(MSExchange|^ESE( |NT|$)|-ESE$|ExchangeStore|Microsoft.?Exchange)'
                 # StorPort 153 (I/O yeniden deneme) Exchange icin kanonik disk
                 # gecikme isaretidir ve eski ankrajli desende hic yoktu.
                 $storage = '(^|-)(disk|Disk|Ntfs|volsnap|storahci|iScsiPrt|partmgr|StorPort|Kernel-Disk|NvmeDisk|VIRTDISK|storvsc|vmbus)$'

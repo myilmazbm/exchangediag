@@ -367,7 +367,16 @@ function Get-EDVolumeInventory {
                     Label      = [string](Get-EDProperty $row 'Label')
                     CapacityGB = [double](Get-EDProperty $row 'CapacityGB' 0)
                     FreeGB     = [double](Get-EDProperty $row 'FreeGB' 0)
-                    FreePct    = [double](Get-EDProperty $row 'FreePct' 0)
+                    # SONDANIN ONLEDIGI SEY BURADA GERI GELIYORDU.
+                    # Sonda, kapasitesi okunamayan birim icin FreePct'yi
+                    # BILEREK $null birakiyor; kendi yorumu "0 yazmak
+                    # dogrudan FAIL demektir" diyor. [double] cevrimi onu
+                    # 0.0 yapinca diskFreePercent (dusuk kotu) icin uydurma
+                    # bir FAIL uretiliyordu - olculemeyen birim "dolu" sanildi.
+                    FreePct    = $(
+                        $rawFreePct = Get-EDProperty $row 'FreePct'
+                        if ($null -eq $rawFreePct) { $null } else { [double]$rawFreePct }
+                    )
                 }
             }
             $inventory[$result.Key] = @($volumes | Sort-Object -Property { $_.Name.Length } -Descending)
@@ -385,7 +394,12 @@ function Get-EDPerfStat {
 #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$PerfEntry,
+        # [AllowNull()] SART: govde zaten `if (-not $PerfEntry)` ile null'u
+        # karsiliyor ama Mandatory onu PARAMETRE BAGLAMADA reddediyordu.
+        # M05 TUM sunuculari gezer, Get-EDPerfSamples ise Edge'i disarida
+        # birakir; Edge Transport barindiran her ortamda M05 satir uretmeden
+        # ERROR'a dusuyordu. Yazarin niyeti govdede yazili, oznitelikte degil.
+        [Parameter(Mandatory)][AllowNull()]$PerfEntry,
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$Instance,
         [Parameter(Mandatory)][string]$Property
@@ -408,7 +422,8 @@ function Get-EDPerfInstances {
     <# Bir alias altindaki ornek adlari (_total haric istege bagli). #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$PerfEntry,
+        # Ayni gerekce: govde null'u karsiliyor, oznitelik reddediyordu.
+        [Parameter(Mandatory)][AllowNull()]$PerfEntry,
         [Parameter(Mandatory)][string]$Alias,
         [switch]$ExcludeTotal
     )

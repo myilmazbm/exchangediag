@@ -536,7 +536,13 @@ Reset-EDCimPlan -Rounds @{
 }
 $context = New-SamplerContext -ConfigOverride $sampleConfig
 $volumes = @((Get-EDVolumeInventory -Context $context)['MBX1'] | Where-Object { $null -ne $_ })
-Assert-Equal 'KUSUR: kapasitesi okunamayan birim %0 bos gorunuyor' 0 (Get-EDTestField $volumes 'FreePct')
+# DUZELTILDI: sonda FreePct'yi bilerek $null birakiyordu ("0 yazmak dogrudan
+# FAIL demektir"), toplayicidaki [double] cevrimi onu 0.0 yapiyordu. Yani
+# olculemeyen birim "dolu" sanilip uydurma FAIL uretiliyordu.
+# Get-EDTestField, degeri $null olan alani '<yok>' diye bildirir - burada
+# aranan cevap tam olarak budur: alan VAR ama OLCULMEMIS. '0' olsaydi
+# diskFreePercent (dusuk kotu) icin uydurma bir FAIL uretirdi.
+Assert-Equal 'Kapasitesi okunamayan birim %0 GORUNMUYOR' '<yok>' (Get-EDTestField $volumes 'FreePct')
 
 # 9c. Okunamayan sunucu envantere GIRMEZ (uydurma bos liste degil, yokluk).
 Reset-EDCimPlan -Rounds @{

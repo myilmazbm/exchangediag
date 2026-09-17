@@ -289,8 +289,11 @@ $context = New-M02Context -Plan @{
 $rows = @(& $m02.Run $context)
 $cache = $context.Cache['ServerBuilds']
 Assert-Equal 'Zaman asimi hucresi TIMEOUT' 'TIMEOUT' (Get-EDTestRow $rows 'Gercek build').Values['MBX2']
-Assert-True 'KUSUR: TIMEOUT metni M43 onbellegine sizmaya devam ediyor' `
-    ($cache.ContainsKey('MBX2') -and $cache['MBX2'] -eq 'TIMEOUT') `
+# DUZELTILDI: 'N/A' tek basina yetmiyordu; okunamayan sunucunun hucre metni
+# TIMEOUT/ERROR olur ve bunlar da build DEGILDIR. Sizdiginda M43 onlari
+# surum numarasi sanip kiyasa sokuyordu.
+Assert-True 'Okunamayan sunucu M43 onbellegine SIZMIYOR' `
+    (-not $cache.ContainsKey('MBX2')) `
     "onbellek: $(@($cache.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')"
 
 # ===========================================================================
