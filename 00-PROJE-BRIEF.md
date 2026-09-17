@@ -130,9 +130,12 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
   "maxRecipientLookups": 300,     // M12: sorgulanacak en fazla benzersiz alıcı
   "perfSampleCount": 20,          // M20/M21: kaç örnek (persentil için)
   "perfSampleIntervalSeconds": 1, // örnekler arası hedef aralık
-  "maxFolderScans": 50            // M24: taranacak en fazla posta kutusu
+  "maxFolderScans": 50,           // M24: taranacak en fazla posta kutusu
+  "storeDiagnosisFloorMs": 1000   // M23: teşhis kapısı - altındaki ölçüm için örüntü iddia edilmez
 }
 ```
+
+> ⚠️ **`storeDiagnosisFloorMs` bir eşik değil, SUSMA EŞİĞİDİR.** M23 satırının `OK`/`WARN`/`FAIL` hükmü `storeTimeInServerMs`'ten gelir; bu değer yalnızca "BEKLİYOR / CPU YAKIYOR" teşhisinin kurulabildiği en küçük büyüklüktür. 3 ms sunucu zamanının 0 ms CPU'ya oranı da sonsuzdur ama kimse beklemiyordur. Yükseltmek gerçek bulguları da susturur. Bu yüzden `warn`/`fail` ikilisine sokulmamıştır: tek yanlı bir kapıyı o şemaya koymak, yön çıkarımına uydurma bir anlam kazandırırdı (karş. `maxRecipientLookups`, `maxFolderScans`).
 
 > ⚠️ **`parallelism` keyfi büyütülemez.** Exchange throttling policy'sindeki `PowerShellMaxConcurrency` (varsayılan 18) kullanıcı başına eşzamanlı oturum sayısını sınırlar. Araç bu değeri okuyup kendi tavanını ona göre kısar: **Global kapsamlı policy'lerin en düşüğünün yarısı** (diğer yöneticilere yer bırakmak için), değer sınırsızsa 8, policy hiç okunamazsa 4. Buraya yazılan daha büyük bir sayı bu tavanla kırpılır; aksi halde araç kendi kendini boğar ve diğer yöneticilerin oturum açmasını engeller.
 
@@ -153,6 +156,8 @@ Tüm eşikler tek yerde, ortama göre ayarlanabilir:
   "calendarItemCount":       { "warn": 5000,  "fail": 20000 },
   "certExpiryDays":          { "warn": 30,  "fail": 7 },
   "cpuPercent":              { "warn": 70,  "fail": 90 },
+  "memoryFreePercent":       { "warn": 5,   "fail": 1 },       // M05: düşük kötü
+  "pagefileUsedPercent":     { "warn": 50,  "fail": 95 },      // M05: bellek bağlacının ikinci bacağı
   "storeTimeInServerMs":     { "warn": 30000, "fail": 60000 },
   "diskFreePercent":         { "warn": 20,  "fail": 10 },      // düşük kötü (M22/M25)
   "backupAgeDays":           { "warn": 3,   "fail": 7 },       // M45
@@ -160,6 +165,8 @@ Tüm eşikler tek yerde, ortama göre ayarlanabilir:
   "updatesBehind":           { "warn": 1,   "fail": 3 }        // M43: referans SU listesine göre
 }
 ```
+
+> ⚠️ **M05 bellek hükmü bir BAĞLAÇTIR.** Exchange ESE önbelleğini tasarım gereği büyütür; düşük boş bellek tek başına uyarı üretmez. Uyarı ancak boş bellek `memoryFreePercent`'in altında **ve** pagefile kullanımı `pagefileUsedPercent`'in üstündeyken verilir ve satırın hükmü iki bacağın **zayıf halkasıdır** - biri yalnızca `warn` seviyesindeyken satır `FAIL` olmaz. Pagefile okunamazsa ikinci koşul bilinmiyor demektir ve hüküm verilmez (`N/A`) - okunmamış veriden "sağlıklı" sonucu çıkarılmaz.
 
 > ⚠️ **Eksik anahtar sessiz kalmaz.** Bir eşikte `warn`/`fail` yoksa veya sayısal değilse araç açık hata verir. Eskiden eksik `fail` sessizce `0` oluyor, `warn > fail` karşılaştırması yönü **tersine** çeviriyordu: boş kuyruk `FAIL`, 5000 mesajlık kuyruk `OK`.
 
@@ -234,7 +241,7 @@ Sıra teşhis mantığına göre: önce "ortam neye benziyor", sonra "neresi boz
 | **M02** | Gerçek build | Kurulu CU/SU seviyesi | Setup registry `MsiInstallPath` → `Bin\ExSetup.exe` dosya sürümü, **her sunucuda** (yerel havuz + `Invoke-Command`) | ⚠️ Bkz. Bölüm 10 |
 | **M03** | Servis durumu | Zorunlu servisler ayakta mı | `Test-ServiceHealth` | Hepsi `Running` |
 | **M04** | Sertifikalar | Süre, atanmış servisler, zincir | `Get-ExchangeCertificate` | Eşik: `certExpiryDays` |
-| **M05** | OS / kaynak | CPU, RAM, pagefile, uptime, .NET sürümü | `Get-CimInstance`, perfmon | Eşik: `cpuPercent` |
+| **M05** | OS / kaynak | CPU, RAM, pagefile, uptime, .NET sürümü | `Get-CimInstance`, perfmon | Eşik: `cpuPercent`; bellek bağlacı: `memoryFreePercent` + `pagefileUsedPercent` |
 
 ### Faz B — Gecikme tespiti
 
@@ -273,7 +280,7 @@ DELIVER                    ← MSGTRKMD*.LOG
 | **M20** | Store RPC latency | Store içi bekleme | `MSExchangeIS Store(*)\RPC Average Latency` | P4 |
 | **M21** | Disk latency | Depolama darboğazı | `Win32_PerfRawData_PerfDisk_LogicalDisk` → `AvgDisksecPerRead/Write` (ham sayaç, ↓ Bölüm 10) | P4 |
 | **M22** | DB → volume haritası | Hangi DB'ler diski paylaşıyor | `Get-MailboxDatabase` → `EdbFilePath`, `LogFolderPath` | **P5 testi** |
-| **M23** | Ağır kullanıcılar | DB başına en yoğun tüketiciler | `Get-StoreUsageStatistics` | Yorum tablosu ↓ |
+| **M23** | Ağır kullanıcılar | DB başına en yoğun tüketiciler | `Get-StoreUsageStatistics` | Yorum tablosu ↓; teşhis kapısı: `storeDiagnosisFloorMs` (environment.json) |
 | **M24** | Büyük klasörler | Aşırı öğe sayısı | `Get-MailboxFolderStatistics` | Eşik: `folderItemCount` |
 | **M25** | DB boyut / whitespace | Şişme, disk doluluğu | `Get-MailboxDatabase -Status` | — |
 | **M26** | İçerik indeksi | Arama sağlığı | `Get-MailboxDatabaseCopyStatus` → `ContentIndexState` | ⚠️ Bkz. Bölüm 10 |
