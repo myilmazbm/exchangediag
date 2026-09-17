@@ -231,7 +231,7 @@ Sıra teşhis mantığına göre: önce "ortam neye benziyor", sonra "neresi boz
 | ID | Modül | Ne bakar | Anahtar komutlar | Not |
 |---|---|---|---|---|
 | **M01** | Topoloji keşfi | Sunucu, site, rol, DAG, DB haritası | `Get-ExchangeServer`, `Get-DatabaseAvailabilityGroup` | Diğer tüm modüllerin girdisi |
-| **M02** | Gerçek build | Kurulu CU/SU seviyesi | `(Get-Command ExSetup.exe).FileVersionInfo` **her sunucuda** | ⚠️ Bkz. Bölüm 10 |
+| **M02** | Gerçek build | Kurulu CU/SU seviyesi | Setup registry `MsiInstallPath` → `Bin\ExSetup.exe` dosya sürümü, **her sunucuda** (yerel havuz + `Invoke-Command`) | ⚠️ Bkz. Bölüm 10 |
 | **M03** | Servis durumu | Zorunlu servisler ayakta mı | `Test-ServiceHealth` | Hepsi `Running` |
 | **M04** | Sertifikalar | Süre, atanmış servisler, zincir | `Get-ExchangeCertificate` | Eşik: `certExpiryDays` |
 | **M05** | OS / kaynak | CPU, RAM, pagefile, uptime, .NET sürümü | `Get-CimInstance`, perfmon | Eşik: `cpuPercent` |
@@ -294,11 +294,11 @@ DELIVER                    ← MSGTRKMD*.LOG
 
 | ID | Modül | Ne bakar | Anahtar komutlar | Not |
 |---|---|---|---|---|
-| **M40** | Managed Availability | Sağlık setleri | `Get-ServerHealth`, `Get-HealthReport` | `known-issues.json` ile filtrelenir |
+| **M40** | Managed Availability | Sağlık setleri | `Get-ServerHealth` (sunucu başına bir iş) | `known-issues.json` ile filtrelenir |
 | **M41** | Event log taraması | Son 24 saat hata/uyarı | Application + System, ilk N | Gürültü filtresi şart |
 | **M42** | AV dışlamaları | Üreticinin önerdiği listeye uyum | Exclusion listesi karşılaştırması | Yol/işlem/uzantı |
 | **M43** | Yama durumu | Kaç güncelleme geride | M02 build vs referans SU listesi | Referans liste config'de, güncellenebilir |
-| **M44** | Lisans / aktivasyon | Sürüm, aktivasyon, süre | `Get-CimInstance SoftwareLicensingProduct` | Eval ortamlarda süre uyarısı |
+| **M44** | Lisans / aktivasyon | Sürüm, aktivasyon, süre | `Get-ExchangeServer` (deneme süresi) + `Get-CimInstance SoftwareLicensingProduct` (Windows aktivasyonu) | Eval ortamlarda süre uyarısı |
 | **M45** | Yedekleme durumu | Son başarılı yedek | `Get-MailboxDatabase` → `LastFullBackup` | Lab profilinde bastırılabilir |
 
 ---
@@ -576,20 +576,20 @@ Paketler geliştiricinin makinesinde (çoğunlukla en-US) koşuyordu ve **tek bi
 
 **Geçmek yetmez, iki kültürde de geçmek gerekir.** Bir iddia yalnızca tek kültürde geçiyorsa ya ürün kültüre bağımlıdır (hata) ya da iddianın kendisi geliştiricinin ondalık ayracını varsayıyordur (test hatası); ikisi de düzeltilir. Sonuç satırı üretmeyen bir paket "0 hata" sayılmaz, `COKTU` olarak raporlanır.
 
-Bugünkü durum — **15 paket × 2 kültür = 1490 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
+Bugünkü durum — **15 paket × 2 kültür = 1730 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
 
 | Paket | Doğrulama | Kapsam |
 |---|---|---|
-| `Test-TrackingLogParser` | 58 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
-| `Test-CoreUnits` | 76 | C# çekirdek birim testleri: `PercentileEngine`, `StatsAccumulator`, `CsvLineSplitter` |
+| `Test-TrackingLogParser` | 95 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
+| `Test-CoreUnits` | 130 | C# çekirdek birim testleri: `PercentileEngine`, `StatsAccumulator`, `CsvLineSplitter` |
 | `Test-LatencyModules` | 47 | M10-M13 uçtan uca (**canlı Exchange uç noktası ister**) |
 | `Test-LatencyPatterns` | 14 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
-| `Test-TransportModules` | 46 | M14-M16 |
+| `Test-TransportModules` | 71 | M14-M16 |
 | `Test-PerfModules` | 31 | M20-M22, örgü P4 ve P5 |
 | `Test-StoreModules` | 42 | M23-M24, yorum tablosu |
 | `Test-BaselineModules` | 84 | M04, M05, M25, M26 |
 | `Test-DagModules` | 64 | M30-M34 (sentetik DAG) |
-| `Test-HealthModules` | 63 | M40-M45 |
+| `Test-HealthModules` | 67 | M40-M45 |
 | `Test-CompareEngine` | 74 | Delta motoru ve kapsam koruması |
 | `Test-ReportLayer` | 58 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
 | `Test-ReadOnlyLint` | 38 | Salt okunurluk denetiminin **kendi** testi |
@@ -633,7 +633,7 @@ Araç saf PowerShell 5.1 ile yazılırsa kullanılamayacak kadar yavaş kalır. 
 | Darboğaz | Neden | Çözüm |
 |---|---|---|
 | `Get-MessageTrackingLog` | Her satırı zengin nesneye deserialize eder, uzaktan çalışırsa üstüne CliXml serileştirmesi biner. ~2-10k satır/sn | Ham `MSGTRK*.LOG` dosyasını okuyup parse et: 500k-2M satır/sn |
-| Sıralı yürütme | 30 modül × N sunucu, teker teker. PS 5.1'de `ForEach-Object -Parallel` yok | C# `ParallelExecutor` + paylaşılan runspace havuzu |
+| Sıralı yürütme | 30 modül × N sunucu, teker teker. PS 5.1'de `ForEach-Object -Parallel` yok | C# `ParallelExecutor` + paylaşılan runspace havuzları (Exchange & yerel) |
 | Persentil matematiği | Milyonlarca `TimeSpan` üzerinde PS sıralama/gruplama | `double[]` + `Array.Sort` |
 
 **Dil seçimi C#, çünkü:** Exchange yönetim cmdlet'lerinin desteklenen bir .NET API'si yoktur. Go/Rust seçilse bile sonunda PowerShell çağrılmak zorunda kalınır. C# ise `System.Management.Automation`'ı doğrudan host edip runspace havuzunu kendi yönetebilir.
@@ -643,11 +643,21 @@ Araç saf PowerShell 5.1 ile yazılırsa kullanılamayacak kadar yavaş kalır. 
 | Katman | Dil | Gerekçe |
 |---|---|---|
 | CLI, config, modül kaydı, eşik değerlendirme, rapor yazımı | PowerShell | Okunabilir, müşteri tarafında düzenlenebilir, sık değişir |
-| Tracking log parser, persentil, paralel yürütücü | C# | Sıcak yol |
-| Perf sayacı örnekleme, volume envanteri | PowerShell | ↓ bkz. "Neden perf tarafında C# yok" |
-| Cmdlet-only modüller (M03, M04, M25, M26, M30-M33, M40, M44, M45) | PowerShell scriptblock | Ucuz çağrılar; C# yürütücüde paralel koşarlar |
+| Tracking log parser, persentil/istatistik, paralel yürütücü | C# | Sıcak yol — `Core\TrackingLogParser.cs`, `Core\PercentileEngine.cs`, `Core\ParallelExecutor.cs` (bugün C# tarafının tamamı bu üç dosyadır) |
+| Perf sayacı örnekleme, volume envanteri, kopya durumu toplama | PowerShell | ↓ bkz. "Neden perf tarafında C# yok"; ortak yardımcılar `Core\PerfCounter.ps1` ve `Core\Replication.ps1` |
+| Modüllerin **tamamı** (30 dosya) | PowerShell | Modül bir *bildirimdir*, yürütücü değildir; işleri C# havuzlarında paralel koşar |
 
-**Kritik kural:** Modüller kendi runspace'ini/havuzunu açmaz, kendi paralelliğini yönetmez. Her modül *bildirir*: hedef sunucular + scriptblock + timeout. `ParallelExecutor` bunları tek bir paylaşılan havuzda koşturur. (Makine seviyesindeki veriyi isteyen modül, `Invoke-Command -ComputerName`'i **scriptblock'un içinde** kendisi yazar — Bölüm 10'daki `RunLocal` uyarısı.)
+**Yürütme kanalları.** Ayrı bir "cmdlet-only modül" sınıfı **yoktur** — `ParallelExecutor` iki ayrı runspace havuzu işletir ve bir modül ikisini birden kullanabilir:
+
+| Kanal | Modülün verdiği | Kullanan modüller |
+|---|---|---|
+| **Exchange havuzu** (`RunExchange`) — kısıtlı (NO-LANGUAGE) uzak yönetim runspace'i | Komut adı + parametre + `-Select`. **Scriptblock değil**: orada script metni çalışmaz, `Invoke-Command`/`Get-CimInstance` yoktur | Kendi işini açan: M01, M03, M04, M12, M14, M16, M23, M24, M33, M40, M44, M45 — ortak `Get-EDCopyStatus` önbelleği üzerinden (tek sorgu paylaşılır): M26, M30, M31, M32, M34 |
+| **Yerel havuz** (`RunLocal`) — tam dilli runspace, hedefe `Invoke-Command -ComputerName` ile gider | Scriptblock + parametre + timeout | Kendi işini açan: M02, M05, M15, M41, M42, M44 — ortak `Core\PerfCounter.ps1` yardımcıları üzerinden (`Invoke-Command` yardımcının içindedir): M20, M21, M22, M25 |
+| **Yerel havuz, hedefe gitmeden** — aracın kendi makinesinden SMB/UNC okuma (`# ED-LOCAL-OK` muafiyeti) | Scriptblock + UNC yolu + `BudgetSeconds` | M10, M11, M13 (ham `MSGTRK*.LOG` ayrıştırma) |
+
+Tek bir kanala düşmeyen üç durum vardır ve üçü de kasıtlıdır: **M44** iki havuzu birden kullanır (Exchange tarafı `Get-ExchangeServer`, Windows tarafı `SoftwareLicensingProduct`); **M10/M11/M13** log yolunu Exchange kanalından keşfeder (`Get-TransportService`), M10 ve M13 `logAccess=cmdlet`'e düşerse `Get-MessageTrackingLog`'a da o kanaldan gider — **M11 düşmez**, ham log erişimi yoksa `N/A` döner (MSGTRK + MSGTRKMD birleştirmesi cmdlet yolunda bütün olayları çekmeyi gerektirir); **M43** hiç iş açmaz, build numarasını M02'nin önbelleğinden okur.
+
+**Kritik kural:** Modüller kendi runspace'ini/havuzunu açmaz, kendi paralelliğini yönetmez. Her modül *bildirir*: hedefler + iş tanımı (Exchange kanalında komut/parametre, yerel kanalda scriptblock) + timeout. `ParallelExecutor` bunları paylaşılan havuzlarında koşturur. (Makine seviyesindeki veriyi isteyen modül, `Invoke-Command -ComputerName`'i **scriptblock'un içinde** kendisi yazar — Bölüm 10'daki `RunLocal` uyarısı; `Tests\Test-ModuleContracts.ps1` bunu kaynak üzerinden zorlar.)
 
 > **Timeout'un sınırı.** Yürütücünün `TimeoutSeconds`'ı tek katman değildir ve tek başına bir sınır da sayılmaz.
 > Bir iş yerel koda girdikten sonra dışarıdan durdurulamaz (bkz. Bölüm 4, madde 9): `PowerShell.Stop()` senkrondur,
@@ -669,7 +679,7 @@ Teslimat **`.ps1` dosyalarıdır** — imzasız `.exe` güven sorunu yoktur, tü
 - ⚠️ **Dil sürümü C# 5 ile sınırlıdır.** `Add-Type`, PS 5.1'de .NET Framework'ün `csc.exe`'sini kullanır. String interpolation, `?.`, `nameof`, tuple, pattern matching **kullanılamaz**. Generics, LINQ, `async/await`, `Parallel.ForEach` kullanılabilir.
 - **.NET SDK ve xunit test projesi KURULMADI — bilinçli karar.** Planda `Tests\ExchangeDiag.Core.Tests.csproj` (`<LangVersion>5</LangVersion>`) öngörülmüştü; gerekçesi iki maddeydi ve ikisi de başka yoldan karşılandığı için vazgeçildi:
   - *C# 5 kısıtını derleme anında zorlamak:* `Add-Type` zaten .NET Framework `csc.exe`'sini kullanıyor. Ölçülerek doğrulandı — C# 6 string interpolation içeren bir kaynak `Unexpected character '$'` ile **reddedildi**. `CoreLoader` her SHA256 değişiminde yeniden derlediği için ihlal ilk test çalıştırmasında görünür. `LangVersion 5` bu garantiyi tekrarlar, eklemez.
-  - *C# birim testleri:* Çekirdek iki paketle sınanıyor — `Test-TrackingLogParser` (58) ayrıştırıcıyı, `Test-CoreUnits` (76) `PercentileEngine` / `StatsAccumulator` / `CsvLineSplitter`'ı doğrudan — ve bunlar **Add-Type'ın ürettiği gerçek assembly** üzerinden koşuyor, yani üretimde çalışan ikilinin ta kendisi. xunit ayrı bir derleme çıktısını test ederdi; mevcut düzen bu açıdan daha yakındır.
+  - *C# birim testleri:* Çekirdek iki paketle sınanıyor — `Test-TrackingLogParser` (95) ayrıştırıcıyı, `Test-CoreUnits` (130) `PercentileEngine` / `StatsAccumulator` / `CsvLineSplitter`'ı doğrudan — ve bunlar **Add-Type'ın ürettiği gerçek assembly** üzerinden koşuyor, yani üretimde çalışan ikilinin ta kendisi. xunit ayrı bir derleme çıktısını test ederdi; mevcut düzen bu açıdan daha yakındır.
     > Bu argüman "dolaylı test yeterlidir" demek değildir. Çekirdek sınıfların **doğrudan** testi bir süre yoktu ve hepsi yalnızca sentetik log üzerinden, beklenen değerler de aynı motorun varsayımlarından türetilerek ölçülüyordu: `PercentileEngine.Percentile` doğrusal interpolasyondan nearest-rank'e çevrildiğinde **tüm paket yeşil kaldı.** `Test-CoreUnits`'teki değerler bu yüzden elle hesaplanmış ve sabit yazılmıştır.
   - Teslimat zaten SDK gerektirmez; müşteri tarafında yalnızca `.ps1` dosyaları çalışır.
   - **Ne zaman yeniden değerlendirilmeli:** C# tarafı bugün üç dosya. On dosyaya çıkarsa PowerShell üzerinden test etmek hantallaşır ve gerçek bir debugger gerekir; o noktada `dotnet test` kurulumu kendini amorti eder.
