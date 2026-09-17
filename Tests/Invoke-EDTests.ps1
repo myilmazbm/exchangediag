@@ -22,7 +22,16 @@
 param(
     [string[]]$Culture = @('en-US', 'tr-TR'),
     [string[]]$Name,
-    [string]$FixtureRoot = (Join-Path $env:TEMP 'ed-test-fixtures')
+    # HER KOSUM KENDI KLASORUNU KULLANIR.
+    #
+    # Sabit bir yol iki esZAMANLI kosumu birbirine karistirir ve sonuc
+    # SESSIZCE yanlis olur: fixture uretici dosyalari klasore EKLER,
+    # ayristirici da klasordeki TUM MSGTRK* dosyalarini tarar. Olculdu -
+    # iki kosum ayni anda calisirken "gecikmesi hesaplanan kayit" 189.827
+    # yerine 204.920 cikti, yani test kendi fixture'inin disindaki veriyi
+    # sayip kirmiziya dustu. Yanlis sebepten KALAN bir test, yanlis
+    # sebepten GECEN kadar zararlidir.
+    [string]$FixtureRoot = (Join-Path $env:TEMP ('ed-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,6 +101,11 @@ foreach ($result in $results) {
     if ($result.Kalan -lt 0) {
         Write-Host ("      son cikti: " + (($result.Cikti -split "`n" | Select-Object -Last 3) -join ' | ').Trim()) -ForegroundColor Red
     }
+}
+
+# Kendi klasorunu temizler; $env:TEMP birikmemeli.
+if (Test-Path -LiteralPath $FixtureRoot) {
+    Remove-Item -LiteralPath $FixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $totalPassed = ($results | Measure-Object -Property Gecen -Sum).Sum

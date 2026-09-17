@@ -88,6 +88,10 @@ Register-EDModule @{
         # Store baskin ama gecikme esik icinde olan sunucular: WARN degil bilgi.
         $storeDominantHealthy = @()
         $partialServers = @()
+        # Faz hukmu eksik nufustan verilen sunucular.
+        $incompleteServers = @()
+        # Semaya uymayan satirlar: olcum eksikligi DEGIL, veri bozuklugu.
+        $malformed = @()
         $coverageValues = @{}
         $coverageStatus = @{}
         $anyData = $false
@@ -109,6 +113,20 @@ Register-EDModule @{
             $breakdown = $result.Output[0]
             foreach ($warning in $breakdown.Warnings) { $log.Info("M11/$server : $warning") }
 
+            # BASKIN FAZ HUKMU EKSIK NUFUSTAN VERILMIS OLABILIR.
+            # Ayristirici uc fazi artik TEK bir nufustan (zinciri tam olan
+            # mesajlar) hesapliyor; eskiden her faz farkli bir kumeden
+            # geliyordu ve transport RECEIVE'i pencereden once dusen - yani
+            # EN YAVAS - mesajlar yalnizca Store'a katildigi icin hukum
+            # sistematik olarak Store'a kayiyordu. Tek nufus bu yanliligi
+            # kaldirdi ama bir bedeli var: zinciri eksik mesajlar artik faz
+            # kiyasinda YOK. Bu bedel gizlenmemeli.
+            if ([bool](Get-EDProperty $breakdown 'PhaseVerdictIncomplete' $false)) {
+                $incompleteServers += $server
+            }
+            if ([bool](Get-EDProperty $breakdown 'MalformedLines' 0) -gt 0) {
+                $malformed += ("{0}: {1} satir semaya uymadi" -f $server, (Get-EDProperty $breakdown 'MalformedLines' 0))
+            }
             if ($breakdown.Truncated) {
                 $partialServers += $server
                 $coverageValues[$server] = "KISMI $($breakdown.FilesProcessed)/$($breakdown.FilesScanned) dosya"
@@ -171,6 +189,12 @@ Register-EDModule @{
                 Server           = $server
                 MesajGorulen     = $breakdown.MessagesSeen
                 MesajTam         = $breakdown.MessagesComplete
+                # Faz p95'leri bu sayidan, uctan uca p95 sudan gelir; iki
+                # sayinin farkli olmasi normaldir ama GORUNUR olmalidir.
+                FazOrnegi        = Get-EDProperty $breakdown 'PhaseSamples' 0
+                UctanUcaOrnegi   = Get-EDProperty $breakdown 'MessagesWithTotal' 0
+                ZinciriEksik     = Get-EDProperty $breakdown 'UnreconciledSamples' 0
+                BozukSatir       = Get-EDProperty $breakdown 'MalformedLines' 0
                 SaatKaymasi      = $breakdown.SkewedSamples
                 ToplamP95        = [math]::Round($breakdown.Total.P95, 3)
                 ToplamP99        = [math]::Round($breakdown.Total.P99, 3)
@@ -232,6 +256,18 @@ Register-EDModule @{
         }
 
         $phaseStatus = Get-EDWorstStatus @($cellStatus.Values)
+        if ($incompleteServers.Count -gt 0) {
+            $note = ("BASKIN FAZ HUKMU EKSIK: {0} sunucusunda zinciri tam olmayan mesajlar faz kiyasina GIRMEDI " -f ($incompleteServers -join ', ')) +
+                    've bunlar tipik olarak EN YAVAS mesajlardir (transport RECEIVE olayi pencereden once dusmustur). ' +
+                    'Pencereyi -WindowHours ile GENISLETIP tekrar calistirin. ' + $note
+            $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
+        }
+        if ($malformed.Count -gt 0) {
+            $note = ("BOZUK LOG SATIRLARI ({0}): bu satirlar atildi. Kayma message-info'nun sagindan basladiginda " -f ($malformed -join ' | ')) +
+                    'bozuk bir satir GECERLI GORUNEN bir gecikme uretebilir, yani sorun her zaman eksik sayim degil ' +
+                    'bazen UYDURMA OLCUMDUR. ' + $note
+            $phaseStatus = Get-EDWorstStatus @($phaseStatus, 'WARN')
+        }
         if ($partialServers.Count -gt 0) {
             # Baskin faz hukmu eksik ornekten cikmis olabilir; en az WARN.
             $note = "PENCERE KISMI: $($partialServers -join ', ') sunucusunda zaman siniri okumayi kesti; " + `
