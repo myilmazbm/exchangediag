@@ -64,6 +64,8 @@ Register-EDModule @{
                 $storage = '(^|-)(disk|Disk|Ntfs|volsnap|storahci|iScsiPrt|partmgr|StorPort|Kernel-Disk|NvmeDisk|VIRTDISK|storvsc|vmbus)$'
 
                 $events = @()
+            # Tavana carpan gunlukler (MaxEvents gunluk BASINA uygulanir).
+            $cappedLogs = @()
                 foreach ($logName in @('Application', 'System')) {
                     try {
                         # Level 1=Critical 2=Error 3=Warning. Filtreleme sunucu tarafinda.
@@ -73,6 +75,15 @@ Register-EDModule @{
                             StartTime = $startTime
                         } -MaxEvents $MaxEvents -ErrorAction Stop
                         $events += $found
+                        # TAVAN GUNLUK BASINADIR: bu gunlukten tam MaxEvents
+                        # kadar olay geldiyse daha fazlasi VARDIR ve kesilmistir.
+                        # Toplam uzerinden bakmak (totalScanned >= MaxEvents*2)
+                        # yanlis: Application 4000'de kesilip System 10 olay
+                        # dondurunce toplam 4010 < 8000 kaliyor, bayrak $false
+                        # oluyor ve EKSIK SAYIM SESSIZCE geciyor - hangi gunluk
+                        # kesildiyse o gunlugun hata sayisi oldugundan az
+                        # gorunuyor ve satir FAIL yerine WARN'da kalabiliyor.
+                        if (@($found).Count -ge $MaxEvents) { $cappedLogs += $logName }
                     }
                     catch [System.Exception] {
                         # "No events were found" bir HATA DEGILDIR - temiz gunluk demektir.
@@ -121,7 +132,15 @@ Register-EDModule @{
                     if ($event.TimeCreated -gt $group.LastSeen) { $group.LastSeen = $event.TimeCreated }
                 }
 
-                Write-Output ([pscustomobject]@{ Kind = 'summary'; TotalScanned = $totalScanned; Truncated = ($totalScanned -ge ($MaxEvents * 2)) })
+                Write-Output ([pscustomobject]@{
+                    Kind = 'summary'
+                    TotalScanned = $totalScanned
+                    # Hangi gunlugun tavana carptigi da tasinir: "sayilar
+                    # eksik" demek yetmez, HANGI gunlukte eksik oldugu
+                    # operatorun pencereyi nasil daraltacagini belirler.
+                    CappedLogs = @($cappedLogs)
+                    Truncated = (@($cappedLogs).Count -gt 0)
+                })
                 foreach ($group in $groups.Values) { Write-Output $group }
             }
         }
@@ -243,7 +262,7 @@ Register-EDModule @{
             $log.Warn("M41: $($problems -join ' | ')")
         }
         if ($truncated.Count -gt 0) {
-            $note += ("TAVANA ULASILDI ({0}): sayilar eksik olabilir, pencereyi daraltin. " -f ($truncated -join ', '))
+            $note += ("TAVANA ULASILDI ({0}): sayilar eksik, pencereyi -WindowHours ile daraltin. " -f ($truncated -join ', '))
         }
         if ($unreadableLogs.Count -gt 0) {
             # Okunamayan gunluk ile TEMIZ gunluk ayni sey degildir: "0 hata"

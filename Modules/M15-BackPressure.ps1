@@ -224,7 +224,11 @@ Register-EDModule @{
         }
 
         if (-not $anyData) {
-            return @(New-EDRow -Module 'M15' -Check 'Back pressure olaylari' -Values $pressureValues `
+            # Satir adi NORMAL yoldakiyle AYNI olmali: Compare motoru satirlari
+            # Modul+Kontrol ile eslestirir, yani farkli ad kullanmak gunlugun
+            # okunamadigi bir kosumu delta raporunda "satir KAYBOLDU" gibi
+            # gosterir - olcum eksikligi, yapisal degisiklik gibi okunur.
+            return @(New-EDRow -Module 'M15' -Check 'Kaynak baskisi (15004)' -Values $pressureValues `
                 -CellStatus $cellStatus -Status 'ERROR' `
                 -Note "Hicbir sunucudan olay gunlugu okunamadi (WinRM erisimi gerekir). Son $lookbackHours saat taranacakti.")
         }

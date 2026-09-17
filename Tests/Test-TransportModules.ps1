@@ -515,10 +515,15 @@ Write-Host "`n=== 14. M15: gercekten okunamayan gunluk ERROR'dur ===" -Foregroun
 # uydurma olur. Not, 12/13'teki OK notundan ayirt edilebilmelidir.
 $rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{
     ThrowMessage = 'Attempted to perform an unauthorized operation.' } }
-# Hicbir sunucu okunamadiginda modul tek bir teshis satiri dondurur ve o
-# satirin adi digerlerinden farklidir ('Back pressure olaylari'): tablo
-# "0 olay" gibi okunacak sayi sutunlari URETMEZ.
-$pressureRow = Get-EDTestRowSafe $rows 'Back pressure olaylari'
+# Hicbir sunucu okunamadiginda modul tek bir teshis satiri dondurur ve
+# tablo "0 olay" gibi okunacak sayi sutunlari URETMEZ.
+#
+# SATIR ADI NORMAL YOLDAKIYLE AYNI OLMALI. Bir sure farkli bir ad
+# ('Back pressure olaylari') kullaniliyordu; Compare motoru satirlari
+# Modul+Kontrol ile eslestirdigi icin bu, gunlugun okunamadigi bir kosumu
+# delta raporunda "satir KAYBOLDU / YENI satir" gibi gosteriyordu - yani
+# bir OLCUM EKSIKLIGI, YAPISAL bir degisiklik gibi okunuyordu.
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
 Assert-Equal 'Okunamayan gunluk -> ERROR' 'ERROR' $pressureRow.Status
 Assert-Equal 'Hucre de ERROR' 'ERROR' $pressureRow.CellStatus['SRV1']
 Assert-True 'Deger olarak 0 UYDURULMADI' ("$($pressureRow.Values['SRV1'])" -ne '0') $pressureRow.Values['SRV1']
