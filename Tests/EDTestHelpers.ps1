@@ -42,10 +42,70 @@ function Get-EDTestRow {
     return @($Rows | Where-Object { $_.Check -like "$Check*" })[0]
 }
 
+function New-EDMockTimeout {
+    <#
+        Sahte yurutucuye "bu gorev ZAMAN ASIMINA ugradi" dedirtir.
+
+        NEDEN AYRI BIR YANIT TURU GEREKTI
+        Sahte yurutucu yalnizca iki sonuc uretebiliyordu: OK ve ERROR. Yani
+        ExecResult.TimedOut hicbir testte HIC true olmadi ve $result.State
+        hicbir zaman 'TIMEOUT' dondurmedi. Oysa Get-EDWorstStatus TIMEOUT'u
+        WARN'in ALTINA koyar (ERROR ise ustunde durur): bir sunucu zaman
+        asimina ugrarken digeri WARN veriyorsa satir WARN raporlanir ve
+        zaman asimi SESSIZCE yutulur. Bu bilincli bir tasarim tercihidir
+        ama hicbir test onu sabitlemiyordu.
+
+        GERCEK YURUTUCUYE SADIK KALINIR: ParallelExecutor zaman asimi
+        yolunda Error alanini DOLDURMAZ (bkz. ParallelExecutor.cs, "if
+        (!finished)" dali). Bu yuzden Error varsayilan olarak bos birakilir;
+        modul "TIMEOUT - " diye bos hatali bir satir gunlukler ve test bunu
+        oldugu gibi gormelidir.
+    #>
+    param([double]$DurationMs = 0)
+    return [pscustomobject]@{
+        EDMockOutcome = 'TimedOut'
+        Error         = $null
+        DurationMs    = $DurationMs
+    }
+}
+
+function New-EDMockError {
+    <#
+        Sahte yurutucuye hata sonucu urettirir. Yanit scriptblock'u icinde
+        'throw' da ayni sonucu verir; bu yardimci, hata metnini veriden
+        ayirmak istendiginde okunakli kalsin diye vardir.
+    #>
+    param([Parameter(Mandatory)][string]$Message, [double]$DurationMs = 0)
+    return [pscustomobject]@{
+        EDMockOutcome = 'Error'
+        Error         = $Message
+        DurationMs    = $DurationMs
+    }
+}
+
+function Test-EDMockOutcome {
+    <#
+        Yanit satirlari bir sonuc isareti mi tasiyor? StrictMode altinda
+        olmayan bir ozelligi okumak hata firlatir; bu yuzden once ozellik
+        listesine bakilir.
+    #>
+    param($Rows)
+    if (@($Rows).Count -ne 1) { return $null }
+    $row = @($Rows)[0]
+    if ($null -eq $row) { return $null }
+    if ($row -isnot [psobject]) { return $null }
+    if (@($row.PSObject.Properties.Name) -notcontains 'EDMockOutcome') { return $null }
+    return $row
+}
+
 function New-EDMockExecutor {
     <#
         $ResponsesByCommand: komut adi -> scriptblock (param($Key, $Identity))
         Scriptblock, o cagri icin dondurulecek satirlari uretir.
+
+        Scriptblock bunun yerine New-EDMockTimeout / New-EDMockError
+        dondururse sonuc satir uretmez; ExecResult zaman asimi / hata
+        durumuna gecer. Boylece $result.State uc degerin UCUNU de alabilir.
     #>
     param([hashtable]$ResponsesByCommand)
 
@@ -80,7 +140,16 @@ function New-EDMockExecutor {
                 # basarisiz bir ExecResult'a donusur.
                 try {
                     $rows = @(& $responder $task.Key $identity)
-                    $result.Output = [System.Management.Automation.PSObject[]]@($rows | ForEach-Object { [psobject]$_ })
+                    $outcome = Test-EDMockOutcome -Rows $rows
+                    if ($null -ne $outcome) {
+                        $result.Output = [System.Management.Automation.PSObject[]]@()
+                        $result.DurationMs = [double]$outcome.DurationMs
+                        if ($outcome.EDMockOutcome -eq 'TimedOut') { $result.TimedOut = $true }
+                        else { $result.Error = [string]$outcome.Error }
+                    }
+                    else {
+                        $result.Output = [System.Management.Automation.PSObject[]]@($rows | ForEach-Object { [psobject]$_ })
+                    }
                 }
                 catch {
                     $result.Error = $_.Exception.Message
