@@ -1,0 +1,59 @@
+{
+  // Ortam tipi. "lab" secilirse profiles.json'daki skipModules/ignoreFindings uygulanir.
+  "profile": "production",
+
+  // "auto" = sunucular AD'den kesfedilir. "manual" = yalnizca asagidaki servers listesi.
+  "discovery": "auto",
+
+  // Bos = otomatik kesif. Doluysa SADECE bu sunucular taranir.
+  "servers": [],
+
+  // Taranmayacak sunucular (orn. Edge Transport).
+  "excludeServers": [],
+
+  // Bos = otomatik tespit (aktif/mounted DB'si olmayan site pasif sayilir).
+  // Otomatik tespit yanlis karar veriyorsa site adlarini buraya yazin.
+  "passiveSites": [],
+
+  // Tracking log penceresi (saat). Genis pencere pahalidir; kisa tutun,
+  // yogun saatte birkac kez calistirip -CompareWith ile karsilastirin.
+  "trackingWindowHours": 1,
+
+  // Es zamanli runspace sayisi.
+  // UYARI: Exchange throttling policy'sindeki PowerShellMaxConcurrency (varsayilan 18)
+  // asilirsa yeni oturumlar reddedilir. Arac bu degeri okur ve tavani otomatik
+  // olarak sinirin yarisina ceker; buraya buyuk bir sayi yazmak ise yaramaz.
+  "parallelism": 4,
+
+  // "auto"   = once SMB uzerinden ham MSGTRK*.LOG, olmazsa Get-MessageTrackingLog
+  // "smb"    = yalnizca ham dosya okuma (20-50x hizli)
+  // "cmdlet" = yalnizca cmdlet (admin paylasimlarinin kapali oldugu ortamlar)
+  "logAccess": "auto",
+
+  // Bos = otomatik kesif (yerel makine -> AD). Elle vermek icin:
+  // "exchangeUri": "http://exchange01.ornek.local/PowerShell/"
+  "exchangeUri": "",
+
+  "authentication": "Kerberos",
+
+  // M20/M21: perf sayaci ornekleme. Tek bir tur her iki modulu de besler.
+  // Persentil uretebilmek icin birden fazla ornek sarttir; tek okuma tepe
+  // anlarini gizler. Sure = perfSampleCount x perfSampleIntervalSeconds ve
+  // TUM SUNUCULAR icin ayni anda islediginden sunucu sayisiyla artmaz.
+  "perfSampleCount": 20,
+  "perfSampleIntervalSeconds": 1,
+
+  // M24: taranacak en fazla posta kutusu. Get-MailboxFolderStatistics her
+  // posta kutusu icin ayri ve PAHALI bir cagridir; modul tum ortami taramaz,
+  // M23 (agir kullanicilar) ve M12 (yavas teslim alicilari) kanitini takip
+  // eder. Kapsam orani her zaman rapora yazilir.
+  "maxFolderScans": 50,
+
+  // M12: yavas teslimlerin alicilarini veritabani ile eslerken sorgulanacak
+  // en fazla benzersiz alici. Her alici bir Get-Recipient cagrisidir; aramalar
+  // en cok gecikme yasayandan baslar ve kapsam orani rapora yazilir.
+  "maxRecipientLookups": 300,
+
+  // Yanit vermeyen sunucu araci kilitlemez; hucre TIMEOUT yazar.
+  "moduleTimeoutSeconds": 120
+}

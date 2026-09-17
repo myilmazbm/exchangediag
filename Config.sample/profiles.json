@@ -1,0 +1,16 @@
+{
+  // Ortam tipine gore hangi kontrollerin GECERLI OLMADIGINI tanimlar.
+  // Bir kontrolu kapatmak icin koda dokunmak gerekmez.
+
+  "lab": {
+    // Lab ortamlarinda sertifika ve lisans kontrolleri gurultu uretir.
+    "skipModules": ["M04", "M44"],
+    // Snapshot tabanli lab'ler bilincli olarak yedek almaz.
+    "ignoreFindings": ["NoRecentBackup"]
+  },
+
+  "production": {
+    "skipModules": [],
+    "ignoreFindings": []
+  }
+}

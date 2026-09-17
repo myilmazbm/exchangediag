@@ -1,0 +1,18 @@
+# Cikti sunucu adi, kullanici adi ve mailbox bilgisi icerir - repoya girmemeli.
+output/
+
+# Gercek ortam yapilandirmasi. Repoda yalnizca Config.sample/ bulunur.
+Config/
+
+# Derleme cache'i (calisma aninda yeniden uretilir)
+*.dll
+*.pdb
+Tests/bin/
+Tests/obj/
+
+# Sentetik test log'lari - buyuk ve yeniden uretilebilir
+Tests/fixtures/
+
+# NOT: Sample-Output/ BILEREK haric tutulmamistir. Icerigi tamamen sentetiktir
+# (Tests\New-SampleOutput.ps1 uretir) ve gercek hicbir sunucu, kullanici veya
+# posta kutusu adi tasimaz. output/ ile karistirilmamalidir.

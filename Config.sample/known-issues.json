@@ -1,0 +1,18 @@
+[
+  // Bilinen false positive'ler. Bir bulguyu bastirmak icin KODA DOKUNMAK
+  // GEREKMEZ; bu dosya yeterlidir.
+  //
+  // Her bastirma iki sey tasimak zorundadir:
+  //   reason  : neden bastirildigi
+  //   expires : son gecerlilik tarihi (gecmisse arac bastirmayi YOK SAYAR
+  //             ve gunluge uyari yazar - unutulmus bastirmalar birikmesin)
+  //
+  // "match" bir duzenli ifadedir ve modulun urettigi bulgu metnine uygulanir.
+
+  // {
+  //   "module": "M40",
+  //   "match": "SomeHealthSet\\\\SomeMonitor",
+  //   "reason": "Uretici tarafinda acik known issue, KB1234567",
+  //   "expires": "2026-12-31"
+  // }
+]

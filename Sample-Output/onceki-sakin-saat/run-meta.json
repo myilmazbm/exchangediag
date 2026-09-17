@@ -1,0 +1,28 @@
+{
+    "runId":  "20260917-030000",
+    "startedLocal":  "2026-09-17 03:00:00",
+    "startedHour":  3,
+    "utcOffsetHours":  3,
+    "windowHours":  2,
+    "heavy":  true,
+    "logAccess":  "smb",
+    "serverFilter":  [
+
+                     ],
+    "servers":  [
+                    "DR01",
+                    "MBX01",
+                    "MBX02",
+                    "MBX03"
+                ],
+    "profile":  "production",
+    "modules":  [
+                    "M01",
+                    "M10",
+                    "M11",
+                    "M12",
+                    "M20",
+                    "M23",
+                    "M24"
+                ]
+}

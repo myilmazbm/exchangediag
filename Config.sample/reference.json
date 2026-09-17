@@ -1,0 +1,82 @@
+{
+  // SURUME DUYARLI REFERANS DEGERLER
+  //
+  // Bunlar esik degildir. "Uretici varsayilani neydi" sorusunu cevaplarlar ve
+  // yalnizca BILGI amaclidir - referanstan farkli olmak tek basina hata degildir.
+  //
+  // DIKKAT: Varsayilanlar Exchange surumleri arasinda DEGISIR. Bir ayar bu
+  // tabloda yoksa arac o ayar hakkinda varsayilan iddiasinda BULUNMAZ. Yanlis
+  // bir "degistirilmis" etiketi bulgunun tamamini tartismali hale getirir; bu
+  // yuzden emin olunmayan deger buraya YAZILMAZ.
+  //
+  // (Bu kural canli bir hatadan dogdu: M16, dokunulmamis bir SE kurulumunda
+  //  "degistirilmis" demisti - cunku araca gomulu varsayilanlar yanlisti.)
+
+  // --- M16: transport ayarlari ---
+  // Exchange Server Subscription Edition RTM (15.2.2562) uzerinde
+  // dokunulmamis bir kurulumdan DOGRULANMISTIR.
+  "transportDefaults": {
+    "MaxConcurrentMailboxDeliveries": 20,
+    "MaxConcurrentMailboxSubmissions": 20,
+    "MaxOutboundConnections": 1000,
+    "MaxPerDomainOutboundConnections": 40
+  },
+
+  // --- M23: sistem posta kutulari ---
+  // Exchange'in kendi posta kutulari "agir kullanici" hukmune girmez; kanit
+  // dosyasinda kalir ama ozet satirinda gosterilmez.
+  //
+  // Desen adin HERHANGI BIR YERINDE aranir - yalnizca basa bakmak yetmez:
+  // arsiv posta kutusu "In-Place Archive -HealthMailbox-..." seklinde gelir
+  // ve bas-eslemesi onu gercek kullanici sanar.
+  "systemMailboxPattern": "HealthMailbox|SystemMailbox\\{|DiscoverySearchMailbox\\{|^Microsoft Exchange|^Migration\\.|^FederatedEmail\\.|^Extension Mailbox",
+
+  // --- M43: guvenlik guncellemesi referans listesi ---
+  // Anahtar ExSetup.exe dosya surumudur (M02'nin okudugu deger). Sirali
+  // olmasi gerekmez; arac surume gore siralar ve sonuncuyu "en yeni" sayar.
+  //
+  // BOS BIRAKILMASI KASITLIDIR: bu liste her ay degisir, araca gomulurse
+  // birkac ay icinde YANLIS bilgi vermeye baslar. Liste bos oldugu surece
+  // M43 "bilinmiyor" der - "guncel" DEMEZ.
+  //
+  // Ornek:
+  //   "15.02.2562.017": { "name": "SE RTM",  "released": "2026-06-15" },
+  //   "15.02.2562.049": { "name": "SE SU1",  "released": "2026-08-12" }
+  "securityUpdates": {},
+
+  // --- M42: antivirus dislamalari ---
+  // YOLLAR BURADA DEGILDIR. Ortamin kendi veritabani, gunluk ve izleme
+  // yollarindan turetilir; sabit kodlanmaz.
+  //
+  // DIKKAT: M42 yalnizca Windows Defender'i okuyabilir. Ucuncu parti bir AV
+  // varsa modul N/A doner ve "dislama yok" DEMEZ.
+  "avExclusions": {
+    "processes": [
+      "Microsoft.Exchange.Store.Worker.exe",
+      "Microsoft.Exchange.Store.Service.exe",
+      "MSExchangeTransport.exe",
+      "MSExchangeDelivery.exe",
+      "MSExchangeSubmission.exe",
+      "MSExchangeFrontendTransport.exe",
+      "MSExchangeTransportLogSearch.exe",
+      "MSExchangeHMWorker.exe",
+      "MSExchangeRepl.exe",
+      "MSExchangeMailboxAssistants.exe",
+      "EdgeTransport.exe",
+      "noderunner.exe",
+      "ParserServer.exe",
+      "hostcontrollerservice.exe",
+      "w3wp.exe"
+    ],
+    "extensions": [
+      ".edb",     // veritabani
+      ".jfm",     // jet flush map
+      ".log",     // islem gunlugu
+      ".jrs",     // rezerv gunluk
+      ".chk",     // kontrol noktasi
+      ".que",     // transport kuyrugu
+      ".dsc",     // teslim durumu
+      ".config"
+    ]
+  }
+}

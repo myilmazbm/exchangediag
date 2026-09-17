@@ -1,0 +1,43 @@
+{
+  // TUM ESIKLER ONERIDIR. Her ortamin normali farklidir; once sakin ve yogun
+  // saatte birer tarama alip kendi tabaninizi cikarin, sonra bu degerleri
+  // ona gore ayarlayin. Iki tarama arasindaki farki gormek icin:
+  //   .\Invoke-ExchangeDiag.ps1 -All -CompareWith .\output\<onceki>
+  //
+  // YON kurali: iki sayi kendini anlatir, ayrica "direction" alani yoktur.
+  //   warn < fail  -> YUKSEK kotu  (orn. gecikme, kuyruk, CPU)
+  //   warn > fail  -> DUSUK kotu   (orn. sertifika omru, bos disk yuzdesi)
+
+  // --- Faz B: gecikme ve kuyruk ---
+  "deliveryLatencyP95Sec":   { "warn": 60,    "fail": 300 },
+  "queueMessageCount":       { "warn": 100,   "fail": 1000 },
+
+  // --- Faz C: store ve disk ---
+  "rpcAverageLatencyMs":     { "warn": 50,    "fail": 100 },
+  "diskSecPerWrite":         { "warn": 0.020, "fail": 0.050 },
+  "diskSecPerRead":          { "warn": 0.020, "fail": 0.050 },
+  "storeTimeInServerMs":     { "warn": 30000, "fail": 60000 },
+  "folderItemCount":         { "warn": 50000, "fail": 100000 },
+  "calendarItemCount":       { "warn": 5000,  "fail": 20000 },
+  "diskFreePercent":         { "warn": 20,    "fail": 10 },
+
+  // --- Faz D: replikasyon ---
+  // Kasitli gecikmeli (lagged) kopyalarda replay kuyrugunun buyuk olmasi
+  // TASARIMDIR; M31 hangi veritabani oldugunu da yazar ki yorumlanabilsin.
+  "copyQueueLength":         { "warn": 10,    "fail": 50 },
+  "replayQueueLength":       { "warn": 20,    "fail": 100 },
+
+  // --- Faz A/E: ortam ---
+  "cpuPercent":              { "warn": 70,    "fail": 90 },
+  "certExpiryDays":          { "warn": 30,    "fail": 7 },
+  "backupAgeDays":           { "warn": 3,     "fail": 7 },
+
+  // M41: pencere basina HAM olay sayisi (gruplanmis satir sayisi degil).
+  // Yuksek olmasi tek basina hata degildir; modul hangi olayin gecikmeye
+  // sebep oldugu hukmunu VERMEZ.
+  "eventErrorCount":         { "warn": 50,    "fail": 500 },
+
+  // M43: reference.json -> securityUpdates listesine gore kac guncelleme
+  // geride. Liste bos oldugu surece bu esik hic uygulanmaz.
+  "updatesBehind":           { "warn": 1,     "fail": 3 }
+}
