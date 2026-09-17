@@ -321,11 +321,53 @@ Assert-Equal 'Crawling WARN' 'WARN' $indexRow.Status
 Assert-Equal 'Crawling sayisi ayri satirda' 1 (Get-EDTestRow $rows 'Olusturulan (crawling)').Values['MBX1']
 Assert-True 'CPU/disk yuku uyarisi verildi' ($indexRow.Note -like '*CPU ve disk yukunu artirir*') $indexRow.Note
 
+# 3f. TAM DOLU birim: en tehlikeli durum, atlanacak durum DEGIL.
+# Eskiden "FreeGB -le 0 -> continue" tam dolu birimi kontrolun disinda
+# birakiyor, ardindan "hicbir veritabani bos alandan buyuk degil" deniyordu.
+$fullContext = New-BaseContext -Databases @((New-Db -Name 'DB1' -Size '450 GB (483,183,820,800 bytes)' -Whitespace '1 GB (1,073,741,824 bytes)'))
+$fullContext.Cache['VolumeInventory'] = @{ 'MBX1' = @(
+    [pscustomobject]@{ Name = 'E:\'; Label = 'Data'; CapacityGB = 1000.0; FreeGB = 0.0; FreePct = 0.0 }
+) }
+$rows = @(& $m25.Run $fullContext)
+$sizeRow = Get-EDTestRow $rows 'En buyuk DB'
+Assert-Equal 'Bos alani BITMIS birim FAIL' 'FAIL' $sizeRow.Status
+Assert-True 'Bos alan YOK oldugu yazildi' ($sizeRow.Note -like '*bos alan YOK*') $sizeRow.Note
+Assert-True 'Tam dolu birim icin "hicbiri buyuk degil" DENMEDI' `
+    ($sizeRow.Note -notlike '*hicbiri bulundugu birimdeki bos alandan buyuk degil*') $sizeRow.Note
+
+# 3g. Yol hicbir birimle eslesmezse "hepsi temiz" DENMEZ.
+$mismatchContext = New-BaseContext -Databases @((New-Db -Name 'DB1' -Size '100 GB (107,374,182,400 bytes)' -Whitespace '1 GB (1,073,741,824 bytes)'))
+$mismatchContext.Cache['VolumeInventory'] = @{ 'MBX1' = @(
+    [pscustomobject]@{ Name = 'Z:\'; Label = 'Baska'; CapacityGB = 1000.0; FreeGB = 900.0; FreePct = 90.0 }
+) }
+$rows = @(& $m25.Run $mismatchContext)
+$sizeRow = Get-EDTestRow $rows 'En buyuk DB'
+Assert-True 'Eslesmeyen yol icin olumlu iddia yok' `
+    ($sizeRow.Note -notlike '*hicbiri bulundugu birimdeki bos alandan buyuk degil*') $sizeRow.Note
+Assert-True 'Kontrol EDILEMEDIGI yazildi' ($sizeRow.Note -like '*kontrol EDILEMEDI*') $sizeRow.Note
+
 # 4e. Kopya durumu okunamazsa temiz N/A
 $emptyContext = New-BaseContext
 $emptyContext.Cache['CopyStatus'] = [pscustomobject]@{ Copies = @(); FailedServers = @('MBX1') }
 $rows = @(& $m26.Run $emptyContext)
 Assert-Equal 'Veri yoksa N/A' 'N/A' $rows[0].Status
+
+# 4f. YARIM okunmus ortam: bir sunucu okundu, digeri okunamadi.
+# Eskiden M26 FailedServers'a hic bakmiyor ve "Tum icerik indeksleri
+# saglikli" diyordu - okunamayan sunucu hakkinda hicbir sey bilmeden.
+$partialContext = New-BaseContext
+$partialContext.Cache['CopyStatus'] = [pscustomobject]@{
+    Copies = @([pscustomobject]@{
+        Server = 'MBX1'; Database = 'DB1'; Status = 'Mounted'
+        ContentIndexState = 'Healthy'; IndexError = ''; IsActive = $true
+    })
+    FailedServers = @('MBX9')
+}
+$rows = @(& $m26.Run $partialContext)
+$indexRow = $rows[0]
+Assert-True 'Yarim okunmus ortamda "hepsi saglikli" DENMEDI' `
+    ($indexRow.Note -notlike '*Tum icerik indeksleri saglikli*') $indexRow.Note
+Assert-True 'Okunamayan sunucu adiyla bildirildi' ($indexRow.Note -like '*MBX9*') $indexRow.Note
 
 # ===========================================================================
 Write-EDTestSummary

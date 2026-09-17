@@ -32,14 +32,26 @@ Register-EDModule @{
         param($Context)
 
         $log = $Context.Log
-        $copies = @((Get-EDCopyStatus -Context $Context).Copies)
+        $copyStatus = Get-EDCopyStatus -Context $Context
+        $copies = @($copyStatus.Copies)
+        # Okunamayan sunucular. Eskiden yalnizca .Copies okunuyordu, yani
+        # yarim okunmus bir ortamda rapor "Tum icerik indeksleri saglikli"
+        # diyordu - okunamayan sunucu hakkinda hicbir sey bilinmeden.
+        $failedServers = @($copyStatus.FailedServers)
 
         if ($copies.Count -eq 0) {
             return @(New-EDRow -Module 'M26' -Check 'Icerik indeksi' -Status 'N/A' `
                 -Note 'Kopya durumu okunamadi; indeks durumu hakkinda hukum verilemez.')
         }
 
-        $broken = @('Failed', 'FailedAndSuspended', 'Suspended', 'Unknown')
+        # 'Unknown' BOZUK DEGILDIR: durumun belirlenemedigi anlamina gelir
+        # (ornegin arama servisi yeniden basliyor). Brief'e gore bu N/A'dir,
+        # bir hukum degil. 'Suspended' ise genellikle KASITLI bir yonetici
+        # islemidir; bakim icin askiya alinmis bir indeks, posta GECIKMESI
+        # raporunda kirmizi FAIL satiri olmayi hak etmez.
+        $broken = @('Failed', 'FailedAndSuspended')
+        $suspended = @('Suspended')
+        $indeterminate = @('Unknown')
         $building = @('Crawling', 'Seeding', 'Initializing')
 
         $stateValues = @{}; $crawlValues = @{}
@@ -48,8 +60,15 @@ Register-EDModule @{
         $problems = @()
         $crawling = @()
         $naNotes = @()
+        $naNotes2 = @()
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
+            if ($server.Name -in $failedServers) {
+                $stateValues[$server.Name] = 'okunamadi'; $crawlValues[$server.Name] = 'N/A'
+                $cellStatus[$server.Name] = 'N/A'
+                continue
+            }
+
             $serverCopies = @($copies | Where-Object { $_.Server -eq $server.Name })
             if ($serverCopies.Count -eq 0) {
                 $stateValues[$server.Name] = 'N/A'; $crawlValues[$server.Name] = 'N/A'
@@ -58,6 +77,8 @@ Register-EDModule @{
             }
 
             $badCopies = @($serverCopies | Where-Object { $_.ContentIndexState -in $broken })
+            $suspendedCopies = @($serverCopies | Where-Object { $_.ContentIndexState -in $suspended })
+            $unknownCopies = @($serverCopies | Where-Object { $_.ContentIndexState -in $indeterminate })
             $buildingCopies = @($serverCopies | Where-Object { $_.ContentIndexState -in $building })
             $naCopies = @($serverCopies | Where-Object { $_.ContentIndexState -eq 'NotApplicable' })
             $healthyCopies = @($serverCopies | Where-Object { $_.ContentIndexState -eq 'Healthy' })
@@ -79,6 +100,21 @@ Register-EDModule @{
                 $stateValues[$server.Name] = "$($badCopies.Count) bozuk / $($serverCopies.Count)"
                 $cellStatus[$server.Name] = 'FAIL'
                 $problems += ("{0}: {1}" -f $server.Name, (@($badCopies | ForEach-Object { "$($_.Database)=$($_.ContentIndexState)" }) -join ', '))
+            }
+            elseif ($suspendedCopies.Count -gt 0) {
+                # Askiya alma genellikle KASITLIDIR (bakim, yeniden olusturma
+                # hazirligi). Bozuk kopyayla ayni kefeye konmaz.
+                $stateValues[$server.Name] = "$($suspendedCopies.Count) askida / $($serverCopies.Count)"
+                $cellStatus[$server.Name] = 'WARN'
+                $problems += ("{0}: {1} (indeks ASKIYA ALINMIS - genellikle kasitli bir yonetici islemidir)" -f `
+                    $server.Name, (@($suspendedCopies | ForEach-Object { $_.Database }) -join ', '))
+            }
+            elseif ($unknownCopies.Count -gt 0) {
+                # 'Unknown' bir hukum degil, hukum verilemedigi bilgisidir.
+                $stateValues[$server.Name] = "$($unknownCopies.Count) belirlenemedi / $($serverCopies.Count)"
+                $cellStatus[$server.Name] = 'N/A'
+                $naNotes2 += ("{0}: {1} veritabaninda indeks durumu BELIRLENEMEDI (Unknown) - arama servisi yeniden basliyor olabilir" -f `
+                    $server.Name, $unknownCopies.Count)
             }
             elseif ($buildingCopies.Count -gt 0) {
                 $stateValues[$server.Name] = "$($buildingCopies.Count) olusturuluyor / $($serverCopies.Count)"
@@ -120,7 +156,25 @@ Register-EDModule @{
         if ($naNotes.Count -gt 0) {
             $note += ('{0} sunucusunda tum veritabanlari NotApplicable donuyor. Bu NORMALDIR ve hata DEGILDIR: modern Exchange surumleri aramayi store icine tasidi, ayri bir icerik indeksi kopyasi bulunmuyor. ' -f ($naNotes -join ', '))
         }
-        if (-not $note) { $note = 'Tum icerik indeksleri saglikli. ' }
+        if ($naNotes2.Count -gt 0) {
+            $note += ($naNotes2 -join ' | ') + '. '
+        }
+        if ($failedServers.Count -gt 0) {
+            $note += ('KOPYA DURUMU OKUNAMAYAN SUNUCULAR: {0}. Bu sunuculardaki indeksler hakkinda HICBIR SEY BILINMIYOR. ' -f ($failedServers -join ', '))
+        }
+        # "Hepsi saglikli" ancak hepsi GERCEKTEN degerlendirildiyse soylenir.
+        # Eskiden bu cumle bir fall-through idi: taninmayan durum yuzunden
+        # hukum verilmeyen ya da hic okunamayan bir ortamda da yaziliyordu.
+        if (-not $note) {
+            $unjudged = @($cellStatus.Keys | Where-Object { $cellStatus[$_] -eq 'N/A' })
+            if ($unjudged.Count -gt 0 -or $failedServers.Count -gt 0) {
+                $note = ('Degerlendirilebilen indekslerde sorun yok, ancak {0} sunucusunda hukum VERILEMEDI. ' -f `
+                    ((@($unjudged) + @($failedServers) | Select-Object -Unique) -join ', '))
+            }
+            else {
+                $note = 'Tum icerik indeksleri saglikli. '
+            }
+        }
         $note += 'Ayrinti: M26-content-index.csv'
 
         return @(

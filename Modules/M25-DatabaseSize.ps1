@@ -101,6 +101,8 @@ Register-EDModule @{
 
         # --- Asil kontrol: DB, bulundugu birimin bos alanina gore nerede? ---
         $capacityNote = ''
+        $unmatched = @()
+        $evaluated = 0
         if ($null -eq $volumeInventory) {
             $capacityNote = 'Birim envanteri yok (M22 calistirilmadi); veritabani boyutunun birim kapasitesine orani hakkinda hukum VERILMEDI. '
             foreach ($server in @($sizeValues.Keys)) { $cellStatus[$server] = 'OK' }
@@ -125,10 +127,27 @@ Register-EDModule @{
                     if (-not $mount) { continue }
                     if ($path.StartsWith($mount, [System.StringComparison]::OrdinalIgnoreCase)) { $volume = $candidate; break }
                 }
-                if (-not $volume) { continue }
+                if (-not $volume) {
+                    # Yol hicbir birimle eslesmedi: bu DB DEGERLENDIRILMEDI.
+                    # Sessizce atlanip sonra "hicbiri buyuk degil" demek,
+                    # hic bakilmamis bir seyi temiz ilan etmektir.
+                    $unmatched += ("{0}/{1} ({2})" -f $server, $record.Veritabani, $path)
+                    continue
+                }
 
+                $evaluated++
                 $freeGb = [double]$volume.FreeGB
-                if ($freeGb -le 0) { continue }
+                # DIKKAT: 0 bos alan EN TEHLIKELI durumdur, atlanacak durum
+                # DEGIL. Eskiden buradaki "continue" tam dolu birimi kontrolun
+                # disinda birakiyor, sonra da "hicbir veritabani bos alandan
+                # buyuk degil" deniyordu. (FreeGB 1 ondaliga yuvarlanir, yani
+                # 0.05 GB'in altindaki her sey de 0 gorunur.)
+                if ($freeGb -le 0) {
+                    $cellStatus[$server] = Get-EDWorstStatus @($cellStatus[$server], 'FAIL')
+                    $problems += ("{0}/{1}: bulundugu birimde ({2}) bos alan YOK - veritabani dismount olmak uzere, teslim durur" -f `
+                        $server, $record.Veritabani, $volume.Name)
+                    continue
+                }
 
                 # Veritabani, kalan bos alandan buyukse: birim dolarsa dismount
                 # riski somuttur. Bu bir TAHMIN degil, oran karsilastirmasidir.
@@ -138,8 +157,18 @@ Register-EDModule @{
                         $server, $record.Veritabani, $record.BoyutGb, $volume.Name, $freeGb)
                 }
             }
-            if ($problems.Count -eq 0) {
-                $capacityNote = 'Hicbir veritabani, bulundugu birimdeki bos alandan buyuk degil. '
+            # "Hicbiri buyuk degil" ancak GERCEKTEN karsilastirma yapildiysa
+            # soylenir. Sifir degerlendirme uzerine kurulan olumlu cumle,
+            # aracin uretebilecegi en sessiz yanlis negatiftir.
+            if ($problems.Count -eq 0 -and $evaluated -gt 0) {
+                $capacityNote = ('{0} veritabani birim kapasitesine karsi kontrol edildi; hicbiri bulundugu birimdeki bos alandan buyuk degil. ' -f $evaluated)
+            }
+            elseif ($evaluated -eq 0) {
+                $capacityNote = 'HICBIR veritabani birim kapasitesine karsi kontrol EDILEMEDI (yol-birim eslesmesi kurulamadi); bu konuda hukum verilmedi. '
+                foreach ($server in @($sizeValues.Keys)) { $cellStatus[$server] = 'N/A' }
+            }
+            if ($unmatched.Count -gt 0) {
+                $capacityNote += ('Birimle eslestirilemeyen veritabanlari (kontrol DISI kaldi): {0}. ' -f ($unmatched -join ', '))
             }
         }
 

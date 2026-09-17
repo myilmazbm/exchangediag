@@ -190,8 +190,21 @@ Register-EDModule @{
         else {
             $totalShared = @($evidence | Where-Object { $_.DbSayisi -gt 1 }).Count
             if ($totalShared -gt 0) {
-                $note = "$totalShared volume birden fazla DB barindiriyor ancak hicbirinde disk esigi asilmiyor. "
-                $note += 'Paylasim tek basina hata degildir; bulgu latency de yuksekse anlam kazanir.'
+                # "Hicbirinde disk esigi asilmiyor" ancak DISK OLCULDUYSE
+                # soylenebilir. $perf yalnizca M20/M21 daha once calistiysa
+                # dolar; "-Module M22" ile veya profil M20/M21'i atliyorsa
+                # bos kalir ve modul, hic yapmadigi bir olcumun YOKLUGUNU
+                # olumlu bir bulgu gibi raporluyordu.
+                if ($null -eq $perf) {
+                    $note = "$totalShared volume birden fazla DB barindiriyor. DISK GECIKMESI OLCULMEDI "
+                    $note += '(M20/M21 bu calistirmada kosmadi), bu yuzden dolayli etki (ORGU P5) hakkinda hukum VERILMEDI. '
+                    $note += 'Paylasim tek basina hata degildir; bulgu latency de yuksekse anlam kazanir.'
+                    $status = 'N/A'
+                }
+                else {
+                    $note = "$totalShared volume birden fazla DB barindiriyor ancak hicbirinde disk esigi asilmiyor. "
+                    $note += 'Paylasim tek basina hata degildir; bulgu latency de yuksekse anlam kazanir.'
+                }
             }
             else {
                 $note = 'Her veritabani kendi volume uzerinde. Paylasilan kaynak uzerinden dolayli etki (P5) bu ortamda soz konusu degil.'

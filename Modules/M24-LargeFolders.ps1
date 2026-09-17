@@ -91,9 +91,11 @@ Register-EDModule @{
 
         $ranked = @($unique.Values | Sort-Object -Property Rank -Descending)
         $targets = @($ranked | Select-Object -First $maxScans)
-        $coverage = [math]::Round(($targets.Count / $ranked.Count) * 100, 1)
+        # Bolme guvenligi: $ranked bos olamaz (yukarida kontrol edilir) ama
+        # invaryant iki cagiranin garantisine dayaniyordu, yerel koruma yoktu.
+        $attemptCoverage = $(if ($ranked.Count -gt 0) { [math]::Round(($targets.Count / $ranked.Count) * 100, 1) } else { 0 })
 
-        $log.Info("M24: $($ranked.Count) aday posta kutusu ($($sources -join ', ')); $($targets.Count) tanesi taranacak (%$coverage).")
+        $log.Info("M24: $($ranked.Count) aday posta kutusu ($($sources -join ', ')); $($targets.Count) tanesi taranacak (%$attemptCoverage).")
 
         # --- Klasor istatistikleri (pahali cagri, paralel) ---
         $tasks = @(foreach ($target in $targets) {
@@ -115,6 +117,10 @@ Register-EDModule @{
         $evidence = @()
         $scanned = 0
         $failed = 0
+        # Sunucu basina BASARIYLA okunan posta kutusu sayisi. "Kac tanesini
+        # denedik" ile "kac tanesini okuduk" farkli seylerdir ve kapsam
+        # sozlesmesi ikincisine dayanir.
+        $scannedByServer = @{}
 
         foreach ($result in $results) {
             $target = $targetByKey[$result.Key.ToLowerInvariant()]
@@ -128,6 +134,10 @@ Register-EDModule @{
             }
 
             $scanned++
+            if ($serverName) {
+                if (-not $scannedByServer.ContainsKey($serverName)) { $scannedByServer[$serverName] = 0 }
+                $scannedByServer[$serverName]++
+            }
 
             foreach ($folder in $result.Output) {
                 $items = [int](Get-EDProperty $folder 'ItemsInFolder' 0)
@@ -176,7 +186,9 @@ Register-EDModule @{
 
             $folderCountValues[$server] = $serverFolders.Count
             $calendarValues[$server] = $serverCalendars.Count
-            $scannedValues[$server] = $serverTargets.Count
+            # Denenen degil OKUNAN sayisi: "4 tarandi" derken 1 okunmus olmasi
+            # kapsam sozlesmesini ihlal eder.
+            $scannedValues[$server] = $(if ($scannedByServer.ContainsKey($server)) { $scannedByServer[$server] } else { 0 })
 
             if ($serverFolders.Count -gt 0) {
                 $largest = @($serverFolders | Sort-Object -Property @{ Expression = 'OgeSayisi'; Descending = $true })[0]
@@ -185,18 +197,29 @@ Register-EDModule @{
             }
             else {
                 $largestValues[$server] = '-'
-                $folderCellStatus[$server] = $(if ($serverTargets.Count -gt 0) { 'OK' } else { 'N/A' })
+                # Hedef vardi ama HICBIRI okunamadiysa bu "buyuk klasor yok"
+                # DEGILDIR. M12 kaynakli adaylar SMTP alicilaridir; dis adres
+                # veya dagitim grubu olanlar posta kutusu degildir ve sorgu
+                # basarisiz olur - eskiden bunlar "temiz tarama" sayiliyordu.
+                $serverScanned = $(if ($scannedByServer.ContainsKey($server)) { $scannedByServer[$server] } else { 0 })
+                $folderCellStatus[$server] = $(if ($serverTargets.Count -gt 0 -and $serverScanned -gt 0) { 'OK' } else { 'N/A' })
             }
 
             if ($serverCalendars.Count -gt 0) {
                 $calendarCellStatus[$server] = Get-EDWorstStatus @($serverCalendars | ForEach-Object { $_.Durum })
             }
             else {
-                $calendarCellStatus[$server] = $(if ($serverTargets.Count -gt 0) { 'OK' } else { 'N/A' })
+                $serverScannedCal = $(if ($scannedByServer.ContainsKey($server)) { $scannedByServer[$server] } else { 0 })
+                $calendarCellStatus[$server] = $(if ($serverTargets.Count -gt 0 -and $serverScannedCal -gt 0) { 'OK' } else { 'N/A' })
             }
         }
 
-        $coverageNote = ("KAPSAM: $($ranked.Count) aday posta kutusundan $scanned tanesi tarandi (%$coverage). " +
+        # KAPSAM yuzdesi DENENEN degil BASARILI okunan sayidan hesaplanir.
+        # Eskiden $targets.Count / $ranked.Count kullaniliyor ama cumlede
+        # $scanned yaziliyordu: 4 adaydan 3 sorgu basarisiz olunca rapor
+        # "4 adaydan 1 tanesi tarandi (%100)" diyordu.
+        $coverage = $(if ($ranked.Count -gt 0) { [math]::Round(($scanned / $ranked.Count) * 100, 1) } else { 0 })
+        $coverageNote = ("KAPSAM: $($ranked.Count) aday posta kutusundan $scanned tanesi BASARIYLA tarandi (%$coverage). " +
                          "Aday kaynagi: $($sources -join ', '). ")
         if ($failed -gt 0) {
             $coverageNote += "$failed posta kutusu sorgulanamadi (dis adres veya dagitim grubu olabilir). "
