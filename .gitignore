@@ -16,3 +16,6 @@ Tests/fixtures/
 # NOT: Sample-Output/ BILEREK haric tutulmamistir. Icerigi tamamen sentetiktir
 # (Tests\New-SampleOutput.ps1 uretir) ve gercek hicbir sunucu, kullanici veya
 # posta kutusu adi tasimaz. output/ ile karistirilmamalidir.
+
+# Ajan worktree'leri: gecici calisma kopyalari, depoya girmez.
+.claude/worktrees/

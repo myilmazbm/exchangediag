@@ -47,7 +47,13 @@ $script:EDDeltaFloor = 0.5
 # yalanlar: satirda "bu bir iyilesme veya gerileme DEGILDIR" yazarken baslik
 # "1 iyilesme" sayar. Hukmu olmayan taraf siraya hic girmez; boyle gecisler
 # ucuncu bir kovada, OLCUM DEGISIMI olarak raporlanir.
-$script:EDStatusRank = @{ 'OK' = 0; 'TIMEOUT' = 1; 'WARN' = 2; 'ERROR' = 3; 'FAIL' = 4 }
+# DELTA motoruna OZGU siralama. Adi bilerek "Delta" tasir: Framework de
+# $script:EDStatusRank tanimlar ve iki dosya ayni kapsama dot-source edilir
+# (Framework once, Compare sonra), yani ayni adi kullanmak Framework'un
+# Get-EDWorstStatus fonksiyonunu SESSIZCE bu tabloya baglardi. Iki tablo
+# ayni seyi olcmuyor: burada N/A bir HUKUM DEGIL, olcum degisimidir ve
+# siralamaya hic girmez.
+$script:EDDeltaStatusRank = @{ 'OK' = 0; 'TIMEOUT' = 1; 'WARN' = 2; 'ERROR' = 3; 'FAIL' = 4 }
 $script:EDNonVerdictStatus = @('N/A', 'PASSIVE')
 
 function Test-EDValueMissing {
@@ -89,10 +95,10 @@ function Get-EDStatusTransitionKind {
 
     # Tanimadigimiz bir durum adi ('-', '(yok)', yeni bir etiket) uydurma
     # siraya sokulmaz; sessizce atlanir.
-    if (-not $script:EDStatusRank.ContainsKey($from) -or -not $script:EDStatusRank.ContainsKey($to)) { return 'yok' }
+    if (-not $script:EDDeltaStatusRank.ContainsKey($from) -or -not $script:EDDeltaStatusRank.ContainsKey($to)) { return 'yok' }
 
-    if ($script:EDStatusRank[$to] -gt $script:EDStatusRank[$from]) { return 'gerileme' }
-    if ($script:EDStatusRank[$to] -lt $script:EDStatusRank[$from]) { return 'iyilesme' }
+    if ($script:EDDeltaStatusRank[$to] -gt $script:EDDeltaStatusRank[$from]) { return 'gerileme' }
+    if ($script:EDDeltaStatusRank[$to] -lt $script:EDDeltaStatusRank[$from]) { return 'iyilesme' }
     return 'yok'
 }
 
