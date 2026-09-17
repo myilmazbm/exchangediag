@@ -499,11 +499,36 @@ Assert-True 'Eslesmeyen yol icin olumlu iddia yok' `
     ($sizeRow.Note -notlike '*hicbiri bulundugu birimdeki bos alandan buyuk degil*') $sizeRow.Note
 Assert-True 'Kontrol EDILEMEDIGI yazildi' ($sizeRow.Note -like '*kontrol EDILEMEDI*') $sizeRow.Note
 
-# 4e. Kopya durumu okunamazsa temiz N/A
+# 4e. HIC KOPYA GELMEDIYSE SEBEP AYRISTIRILIR.
+#
+# Eskiden ikisi de 'N/A' idi. 'N/A' bir hukum degildir: bulgu tablosuna
+# girmez (Core\Report.ps1) ve cikis kodu eslemesinde hicbir kovaya dusmez.
+# Yani Exchange oturumu dusmus bir kosum "Bulgular (0)" ve kod 0 ile
+# bitiyordu. Ayirt edici olcut 'Count -eq 0' DEGIL, FailedServers'dir.
 $emptyContext = New-BaseContext
 $emptyContext.Cache['CopyStatus'] = [pscustomobject]@{ Copies = @(); FailedServers = @('MBX1') }
 $rows = @(& $m26.Run $emptyContext)
-Assert-Equal 'Veri yoksa N/A' 'N/A' $rows[0].Status
+Assert-True 'Okunamadiysa N/A DONMEZ' ($rows[0].Status -notin @('N/A', 'OK')) $rows[0].Status
+Assert-True 'Sebep notta: olcum basarisizligi' ($rows[0].Note -like '*HICBIR SUNUCUDAN*') $rows[0].Note
+Assert-Equal 'Satir adi normal yoldakiyle AYNI' 'Icerik indeksi durumu' $rows[0].Check
+
+# Sunucular OKUNDU ama gercekten kopya yok: burada N/A MESRUDUR ve
+# kosumun cikis kodunu 0'dan cikarmamalidir.
+$noCopyContext = New-BaseContext
+$noCopyContext.Cache['CopyStatus'] = [pscustomobject]@{ Copies = @(); FailedServers = @() }
+$rows = @(& $m26.Run $noCopyContext)
+Assert-Equal 'Kopya gercekten yoksa N/A mesru' 'N/A' $rows[0].Status
+
+# Yarim okunmus ortamda okunamayan sunucunun HUCRESI de hukum tasir.
+$halfContext = New-BaseContext -Servers @((New-EDTestServer -Name 'MBX1'), (New-EDTestServer -Name 'MBX2'))
+$halfContext.Cache['CopyStatus'] = [pscustomobject]@{
+    Copies = @((New-IndexCopy -Database 'DB1' -Index 'Healthy'))
+    FailedServers = @('MBX2')
+    Failures = @([pscustomobject]@{ Server = 'MBX2'; State = 'TIMEOUT'; Error = 'yanit yok' })
+}
+$rows = @(& $m26.Run $halfContext)
+Assert-Equal 'Okunamayan sunucu hucresi yurutucu durumunu tasiyor' 'TIMEOUT' $rows[0].CellStatus['MBX2']
+Assert-True 'Yarim tablo OK ile ozetlenmiyor' ($rows[0].Status -notin @('OK', 'N/A')) $rows[0].Status
 
 # 4f. YARIM okunmus ortam: bir sunucu okundu, digeri okunamadi.
 # Eskiden M26 FailedServers'a hic bakmiyor ve "Tum icerik indeksleri

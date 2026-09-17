@@ -27,10 +27,27 @@ Register-EDModule @{
         $log = $Context.Log
         $inventory = Get-EDCopyStatus -Context $Context
         $copies = @($inventory.Copies)
+        $failedServers = @($inventory.FailedServers)
 
         if ($copies.Count -eq 0) {
-            return @(New-EDRow -Module 'M30' -Check 'Kopya durumu' -Status 'N/A' `
-                -Note 'Kopya durumu okunamadi.')
+            # AYIRT EDICI OLCUT 'Count -eq 0' DEGIL, ELDEKI HATA GOSTERGESIDIR.
+            #
+            # Eski kod bos listeyi tek bir sebebe bagliyor ve 'N/A' donuyordu.
+            # 'N/A' bulgu tablosuna girmez (Core\Report.ps1) ve cikis kodu
+            # eslemesinde hicbir kovaya dusmez: yani kosum ortasinda Exchange
+            # oturumu dusse bile rapor "Bulgular (0)" yazip 0 ile cikiyordu.
+            # Get-EDCopyStatus FailedServers'i ZATEN tasiyor; okunmasi yeterdi.
+            if ($failedServers.Count -gt 0) {
+                $cells = New-EDCopyFailureCells -Inventory $inventory
+                # Satir adi normal yoldakiyle AYNI (Compare motoru Modul+Kontrol
+                # ile eslestirir; farkli ad "satir kayboldu" gibi okunur).
+                return @(New-EDRow -Module 'M30' -Check 'Kopya sagligi' `
+                    -Values $cells.Value -CellStatus $cells.Status `
+                    -Status (Get-EDWorstStatus @($cells.Status.Values)) `
+                    -Note ("HICBIR SUNUCUDAN kopya durumu alinamadi: {0}. Kopyalarin sagligi hakkinda HICBIR SEY BILINMIYOR - bu bir OLCUM BASARISIZLIGIDIR, 'kopyalar saglikli' DEGILDIR." -f (Get-EDCopyStatusFailureNote -Inventory $inventory)))
+            }
+            return @(New-EDRow -Module 'M30' -Check 'Kopya sagligi' -Status 'N/A' `
+                -Note 'Sunucular okundu ancak hic veritabani kopyasi yok; kopya sagligi kavrami gecerli degil.')
         }
 
         # SINIFLANDIRMA "VARSAYILAN OLARAK BOZUK" OLAMAZ.
@@ -66,6 +83,15 @@ Register-EDModule @{
         $evidence = @()
 
         foreach ($server in @($Context.Topology.Servers | Where-Object { $_.IsMailbox -and -not $_.IsEdge })) {
+            # "Bu sunucu okunamadi" ile "bu sunucuda kopya yok" ayni hucrede
+            # gorunemez: ilki bir olcum basarisizligi, ikincisi bir gercektir.
+            if ($server.Name -in $failedServers) {
+                $failState = Get-EDCopyStatusState -Inventory $inventory -Server $server.Name
+                $statusValues[$server.Name] = 'okunamadi'; $indexValues[$server.Name] = 'okunamadi'
+                $cellStatus[$server.Name] = $failState; $indexCellStatus[$server.Name] = $failState
+                continue
+            }
+
             $serverCopies = @($copies | Where-Object { $_.Server -eq $server.Name })
             if ($serverCopies.Count -eq 0) {
                 $statusValues[$server.Name] = 'N/A'; $indexValues[$server.Name] = 'N/A'
@@ -155,8 +181,8 @@ Register-EDModule @{
             $note = ($problems -join ' | ') + '. Bozuk kopya teslim gecikmesi yaratmaz ama failover imkansiz hale gelir. ' + $note
             $log.Warn("M30: $($problems -join ' | ')")
         }
-        if ($inventory.FailedServers.Count -gt 0) {
-            $note += " Okunamayan sunucular: $($inventory.FailedServers -join ', ')."
+        if ($failedServers.Count -gt 0) {
+            $note += (" OKUNAMAYAN SUNUCULAR: {0}. Bu sunuculardaki kopyalar hakkinda HICBIR SEY BILINMIYOR; hucreleri 'sorun yok' anlamina GELMEZ." -f (Get-EDCopyStatusFailureNote -Inventory $inventory))
         }
         if ($unrecognized.Count -gt 0) {
             # Taninmayan durum bir hukum DEGILDIR: ham deger gosterilir ve
@@ -164,11 +190,15 @@ Register-EDModule @{
             $note += (" TANINMAYAN KOPYA DURUMU ({0}): bu durumlar icin hukum verilmedi, ham deger gosteriliyor." -f ($unrecognized -join ' | '))
         }
 
+        # Hucre tablosu yalnizca topolojideki sunuculari tasir; envanterden
+        # okunamayan bir sunucu hucre uretmeden de kapsami eksiltir.
+        $failStates = @($failedServers | ForEach-Object { Get-EDCopyStatusState -Inventory $inventory -Server $_ })
+
         return @(
             New-EDRow -Module 'M30' -Check 'Kopya sagligi' -Values $statusValues -CellStatus $cellStatus `
-                -Status (Get-EDWorstStatus @($cellStatus.Values)) -Note $note
+                -Status (Get-EDWorstStatus @(@($cellStatus.Values) + $failStates)) -Note $note
             New-EDRow -Module 'M30' -Check 'Icerik indeksi' -Values $indexValues -CellStatus $indexCellStatus `
-                -Status (Get-EDWorstStatus @($indexCellStatus.Values)) `
+                -Status (Get-EDWorstStatus @(@($indexCellStatus.Values) + $failStates)) `
                 -Note 'NotApplicable tek kopyali / DAG disi ortamlarda NORMALDIR, hata degildir.'
         )
     }

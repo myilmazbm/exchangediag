@@ -186,8 +186,26 @@ try {
     # gercekten bir tarama yapiliyor.
     if ($PSCmdlet.ParameterSetName -eq 'Module') {
         $unknownRequested = @(Get-EDUnknownModuleIds -Requested $Module -Known $registered.Id)
-        if ($unknownRequested.Count -eq @($Module).Count) {
-            throw ("-Module ile istenen ID'lerin HICBIRI kayitli degil: {0}. Hicbir kontrol kosmadi, rapor uretilmedi. " -f ($unknownRequested -join ', ')) +
+
+        # OLCUT "KAC TANESI TANINMADI" DEGIL, "KAC TANESI TANINDI" OLMALIDIR.
+        #
+        # Eski kosul $unknownRequested.Count'u ham $Module sayisiyla
+        # karsilastiriyordu. Get-EDUnknownModuleIds TEKILLESTIRME yapar ve bos
+        # metni atar; yani '-Module M99,M99' icin 1 -ne 2 cikiyor, koruma
+        # tetiklenmiyor ve arac HIC TARAMA YAPMADAN 0 ile cikiyordu - tam da
+        # bu korumanin engellemek icin var oldugu sinyal. '-Module ""' de ayni
+        # kapiya cikiyordu: unknown 0, yani "hepsi taninmis" gibi.
+        # NEDEN BURADA 'Get-EDModules -Id $Module' KULLANILMIYOR: o islev
+        # 'if ($Id)' ile filtre uygular ve PowerShell'de @('') TEK ELEMANLI
+        # oldugu icin $false'tur - yani '-Module ""' filtreyi hic uygulamaz
+        # ve TUM modulleri dondururdu. Sifir tanima tam da yakalamak
+        # istedigimiz durum oldugundan, eslesme burada acikca yapilir.
+        # '-in' karsilastirmasi buyuk/kucuk harf duyarsizdir: '-Module m30'
+        # tanindi sayilir ve asagida gercekten de kosar.
+        $recognized = @($registered | Where-Object { $_.Id -in @($Module) })
+        if ($recognized.Count -eq 0) {
+            $requestedText = @(@($Module) | ForEach-Object { if ($_) { $_ } else { '(bos)' } }) -join ', '
+            throw ("-Module ile istenen ID'lerin HICBIRI kayitli degil: {0}. Hicbir kontrol kosmadi, rapor uretilmedi. " -f $requestedText) +
                   ("Kayitli ID'leri -ListModules ile gorebilirsiniz. " ) +
                   ("NOT: powershell.exe -File ile cagirirken 'M30,M31' TEK BIR METIN olarak gecer; dizi gecirmek icin -Command kullanin.")
         }
@@ -413,6 +431,51 @@ try {
         }
         $log.Warn($abandonNote)
         $allRows += New-EDRow -Module 'CORE' -Check 'Terk edilen is' -Status 'WARN' -Note $abandonNote
+    }
+
+    # KAPSAM EKSIKLIGI KOSUM SEVIYESINDE GORUNUR OLMAK ZORUNDA.
+    #
+    # Moduller okunamayan sunucuyu artik ERROR/TIMEOUT ile isaretliyor, ama
+    # operatorun ilk baktigi yer bulgu tablosu ve cikis kodudur. "Su kadar
+    # kontrol EKSIK KAPSAMLA olculdu" cumlesi hicbir modulun tek basina
+    # sahip olmadigi bir bilgidir: tek tek bakildiginda bir sunucunun bir
+    # modulde okunamamasi kucuk gorunur, hepsi bir arada ise raporun
+    # tamaminin yarim oldugunu soyler. 'Terk edilen is' ve 'Bastirilan bulgu'
+    # satirlariyla ayni bicim bilerek kullanilir.
+    #
+    # MESRU N/A'LER BURAYA GIRMEZ: yalnizca ERROR/TIMEOUT sayilir. DAG'siz
+    # bir ortamda M30-M34'un 'ortamda DAG yok' N/A'leri, pasif kopya
+    # bulunmayan bir M31, sayaci olmayan bir M20 - hicbiri kapsam eksikligi
+    # degildir ve bu satiri URETMEZ.
+    $scopeGapDetails = @()
+    $scopeGapServers = @{}
+    foreach ($row in $allRows) {
+        if ($row.Module -eq 'CORE') { continue }
+        $badCells = @($row.CellStatus.Keys | Where-Object { $row.CellStatus[$_] -in @('ERROR', 'TIMEOUT') } | Sort-Object)
+        if ($badCells.Count -gt 0) {
+            foreach ($cell in $badCells) {
+                if (-not $scopeGapServers.ContainsKey($cell)) { $scopeGapServers[$cell] = 0 }
+                $scopeGapServers[$cell]++
+            }
+            $scopeGapDetails += ("{0}/{1}: {2}" -f $row.Module, $row.Check,
+                (@($badCells | ForEach-Object { "$_=$($row.CellStatus[$_])" }) -join ', '))
+        }
+        elseif ($row.Status -in @('ERROR', 'TIMEOUT')) {
+            # Hucre tablosu bos ama satirin tamami dusmus: kapsam yine eksik.
+            $scopeGapDetails += ("{0}/{1}: {2} (tum kapsam)" -f $row.Module, $row.Check, $row.Status)
+        }
+    }
+    if ($scopeGapDetails.Count -gt 0) {
+        $scopeNote = ("{0} kontrol EKSIK KAPSAMLA olculdu. " -f $scopeGapDetails.Count)
+        if ($scopeGapServers.Count -gt 0) {
+            $scopeNote += ("Okunamayan sunucular: {0}. " -f (
+                (@($scopeGapServers.Keys | Sort-Object | ForEach-Object { "$_ ($($scopeGapServers[$_]) kontrol)" })) -join ', '))
+        }
+        $scopeNote += 'Bu kosumun kapsami EKSIKTIR: ilgili hucrelerdeki degerler "olculdu, sorun yok" DEGIL "olculemedi" anlamina gelir '
+        $scopeNote += 've eksik sunucularda bulunan bir sorun bu raporda GORUNMEZ. '
+        $scopeNote += ('Ayrinti: {0}.' -f ($scopeGapDetails -join ' | '))
+        $log.Warn("CORE: $scopeNote")
+        $allRows += New-EDRow -Module 'CORE' -Check 'Eksik kapsam' -Status 'WARN' -Note $scopeNote
     }
 
     # -----------------------------------------------------------------------

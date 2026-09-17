@@ -32,13 +32,34 @@ Register-EDModule @{
         $failedServers = @($copyStatus.FailedServers)
 
         if ($copies.Count -eq 0) {
-            return @(New-EDRow -Module 'M31' -Check 'Replikasyon kuyruklari' -Status 'N/A' -Note 'Kopya durumu okunamadi.')
+            # AYIRT EDICI OLCUT 'Count -eq 0' DEGIL, ELDEKI HATA GOSTERGESIDIR.
+            # Okunamayan sunucu bir OLCUM BASARISIZLIGIDIR ve hukum uretir;
+            # 'N/A' bulgu tablosuna girmez ve cikis kodunu 0 birakirdi.
+            if ($failedServers.Count -gt 0) {
+                $cells = New-EDCopyFailureCells -Inventory $copyStatus
+                return @(New-EDRow -Module 'M31' -Check 'CopyQueueLength (en kotu)' -Unit 'log' `
+                    -Values $cells.Value -CellStatus $cells.Status `
+                    -Status (Get-EDWorstStatus @($cells.Status.Values)) `
+                    -Note ("HICBIR SUNUCUDAN kopya durumu alinamadi: {0}. Replikasyon kuyruklari hakkinda HICBIR SEY BILINMIYOR - 'kuyruk sifir' DEGILDIR." -f (Get-EDCopyStatusFailureNote -Inventory $copyStatus)))
+            }
+            return @(New-EDRow -Module 'M31' -Check 'CopyQueueLength (en kotu)' -Unit 'log' -Status 'N/A' `
+                -Note 'Sunucular okundu ancak hic veritabani kopyasi yok; replikasyon kuyrugu kavrami gecerli degil.')
         }
 
         # Aktif kopyanin kuyrugu yoktur; yalnizca pasif kopyalar degerlendirilir.
         $passive = @($copies | Where-Object { -not $_.IsActive })
         if ($passive.Count -eq 0) {
-            return @(New-EDRow -Module 'M31' -Check 'Replikasyon kuyruklari' -Status 'N/A' `
+            # BURADAKI N/A MESRUDUR: sunucular okundu, pasif kopya gercekten
+            # yok (tek uyeli DAG). Ama bir sunucu okunamadiysa "pasif kopya
+            # yok" cumlesi KURULAMAZ - okunmamis sunucuda pasif kopya olabilir.
+            if ($failedServers.Count -gt 0) {
+                $cells = New-EDCopyFailureCells -Inventory $copyStatus
+                return @(New-EDRow -Module 'M31' -Check 'CopyQueueLength (en kotu)' -Unit 'log' `
+                    -Values $cells.Value -CellStatus $cells.Status `
+                    -Status (Get-EDWorstStatus @($cells.Status.Values)) `
+                    -Note ("Okunabilen sunucularda pasif kopya yok, ancak {0} OKUNAMADI. 'Pasif kopya yok' hukmu bu kosum icin KURULAMAZ." -f (Get-EDCopyStatusFailureNote -Inventory $copyStatus)))
+            }
+            return @(New-EDRow -Module 'M31' -Check 'CopyQueueLength (en kotu)' -Unit 'log' -Status 'N/A' `
                 -Note 'Pasif kopya yok; replikasyon kuyrugu kavrami gecerli degil.')
         }
 
@@ -52,10 +73,14 @@ Register-EDModule @{
             # Okunamayan sunucu icin "pasif kopya yok" DENMEZ: ikisi de N/A
             # gorunur ama gerekceleri farklidir ve biri bir olcum eksikligidir.
             if ($server.Name -in $failedServers) {
+                # Hucrede deger 'N/A' KALIR (0 yazmak "kuyruk bos" yalani
+                # olurdu) ama HUKUM 'N/A' OLAMAZ: okunamamak bir olcum
+                # basarisizligidir ve satirin ozetine yansimak zorundadir.
+                $failState = Get-EDCopyStatusState -Inventory $copyStatus -Server $server.Name
                 $copyValues[$server.Name] = 'N/A'; $replayValues[$server.Name] = 'N/A'
                 $worstDbValues[$server.Name] = 'okunamadi'
-                $copyCellStatus[$server.Name] = 'N/A'; $replayCellStatus[$server.Name] = 'N/A'
-                $unreadable += $server.Name
+                $copyCellStatus[$server.Name] = $failState; $replayCellStatus[$server.Name] = $failState
+                $unreadable += ("{0} ({1})" -f $server.Name, $failState)
                 continue
             }
 
@@ -137,18 +162,23 @@ Register-EDModule @{
             $replayNote = ($laggedNotes -join ' | ') + '. ' + $replayNote
         }
         if ($unreadable.Count -gt 0) {
-            $note = ("Kopya durumu okunamayan sunucular: {0} (N/A degerleri 'kuyruk sifir' anlamina GELMEZ). " -f ($unreadable -join ', ')) + $note
+            $note = ("KOPYA DURUMU OKUNAMAYAN SUNUCULAR: {0} (N/A degerleri 'kuyruk sifir' anlamina GELMEZ). " -f ($unreadable -join ', ')) + $note
+            $replayNote = ("KOPYA DURUMU OKUNAMAYAN SUNUCULAR: {0}. " -f ($unreadable -join ', ')) + $replayNote
         }
         if ($problems.Count -gt 0) {
             $note = ($problems -join ' | ') + '. ' + $note
             $log.Warn("M31: $($problems -join ' | ')")
         }
 
+        # Hucre tablosu yalnizca topolojideki sunuculari tasir; envanterden
+        # okunamayan bir sunucu hucre uretmeden de kapsami eksiltir.
+        $failStates = @($failedServers | ForEach-Object { Get-EDCopyStatusState -Inventory $copyStatus -Server $_ })
+
         return @(
             New-EDRow -Module 'M31' -Check 'CopyQueueLength (en kotu)' -Values $copyValues -CellStatus $copyCellStatus `
-                -Unit 'log' -Status (Get-EDWorstStatus @($copyCellStatus.Values)) -Note $note
+                -Unit 'log' -Status (Get-EDWorstStatus @(@($copyCellStatus.Values) + $failStates)) -Note $note
             New-EDRow -Module 'M31' -Check 'ReplayQueueLength (en kotu)' -Values $replayValues -CellStatus $replayCellStatus `
-                -Unit 'log' -Status (Get-EDWorstStatus @($replayCellStatus.Values)) -Note $replayNote
+                -Unit 'log' -Status (Get-EDWorstStatus @(@($replayCellStatus.Values) + $failStates)) -Note $replayNote
             New-EDRow -Module 'M31' -Check 'En geride kalan DB' -Values $worstDbValues -Status 'OK'
         )
     }

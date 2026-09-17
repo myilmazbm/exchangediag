@@ -41,15 +41,22 @@ Register-EDModule @{
         $evidence = @()
         $anyData = $false
         $problems = @()
+        # "Sunucu okunamadi" (olcum basarisizligi, hukum uretir) ile "sayac
+        # sinifi yok / volume gorunmedi" (kavram gecerli degil, N/A) ayri
+        # tutulur; ikisi tek bir 'N/A'de birlesince yarim kalmis bir kosum
+        # cikis kodu 0 ile "temiz" gorunuyordu.
+        $unmeasured = @()
 
         foreach ($server in @($perf.Keys | Sort-Object)) {
             $entry = $perf[$server]
 
             if ($entry.Error) {
+                $state = [string](Get-EDProperty $entry 'State' 'ERROR')
                 foreach ($table in @($readValues, $writeValues, $queueValues, $worstVolumeValues, $volumeCountValues)) {
-                    $table[$server] = 'ERROR'
+                    $table[$server] = $state
                 }
-                $readCellStatus[$server] = 'ERROR'; $writeCellStatus[$server] = 'ERROR'
+                $readCellStatus[$server] = $state; $writeCellStatus[$server] = $state
+                $unmeasured += ("{0} ({1})" -f $server, $entry.Error)
                 continue
             }
 
@@ -152,15 +159,27 @@ Register-EDModule @{
         }
 
         if (-not $anyData) {
+            # Sunucu okunamadiysa hukum ZORUNLUDUR (M14/M15 deseni): 'N/A'
+            # bulgu tablosuna girmez ve cikis kodunu 0 birakir - yani hicbir
+            # diski olcememis bir kosum "disk saglikli" gibi okunurdu.
+            if ($unmeasured.Count -gt 0) {
+                return @(New-EDRow -Module 'M21' -Check 'Disk sec/Read p95 (en kotu volume)' -Values $readValues `
+                    -CellStatus $readCellStatus -Unit 'sn' -Status (Get-EDWorstStatus @($readCellStatus.Values)) -Patterns @('P4') `
+                    -Note ("HICBIR SUNUCUDAN LogicalDisk sayaci alinamadi - bu bir OLCUM BASARISIZLIGIDIR, 'disk saglikli' DEGILDIR. Okunamayan sunucular: {0}. WinRM erisimi gerekir." -f ($unmeasured -join ' | ')))
+            }
             return @(New-EDRow -Module 'M21' -Check 'Disk sec/Read p95 (en kotu volume)' -Values $readValues `
                 -CellStatus $readCellStatus -Unit 'sn' -Status 'N/A' -Patterns @('P4') `
-                -Note 'LogicalDisk sayaclari okunamadi (WinRM erisimi gerekir).')
+                -Note 'Sunucular okundu ama LogicalDisk sayac sinifi hicbir volume dondurmedi; bu surumde mevcut olmayabilir.')
         }
 
         $note = 'EN KOTU volume gosterilir, _Total degil: sekiz volume icinden yedisi saglikli biri bogulmussa _Total bunu gizler. Tamami: M21-disk-latency.csv'
         if ($problems.Count -gt 0) {
             $note = 'Esigi asan volume listesi -> ' + ($problems -join ' | ') + '. ' + $note
             $log.Warn("M21: $($problems -join ' | ')")
+        }
+        if ($unmeasured.Count -gt 0) {
+            $note = ("OLCULEMEYEN SUNUCULAR: {0}. Bu sunucularin diskleri hakkinda HICBIR SEY BILINMIYOR; 'N/A' hucresi 'saglikli' anlamina GELMEZ. " -f ($unmeasured -join ' | ')) + $note
+            $log.Warn("M21: olculemeyen sunucular - $($unmeasured -join ' | ')")
         }
 
         $overall = Get-EDWorstStatus @(@($readCellStatus.Values) + @($writeCellStatus.Values))

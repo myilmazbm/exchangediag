@@ -111,7 +111,20 @@ function New-EDTestPerfEntry {
 
     return [pscustomobject]@{
         Server = $Server; Stats = $stats; MissingClasses = @()
-        Error = $null; SampleCount = 20; AchievedInterval = 1.0
+        Error = $null; State = 'OK'; SampleCount = 20; AchievedInterval = 1.0
+    }
+}
+
+function New-EDTestPerfFailure {
+    <#
+        Sunucusu OKUNAMAMIS bir perf girdisi. Gercek Get-EDPerfSamples da
+        ayni sekilde State (TIMEOUT/ERROR) ve Error tasir; bu ikisi olmadan
+        "olculemedi" ile "olculdu, sayac yok" ayirt edilemez.
+    #>
+    param([string]$Server, [string]$State = 'ERROR', [string]$Message = 'sunucu yanit vermedi')
+    return [pscustomobject]@{
+        Server = $Server; Stats = @{}; MissingClasses = @()
+        Error = "$State $Message"; State = $State; SampleCount = 20; AchievedInterval = 1.0
     }
 }
 
@@ -294,6 +307,102 @@ Assert-Equal 'Disk saglikli iken P5 iddia edilmiyor' 'OK' $sharedRow.Status
 Assert-True 'Paylasimin tek basina hata olmadigi yaziyor' ($sharedRow.Note -like '*tek basina hata degildir*')
 
 # ---------------------------------------------------------------------------
+Write-Host "`n=== 5b. SIFIR ORNEKLE 'disk saglikli' DENEMEZ ===" -ForegroundColor Cyan
+
+# M20/M21 KOSTU ama paylasilan volume icin hic disk ornegi cikmadi
+# (ornekleme araliginda olculebilir I/O yok). Eski kod $diskStatus'u
+# yalnizca ($read -and $write) iken hesapliyor, aksi halde BOS STRING
+# birakiyordu; ozet bunu "1 volume birden fazla DB barindiriyor ancak
+# hicbirinde disk esigi asilmiyor" diye OLUMLU bir iddiaya ceviriyor ve
+# satiri OK birakarak P5'i susturuyordu. $perf'in TAMAMEN null oldugu
+# durum korunmustu, bu durum korunmamisti.
+$context = New-EDTestContext -Config $config -Servers $servers -Databases $sharedDatabases
+$context.Cache['VolumeInventory'] = @{
+    SRV1 = @([pscustomobject]@{ Name = 'E:\'; Label = 'Data'; CapacityGB = 500; FreeGB = 200; FreePct = 40 })
+}
+$noSampleEntry = New-EDTestPerfEntry -Server 'SRV1' -RpcLatencyMs 10 -Volumes @{
+    'E:' = @{ Read = 0.002; Write = 0.003; Queue = 0.3 }
+}
+# Ornekleme araliginda hic I/O olmadi: gecikme anahtarlari YOK.
+$noSampleEntry.Stats.disk['E:'].Remove('AvgDisksecPerRead')
+$noSampleEntry.Stats.disk['E:'].Remove('AvgDisksecPerWrite')
+$context.Cache['PerfSamples'] = @{ SRV1 = $noSampleEntry }
+
+$rows = @(& $m22.Run $context)
+$sharedRow = Get-EDTestRow $rows 'DB paylasan volume'
+Write-Host ("  Sonuc: {0} - {1}" -f $sharedRow.Status, $sharedRow.Note) -ForegroundColor Gray
+Assert-True 'Sifir ornekle "esik asilmiyor" DENMIYOR' `
+    ($sharedRow.Note -notlike '*hicbirinde disk esigi asilmiyor*') $sharedRow.Note
+Assert-True 'Ornek cikmadigi ACIKCA yaziyor' ($sharedRow.Note -like '*DISK ORNEGI CIKMADI*') $sharedRow.Note
+Assert-True 'Hangi volume oldugu yaziyor' ($sharedRow.Note -like '*E:\*') $sharedRow.Note
+Assert-True 'M20/M21 kostugu ama ornek olmadigi ayirt edildi' `
+    ($sharedRow.Note -notlike '*M20/M21 bu calistirmada kosmadi*') $sharedRow.Note
+Assert-Equal 'Olculemeyen paylasim OK ile ozetlenmiyor' 'N/A' $sharedRow.Status
+Assert-Equal 'Hucre de hukumsuz' 'N/A' $sharedRow.CellStatus['SRV1']
+
+# YARIM OLCUMDEN DE "saglikli" CIKARILMAZ: yalnizca okuma olculduyse
+# yazma hakkinda hukum yoktur.
+$halfEntry = New-EDTestPerfEntry -Server 'SRV1' -RpcLatencyMs 10 -Volumes @{
+    'E:' = @{ Read = 0.002; Write = 0.003; Queue = 0.3 }
+}
+$halfEntry.Stats.disk['E:'].Remove('AvgDisksecPerWrite')
+$context = New-EDTestContext -Config $config -Servers $servers -Databases $sharedDatabases
+$context.Cache['VolumeInventory'] = @{
+    SRV1 = @([pscustomobject]@{ Name = 'E:\'; Label = 'Data'; CapacityGB = 500; FreeGB = 200; FreePct = 40 })
+}
+$context.Cache['PerfSamples'] = @{ SRV1 = $halfEntry }
+$rows = @(& $m22.Run $context)
+$sharedRow = Get-EDTestRow $rows 'DB paylasan volume'
+Assert-Equal 'Yarim olculen volume OK sayilmiyor' 'N/A' $sharedRow.CellStatus['SRV1']
+
+# Ama yarim olcum bir ESIK ASIYORSA bulgu DURUR: eksik veri, var olan
+# bulguyu susturmak icin bahane degildir.
+$halfBadEntry = New-EDTestPerfEntry -Server 'SRV1' -RpcLatencyMs 10 -Volumes @{
+    'E:' = @{ Read = 0.080; Write = 0.003; Queue = 0.3 }
+}
+$halfBadEntry.Stats.disk['E:'].Remove('AvgDisksecPerWrite')
+$context = New-EDTestContext -Config $config -Servers $servers -Databases $sharedDatabases
+$context.Cache['VolumeInventory'] = @{
+    SRV1 = @([pscustomobject]@{ Name = 'E:\'; Label = 'Data'; CapacityGB = 500; FreeGB = 200; FreePct = 40 })
+}
+$context.Cache['PerfSamples'] = @{ SRV1 = $halfBadEntry }
+$rows = @(& $m22.Run $context)
+$sharedRow = Get-EDTestRow $rows 'DB paylasan volume'
+Assert-Equal 'Yarim olcum esik asiyorsa P5 kurulur' 'WARN' $sharedRow.Status
+Assert-True 'P5 orgusu adlandirildi' ($sharedRow.Note -like '*ORGU P5*') $sharedRow.Note
+
+# BIR SUNUCU OLCULDU, DIGERI OLCULEMEDI -> SATIR 'OK' OLAMAZ.
+# Get-EDWorstStatus 'N/A'yi hukumsuzluk sayar ve @('OK','N/A') icin 'OK'
+# doner; bu satirda tam tersi gerekir, cunku olculememis bir paylasilan
+# volume baska bir volume'un temiz cikmasiyla telafi edilmez.
+$twoServers2 = @((New-EDTestServer 'SRV1'), (New-EDTestServer 'SRV2'))
+$mixedDatabases = @($sharedDatabases) + @(
+    [pscustomobject]@{ Name = 'DB03'; Server = 'SRV2'; MountedOnServer = 'SRV2'; Mounted = $true; Copies = @('SRV2')
+                       EdbFilePath = 'E:\DB03\DB03.edb'; LogFolderPath = 'E:\DB03\Logs'; CircularLogging = $false
+                       LastFullBackup = $null; Size = ''; Whitespace = ''; IsRecovery = $false }
+    [pscustomobject]@{ Name = 'DB04'; Server = 'SRV2'; MountedOnServer = 'SRV2'; Mounted = $true; Copies = @('SRV2')
+                       EdbFilePath = 'E:\DB04\DB04.edb'; LogFolderPath = 'E:\DB04\Logs'; CircularLogging = $false
+                       LastFullBackup = $null; Size = ''; Whitespace = ''; IsRecovery = $false }
+)
+$mixedVolume = @([pscustomobject]@{ Name = 'E:\'; Label = 'Data'; CapacityGB = 500; FreeGB = 200; FreePct = 40 })
+$context = New-EDTestContext -Config $config -Servers $twoServers2 -Databases $mixedDatabases
+$context.Cache['VolumeInventory'] = @{ SRV1 = $mixedVolume; SRV2 = $mixedVolume }
+$srv2Entry = New-EDTestPerfEntry -Server 'SRV2' -RpcLatencyMs 10 -Volumes @{
+    'E:' = @{ Read = 0.002; Write = 0.003; Queue = 0.3 }
+}
+$srv2Entry.Stats.disk['E:'].Remove('AvgDisksecPerRead')
+$srv2Entry.Stats.disk['E:'].Remove('AvgDisksecPerWrite')
+$context.Cache['PerfSamples'] = @{
+    SRV1 = New-EDTestPerfEntry -Server 'SRV1' -RpcLatencyMs 10 -Volumes @{ 'E:' = @{ Read = 0.002; Write = 0.003; Queue = 0.3 } }
+    SRV2 = $srv2Entry
+}
+$rows = @(& $m22.Run $context)
+$sharedRow = Get-EDTestRow $rows 'DB paylasan volume'
+Assert-Equal 'Olculen sunucu OK' 'OK' $sharedRow.CellStatus['SRV1']
+Assert-Equal 'Olculemeyen sunucu N/A' 'N/A' $sharedRow.CellStatus['SRV2']
+Assert-Equal 'Kismi olcum satiri OK ile ozetlenmiyor' 'N/A' $sharedRow.Status
+
+# ---------------------------------------------------------------------------
 Write-Host "`n=== 6. M22: baglama noktasi surucu harfiyle karistirilmamali ===" -ForegroundColor Cyan
 
 $mountDatabases = @(
@@ -350,17 +459,45 @@ $context.Cache['PerfSamples'] = @{
 }
 $rows = @(& $m20.Run $context)
 Assert-Equal 'Sayac yoksa M20 N/A' 'N/A' $rows[0].Status
+Assert-True 'Sunucunun OKUNDUGU ama sayacin olmadigi yaziyor' `
+    ($rows[0].Note -like '*sayac sinifi bulunamadi*') $rows[0].Note
 
+# ---------------------------------------------------------------------------
+Write-Host "`n=== 7b. SUNUCU OKUNAMADI: 'N/A' DEGIL HUKUM ===" -ForegroundColor Cyan
+
+# IKI AYRI N/A KARISTIRILIYORDU.
+#   - Sayac sinifi yok        -> kavram gecerli degil, N/A DOGRUDUR
+#   - Sunucudan veri alinamadi-> OLCUM BASARISIZLIGI, hukum ZORUNLUDUR
+# Ikincisi de 'N/A' donunce satir bulgu tablosuna girmiyor (Core\Report.ps1)
+# ve cikis kodu eslemesinde hicbir kovaya dusmuyordu: hicbir diski
+# olcememis bir kosum "Bulgular (0)" ve kod 0 ile bitiyordu.
 $context = New-EDTestContext -Config $config -Servers $servers -Databases $databases
-$context.Cache['PerfSamples'] = @{
-    SRV1 = [pscustomobject]@{
-        Server = 'SRV1'; Stats = @{}; MissingClasses = @()
-        Error = 'TIMEOUT sunucu yanit vermedi'; SampleCount = 20; AchievedInterval = 1.0
-    }
-}
+$context.Cache['PerfSamples'] = @{ SRV1 = (New-EDTestPerfFailure -Server 'SRV1' -State 'TIMEOUT') }
+
 $rows = @(& $m21.Run $context)
-Assert-Equal 'Sunucu yanit vermezse M21 N/A' 'N/A' $rows[0].Status
-Assert-Equal 'Hucre ERROR isaretlendi' 'ERROR' $rows[0].CellStatus['SRV1']
+Assert-True 'Sunucu yanit vermezse M21 N/A DONMEZ' ($rows[0].Status -notin @('N/A', 'OK')) $rows[0].Status
+Assert-Equal 'Hucre yurutucu durumunu tasiyor' 'TIMEOUT' $rows[0].CellStatus['SRV1']
+Assert-True 'Okunamayan sunucu notta ADIYLA geciyor' ($rows[0].Note -like '*SRV1*') $rows[0].Note
+Assert-True 'Not "disk saglikli" demiyor' ($rows[0].Note -like "*OLCUM BASARISIZLIGIDIR*") $rows[0].Note
+
+$rows = @(& $m20.Run $context)
+Assert-True 'Sunucu yanit vermezse M20 N/A DONMEZ' ($rows[0].Status -notin @('N/A', 'OK')) $rows[0].Status
+Assert-Equal 'M20 hucresi yurutucu durumunu tasiyor' 'TIMEOUT' $rows[0].CellStatus['SRV1']
+
+# Kismi kapsam: bir sunucu okundu, digeri okunamadi. Tablonun geri kalanina
+# bakip "temiz" demek, okunmamis sunucuyu sagliklilarin arasina saymaktir.
+$twoServers = @((New-EDTestServer 'SRV1'), (New-EDTestServer 'SRV2'))
+$context = New-EDTestContext -Config $config -Servers $twoServers -Databases $databases
+$context.Cache['PerfSamples'] = @{
+    SRV1 = New-EDTestPerfEntry -Server 'SRV1' -RpcLatencyMs 5 -Volumes @{ 'D:' = @{ Read = 0.002; Write = 0.002; Queue = 0.2 } }
+    SRV2 = (New-EDTestPerfFailure -Server 'SRV2' -State 'ERROR')
+}
+$rows = @(& $m20.Run $context)
+$rpcRow = Get-EDTestRow $rows 'RPC Average Latency p95'
+Assert-Equal 'Kismi kapsam: saglikli sunucu OK kaldi' 'OK' $rpcRow.CellStatus['SRV1']
+Assert-Equal 'Kismi kapsam: okunamayan sunucu ERROR' 'ERROR' $rpcRow.CellStatus['SRV2']
+Assert-Equal 'Kismi kapsam satiri ERROR ile ozetlenir' 'ERROR' $rpcRow.Status
+Assert-True 'Olculemeyen sunucu notta' ($rpcRow.Note -like '*OLCULEMEYEN SUNUCULAR*SRV2*') $rpcRow.Note
 
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Disk olculemedigi zaman (0 DEGIL N/A) ===" -ForegroundColor Cyan

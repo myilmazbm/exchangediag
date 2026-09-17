@@ -254,11 +254,16 @@ function Get-EDPerfSamples {
             Stats            = @{}     # alias -> instance -> property -> Stats
             MissingClasses   = @()
             Error            = $null
+            # Hucreye yazilacak etiket. "Sayac bu surumde yok" (N/A) ile
+            # "sunucu okunamadi" (ERROR/TIMEOUT) ayni sey degildir; ikincisi
+            # bir OLCUM BASARISIZLIGIDIR ve hukum uretmek zorundadir.
+            State            = 'OK'
             SampleCount      = $sampleCount
             AchievedInterval = [double]$intervalSeconds
         }
 
         if (-not $result.Succeeded -or $result.Output.Count -eq 0) {
+            $entry.State = $(if ($result.Succeeded) { 'ERROR' } else { $result.State })
             $entry.Error = "$($result.State) $($result.Error)"
             $log.Warn("Perf/$($result.Key) : $($entry.Error)")
             $perServer[$result.Key] = $entry

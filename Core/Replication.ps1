@@ -29,10 +29,18 @@ function Get-EDCopyStatus {
 
     $copies = @()
     $failed = @()
+    # Okunamayan sunucunun YALNIZCA adini tasimak yetmiyordu: modul tarafi
+    # "zaman asimi" ile "erisim reddedildi" arasindaki farki goremedigi icin
+    # hepsini ayni tek hucreye ('N/A') yaziyordu. Oysa M14/M15 deseni
+    # result.State'i dogrudan hucreye tasir ve hukum oradan cikar.
+    $failures = @()
     if ($tasks.Count -gt 0) {
         foreach ($result in $Context.Executor.RunExchange([ExchangeDiag.ExecTask[]]$tasks)) {
             if (-not $result.Succeeded) {
                 $failed += $result.Key
+                $failures += [pscustomobject]@{
+                    Server = $result.Key; State = $result.State; Error = [string]$result.Error
+                }
                 $log.Warn("CopyStatus/$($result.Key) : $($result.State) - $($result.Error)")
                 continue
             }
@@ -70,9 +78,83 @@ function Get-EDCopyStatus {
         }
     }
 
-    $inventory = [pscustomobject]@{ Copies = @($copies); FailedServers = @($failed) }
+    $inventory = [pscustomobject]@{
+        Copies = @($copies); FailedServers = @($failed); Failures = @($failures)
+    }
     $Context.Cache['CopyStatus'] = $inventory
     return $inventory
+}
+
+function Get-EDCopyStatusState {
+<#
+    .SYNOPSIS
+        Okunamayan bir sunucunun hucresine yazilacak durum etiketini dondurur.
+
+    .DESCRIPTION
+        "OLCULEMEDI" ile "OLCULDU, SORUN YOK" ayni hucrede gorunemez. M30/M31/
+        M32/M26 eskiden okunamayan sunucuya 'N/A' yaziyordu; 'N/A' bir hukum
+        DEGILDIR, bulgu tablosuna girmez ve cikis koduna dokunmaz - yani
+        oturumu dusen bir kosum "Bulgular (0)" ve kod 0 ile bitiyordu.
+        Dogru etiket yurutucunun kendi durumudur (TIMEOUT / ERROR), tipki
+        M14 ve M15'te oldugu gibi.
+
+        Failures alani olmayan (eski) bir envanter gelirse - ornegin testin
+        elle kurdugu bir onbellek - temkinli yon secilir: ERROR.
+#>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Inventory, [Parameter(Mandatory)][string]$Server)
+
+    foreach ($failure in @(Get-EDProperty $Inventory 'Failures' @())) {
+        if ([string](Get-EDProperty $failure 'Server') -eq $Server) {
+            $state = [string](Get-EDProperty $failure 'State')
+            if ($state) { return $state }
+        }
+    }
+    return 'ERROR'
+}
+
+function New-EDCopyFailureCells {
+<#
+    .SYNOPSIS
+        Okunamayan sunuculardan hucre tablolari uretir (deger + hukum).
+
+    .DESCRIPTION
+        HICBIR SUNUCU OKUNAMASA BILE SATIR HUCRESIZ KALMAZ. Hucresiz bir
+        satir ozet tablosunda bombos gorunur; operator hangi sunucunun
+        okunamadigini gormez ve kosum sonundaki 'CORE / Eksik kapsam'
+        satiri de sunucu adlarini toplayamaz.
+#>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Inventory)
+
+    $values = @{}
+    $statuses = @{}
+    foreach ($server in @(Get-EDProperty $Inventory 'FailedServers' @())) {
+        $values[$server] = 'okunamadi'
+        $statuses[$server] = Get-EDCopyStatusState -Inventory $Inventory -Server $server
+    }
+    return [pscustomobject]@{ Value = $values; Status = $statuses }
+}
+
+function Get-EDCopyStatusFailureNote {
+    <# Okunamayan sunuculari "ADI (DURUM: hata)" bicimiyle listeler. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Inventory)
+
+    $failed = @(Get-EDProperty $Inventory 'FailedServers' @())
+    if ($failed.Count -eq 0) { return '' }
+
+    $parts = foreach ($server in $failed) {
+        $state = Get-EDCopyStatusState -Inventory $Inventory -Server $server
+        $detail = ''
+        foreach ($failure in @(Get-EDProperty $Inventory 'Failures' @())) {
+            if ([string](Get-EDProperty $failure 'Server') -eq $server) {
+                $detail = [string](Get-EDProperty $failure 'Error')
+            }
+        }
+        if ($detail) { "{0} ({1}: {2})" -f $server, $state, $detail } else { "{0} ({1})" -f $server, $state }
+    }
+    return (@($parts) -join ', ')
 }
 
 function Get-EDSiteOfServer {
