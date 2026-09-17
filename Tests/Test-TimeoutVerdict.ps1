@@ -185,6 +185,109 @@ Assert-True 'Tum sunucular zaman asiminda satir OK degil' ($allDepthRow.Status -
 Assert-Equal 'Her iki hucre de TIMEOUT' 'TIMEOUT,TIMEOUT' `
     ((@('EXC01', 'EXC02') | ForEach-Object { $allDepthRow.Values[$_] }) -join ',')
 
+# ===========================================================================
+Write-Host "`n=== 7. Siralamanin GERI KALANI: bos kume, tanimsiz durum, PASSIVE ===" -ForegroundColor Cyan
+
+# Bolum 2 siralamanin yalnizca TIMEOUT'a bakan yuzunu sabitliyordu. Get-EDWorstStatus
+# ise aracin HER satir basligini ureten yerdir ve icinde uc ayri "sessiz OK"
+# savunmasi vardir. Hicbiri sinanmiyordu.
+
+# --- 7a. OLCUM YOKLUGU BIR SAGLIK BEYANI DEGILDIR ---
+# Bos girdi bir zamanlar 'OK' donuyordu: hicbir sey olcmemis bir modul sure
+# tablosunda "0 satir / OK" diye goruluyor, operator "kontrol edildi, sorun
+# yok" diye okuyordu. Dogru cevap N/A'dir.
+Assert-Equal 'bos dizi -> N/A'            'N/A' (Get-EDWorstStatus @())
+Assert-Equal 'null girdi -> N/A'          'N/A' (Get-EDWorstStatus $null)
+Assert-Equal 'arguman hic yok -> N/A'     'N/A' (Get-EDWorstStatus)
+Assert-Equal 'yalnizca bos metinler -> N/A' 'N/A' (Get-EDWorstStatus @('', '', $null))
+# Bos metinler ATLANIR ama kumeyi GECERSIZ KILMAZ: yanindaki gercek hukum durur.
+Assert-Equal 'bos metin + OK -> OK'       'OK'   (Get-EDWorstStatus @('', 'OK'))
+Assert-Equal 'bos metin + FAIL -> FAIL'   'FAIL' (Get-EDWorstStatus @('FAIL', '', $null))
+
+# --- 7b. TANIMSIZ DURUM, HUKUMSUZLUK DEGILDIR ---
+# Siralama tablosunda olmayan bir metin (yazim hatasi, ya da hucre degeriyle
+# karistirilmis bir sayi) sessizce ATILIYORDU; geriye tek hukum kalmayinca
+# sonuc yine 'OK' oluyordu. Burada throw EDILMEZ - bu islev rapor asamasinda,
+# modullerin try/catch'i DISINDA da cagrilir ve patlamak tum ciktiyi yok eder.
+# Bunun yerine "hukum verilemedi" ERROR olarak GORUNUR kilinir.
+Assert-Equal 'tanimsiz durum -> ERROR'          'ERROR' (Get-EDWorstStatus @('KRITIK'))
+Assert-Equal 'yazim hatasi -> ERROR'            'ERROR' (Get-EDWorstStatus @('WARNING'))
+Assert-Equal 'hucre degeri sizmis -> ERROR'     'ERROR' (Get-EDWorstStatus @('287.4'))
+Assert-Equal 'tanimsiz + OK -> ERROR (OK yutmaz)' 'ERROR' (Get-EDWorstStatus @('OK', 'KRITIK'))
+Assert-Equal 'tanimsiz + WARN -> ERROR'         'ERROR' (Get-EDWorstStatus @('WARN', 'KRITIK'))
+# ...ama ERROR tavanin kendisi degildir: FAIL yine ustune cikar.
+Assert-Equal 'tanimsiz + FAIL -> FAIL'          'FAIL'  (Get-EDWorstStatus @('KRITIK', 'FAIL'))
+# Tanimsiz durum bir HUKUMDUR: yanindaki N/A onu bastiramaz.
+Assert-Equal 'tanimsiz + N/A -> ERROR'          'ERROR' (Get-EDWorstStatus @('N/A', 'KRITIK'))
+
+# --- 7c. PASSIVE: hukum degil, "burada gecerli degil" ---
+# N/A ("olculemedi") ve PASSIVE ("pasif site, dusuk metrik NORMAL") ayni
+# rutbeyi paylasir ama BIRBIRININ YERINE GECMEZ. Pasif site sunucusu FAIL
+# sayilamaz (brief Bolum 2); buna karsilik bir satirda hem olculemeyen hem
+# pasif hucre varsa operatore soylenmesi gereken OLCULEMEDIGIDIR - pasiflik
+# beklenen bir durumdur, olcum eksigi degildir.
+Assert-Equal 'tek basina PASSIVE'          'PASSIVE' (Get-EDWorstStatus @('PASSIVE'))
+Assert-Equal 'PASSIVE + PASSIVE'           'PASSIVE' (Get-EDWorstStatus @('PASSIVE', 'PASSIVE'))
+Assert-Equal 'PASSIVE + N/A -> N/A'        'N/A'     (Get-EDWorstStatus @('PASSIVE', 'N/A'))
+Assert-Equal 'sira duyarsiz: N/A + PASSIVE -> N/A' 'N/A' (Get-EDWorstStatus @('N/A', 'PASSIVE'))
+
+# GERCEK HUKUM HER ZAMAN KAZANIR - OK BILE. Calismis bir kontrol, yanindaki
+# olculemeyen hucre yuzunden "hic calismamis" gibi gorunmemelidir.
+Assert-Equal 'PASSIVE + OK -> OK'          'OK'   (Get-EDWorstStatus @('PASSIVE', 'OK'))
+Assert-Equal 'N/A + OK -> OK'              'OK'   (Get-EDWorstStatus @('N/A', 'OK'))
+Assert-Equal 'PASSIVE + WARN -> WARN'      'WARN' (Get-EDWorstStatus @('PASSIVE', 'WARN'))
+Assert-Equal 'PASSIVE + FAIL -> FAIL'      'FAIL' (Get-EDWorstStatus @('PASSIVE', 'FAIL'))
+# ...ve bunun bedeli bilinclidir: pasif site etiketi satir basliginda KAYBOLUR,
+# yalnizca hucrede kalir. Tipki TIMEOUT gibi.
+Assert-Equal 'PASSIVE + TIMEOUT -> TIMEOUT' 'TIMEOUT' (Get-EDWorstStatus @('PASSIVE', 'TIMEOUT'))
+
+# --- 7d. Merdivenin TAMAMI, komsu ciftler halinde ---
+# OK < N/A/PASSIVE < TIMEOUT < WARN < ERROR < FAIL. Her komsu cift ayri ayri
+# iddia edilir; boylece bir rutbe degistiginde hangi basamagin kaydigi
+# dogrudan okunur.
+Assert-Equal 'merdiven: N/A < TIMEOUT'   'TIMEOUT' (Get-EDWorstStatus @('N/A', 'TIMEOUT'))
+Assert-Equal 'merdiven: TIMEOUT < WARN'  'WARN'    (Get-EDWorstStatus @('TIMEOUT', 'WARN'))
+Assert-Equal 'merdiven: WARN < ERROR'    'ERROR'   (Get-EDWorstStatus @('WARN', 'ERROR'))
+Assert-Equal 'merdiven: ERROR < FAIL'    'FAIL'    (Get-EDWorstStatus @('ERROR', 'FAIL'))
+
+# MERDIVENIN ILK BASAMAGI GOZLEMLENEMEZ - ve bu bilinclidir.
+#
+# Rutbe tablosunda N/A (1), OK'in (0) USTUNDEDIR; brief Bolum 4'un
+# "OK < N/A/PASSIVE < TIMEOUT < ..." dizilisi de boyle yazar. Ama ayni ilke
+# N/A ve PASSIVE'in "satir ozetini ELE GECIRMEDIGINI" de soyler ve kod bu
+# ikinci kurali ONCE uygular: gercek bir hukum varsa rutbe karsilastirmasina
+# hic girilmez. Sonuc, tablodaki sayilarin tersidir ve dogrusu budur -
+# 39 sunucudan biri okunamadi diye calisip TEMIZ CIKMIS bir kontrolu
+# "olculmedi" diye raporlamak, kontrolu hic yapmamakla ayni sey olurdu.
+#
+# Yani rutbe sayilari YALNIZCA hukumler arasinda ve hukumsuzler arasinda
+# anlamlidir; ikisinin ARASINDA degil.
+Assert-Equal 'merdiven: OK vs N/A -> OK (rutbe tablosunun TERSI)' 'OK' (Get-EDWorstStatus @('OK', 'N/A'))
+Assert-Equal 'merdiven: OK vs PASSIVE -> OK'                      'OK' (Get-EDWorstStatus @('OK', 'PASSIVE'))
+
+# --- 7e. Karisik kumeler: sirasi karistirilmis tam alfabe ---
+$hepsi = @('WARN', 'OK', 'FAIL', 'PASSIVE', 'TIMEOUT', 'N/A', 'ERROR')
+Assert-Equal 'tum durumlar birlikte -> FAIL' 'FAIL' (Get-EDWorstStatus $hepsi)
+Assert-Equal 'FAIL cikarilinca -> ERROR' 'ERROR' (Get-EDWorstStatus @($hepsi | Where-Object { $_ -ne 'FAIL' }))
+Assert-Equal 'FAIL+ERROR cikarilinca -> WARN' 'WARN' `
+    (Get-EDWorstStatus @($hepsi | Where-Object { $_ -notin @('FAIL', 'ERROR') }))
+Assert-Equal 'geriye OK/N/A/PASSIVE/TIMEOUT kalinca -> TIMEOUT' 'TIMEOUT' `
+    (Get-EDWorstStatus @('OK', 'N/A', 'PASSIVE', 'TIMEOUT'))
+Assert-Equal 'geriye OK/N/A/PASSIVE kalinca -> OK' 'OK' (Get-EDWorstStatus @('OK', 'N/A', 'PASSIVE'))
+
+# Sonuc SIRADAN BAGIMSIZ olmali: hashtable/dizi sirasi hukmu degistirirse
+# ayni rapor iki kosumda iki farkli baslik uretebilir.
+$duzen = @('OK', 'N/A', 'PASSIVE', 'TIMEOUT', 'WARN', 'ERROR', 'FAIL')
+$tersi = @('FAIL', 'ERROR', 'WARN', 'TIMEOUT', 'PASSIVE', 'N/A', 'OK')
+Assert-Equal 'siralama girdinin sirasindan bagimsiz' `
+    (Get-EDWorstStatus $duzen) (Get-EDWorstStatus $tersi)
+
+# Gercekci bir satir: 40 sunuculu bir ortamda tek bir WARN kaybolmamali.
+$kalabalik = @(1..39 | ForEach-Object { 'OK' }) + @('WARN')
+Assert-Equal 'kalabalik kumede tek WARN kaybolmuyor' 'WARN' (Get-EDWorstStatus $kalabalik)
+$kalabalikNA = @(1..39 | ForEach-Object { 'N/A' }) + @('OK')
+Assert-Equal 'tek OK, 39 N/A arasinda kayboluyor mu' 'OK' (Get-EDWorstStatus $kalabalikNA)
+
 # ---------------------------------------------------------------------------
 if (Test-Path -LiteralPath $script:OutputDir) { Remove-Item -LiteralPath $script:OutputDir -Recurse -Force }
 
