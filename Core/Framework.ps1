@@ -399,6 +399,33 @@ function Get-EDStatus {
           warn > fail  -> DUSUK kotu   (orn. certExpiryDays 30/7)
         Bu sayede thresholds.json'a fazladan "direction" alani eklemek
         gerekmez; kullanicinin yazdigi iki sayi kendini anlatir.
+
+        SINIR SEMANTIGI: ESIK DAHILDIR.
+        Esigin TAM uzerindeki deger HER IKI YONDE DE o kademeye GIRER:
+
+            yuksek kotu (warn=50, fail=100):  >= 100 -> FAIL,  >= 50 -> WARN
+            dusuk  kotu (warn=30, fail=7):    <=   7 -> FAIL,  <= 30 -> WARN
+
+        Yani "fail esigine ULASMAK" FAIL demektir; asmak gerekmez.
+        thresholds.json'a 7 yazan operator "7 gun kala bu artik bir arizadir"
+        demistir - 6.99'u beklemek o cumleyi bir gun geciktirirdi ve sertifika
+        suresi gibi TAM SAYIYA oturan olcumlerde esik fiilen bir gun kayardi.
+        Ayni gerekce diskFreePercent=10 ve memoryFreePercent=1 icin de gecerli.
+
+        Asil sart TUTARLILIKTIR: bir bacagin dahil digerinin haric olmasi,
+        ayni thresholds.json satirinin YONUNE gore farkli anlam tasimasi
+        olurdu. Bu simetri bir sure YAZISIZ ve SINANMAMIS kaldi - olculmus
+        mutasyon, dusuk-kotu bacaktaki '-le'yi '-lt' yapmanin tum test
+        paketini YESIL biraktigini gosterdi (tam 7 gunluk sertifika FAIL
+        yerine WARN). Iddialar artik Tests\Test-VerdictCore.ps1 Bolum 1-3'te;
+        buradaki karsilastirma operatorleri degistirilirse o bolum kirmizi
+        olur ve ikisi BIRLIKTE guncellenmelidir.
+
+        WARN == FAIL: iki sayi esitken yon CIKARILAMAZ. Bugunku kod bu durumda
+        yuksek-kotu dalina duser ve WARN bandi genisligi sifir olur. Dusuk-kotu
+        bir olcume esit esik yazan operator (ornegin diskFreePercent 10/10) bunu
+        beklemez; davranis Test-VerdictCore.ps1 Bolum 4'te sabitlenmistir ama
+        savunulmaz - acik hata vermek daha dogru olurdu.
 #>
     [CmdletBinding()]
     param(
@@ -430,12 +457,22 @@ function Get-EDStatus {
         throw "Bozuk esik '$ThresholdName': 'warn' ve 'fail' sayisal olmali (thresholds.json)."
     }
 
+    # ESIK DAHILDIR (bkz. yukaridaki SINIR SEMANTIGI). Iki bacaktaki
+    # karsilastirmalar birbirinin AYNASIDIR: '-ge'/'-le' cifti esige ULASMAYI
+    # o kademeye girmek sayar. Birini '-gt'/'-lt' yapmak yalnizca o yondeki
+    # esigi bir adim kaydirmaz; iki bacagi ASIMETRIK hale getirir ve ayni
+    # thresholds.json satiri yonune gore farkli anlam tasimaya baslar.
     if ($warn -le $fail) {
+        # YUKSEK KOTU. '-le' burada YON SECIMIDIR, esik karsilastirmasi degil:
+        # warn == fail durumunda yuksek-kotu varsayilir ve WARN bandi kalmaz.
         if ($numeric -ge $fail) { return 'FAIL' }
         if ($numeric -ge $warn) { return 'WARN' }
         return 'OK'
     }
     else {
+        # DUSUK KOTU. Mutasyonun sessizce gectigi bacak burasiydi: '-le' -> '-lt'
+        # tam 7 gunluk sertifikayi, tam %10 bos diski ve tam %1 bos bellegi
+        # FAIL yerine WARN yapardi ve hicbir test kirmizi olmazdi.
         if ($numeric -le $fail) { return 'FAIL' }
         if ($numeric -le $warn) { return 'WARN' }
         return 'OK'
