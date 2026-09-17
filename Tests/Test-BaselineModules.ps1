@@ -148,10 +148,16 @@ Assert-Equal 'Atanmis sertifika yoksa N/A' 'N/A' (Get-EDTestRow $rows 'En yakin 
 Write-Host "`n=== 2. M05 OS / kaynak ===" -ForegroundColor Cyan
 
 function New-OsContext {
-    param([double]$UptimeHours, [int]$TotalMb = 24000, [int]$FreeMb = 10000, [double]$CpuP95 = 5.0)
+    param(
+        [double]$UptimeHours, [int]$TotalMb = 24000, [int]$FreeMb = 10000, [double]$CpuP95 = 5.0,
+        # Varsayilan pagefile SAGLIKLIDIR (3584 MB'in 1000'i = %28). Bellek
+        # uyarisinin BAGLAC oldugunu gosterebilmek icin bu iki deger testten
+        # verilebilir olmali.
+        $PageTotalMb = 3584, $PageUsedMb = 1000
+    )
     $script:OsRow = [pscustomobject]@{
         TotalMemoryMb = $TotalMb; FreeMemoryMb = $FreeMb; LogicalCpus = 8
-        UptimeHours = $UptimeHours; PageFileTotalMb = 3584; PageFileUsedMb = 1000; PageFilePeakMb = 1100
+        UptimeHours = $UptimeHours; PageFileTotalMb = $PageTotalMb; PageFileUsedMb = $PageUsedMb; PageFilePeakMb = 1100
         OsCaption = 'Windows Server 2025'; NetRelease = 533509; NetVersion = '4.8.09221'; ReadError = ''
     }
     $mock = [pscustomobject]@{ ExchangeConnection = 'mock'; Parallelism = 1 }
@@ -177,13 +183,33 @@ function New-OsContext {
     return $context
 }
 
-# 2a. Calisma suresi BAGLAMDIR: yakin zamanda yeniden baslatilmis sunucu
+# 2a. Calisma suresi BAGLAMDIR: yakin zamanda yeniden baslatilmis sunucu.
+# HUKUM URETMEZ: WARN "burada bir hata var" demektir ve modulun kendi basligi
+# bunun bir hata olmadiginda israrlidir. Ustelik WARN, -CompareWith'te her
+# yeniden baslatmadan sonra "gerileme" olarak gorunuyordu.
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 0.5))
 $uptimeRow = Get-EDTestRow $rows 'Calisma suresi'
-Assert-Equal 'Yakin reboot WARN' 'WARN' $uptimeRow.Status
+Assert-Equal 'Yakin reboot HUKUM URETMEDI (WARN degil)' 'N/A' $uptimeRow.Status
+Assert-True 'Uptime satiri WARN/FAIL olamaz' ($uptimeRow.Status -notin @('WARN', 'FAIL')) $uptimeRow.Status
 Assert-Equal 'Saat olarak gosterildi' ('{0:N1} saat' -f 0.5) $uptimeRow.Values['MBX1']
-Assert-True 'Diger bulgularin bu bilgiyle okunmasi soylendi' ($uptimeRow.Note -like '*Diger modullerin bulgularini bu bilgiyle okuyun*') $uptimeRow.Note
+Assert-True 'Deger yine de yazildi (hukum yok demek olcum yok demek degil)' `
+    ($uptimeRow.Values['MBX1'] -like '*saat*') $uptimeRow.Values['MBX1']
+Assert-True 'Diger bulgularin bu bilgiyle okunmasi soylendi' ($uptimeRow.Note -like '*Diger modullerin*bu bilgiyle okuyun*') $uptimeRow.Note
 Assert-True 'Kuyrugun dolu olmasinin normal olabilecegi yazildi' ($uptimeRow.Note -like '*NORMAL olabilir*')
+
+# 2a-2. BAGLAM PENCERESI 2 SAAT DEGIL 24 SAAT.
+# 3 saat once yeniden baslatilmis bir sunucuda M10-M14 hala reboot sonrasi
+# birikimi okur; eski 2 saatlik pencerede operator bunu soyleyen tek satiri
+# hic gormuyordu.
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 3))
+$uptimeRow = Get-EDTestRow $rows 'Calisma suresi'
+Assert-True '3 saat once reboot BAGLAM olarak bildirildi' ($uptimeRow.Note -like '*YENIDEN BASLATILMIS*') $uptimeRow.Note
+Assert-True '3 saatlik sunucu icin de hukum uretilmedi' ($uptimeRow.Status -notin @('WARN', 'FAIL')) $uptimeRow.Status
+
+# 2a-3. Pencerenin ustunde kalan sunucu icin baglam banneri YOKTUR
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 30))
+$uptimeRow = Get-EDTestRow $rows 'Calisma suresi'
+Assert-True '30 saat sonrasi banner uretmedi' ($uptimeRow.Note -notlike '*YENIDEN BASLATILMIS*') $uptimeRow.Note
 
 # 2b. Uzun calisma suresi OK ve gun olarak gosterilir
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 72))
@@ -204,8 +230,35 @@ $rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 6000)
 $memoryRow = Get-EDTestRow $rows 'Bellek'
 Assert-Equal '%25 bos bellek OK' 'OK' $memoryRow.Status
 Assert-True 'ESE onbellegi aciklandi' ($memoryRow.Note -like '*ESE onbellegi*') $memoryRow.Note
-$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500))    # %2 bos
-Assert-Equal '%2 bos bellek WARN' 'WARN' (Get-EDTestRow $rows 'Bellek').Status
+
+# 2d-2. BAGLAC: bos bellek %2 AMA pagefile rahat (1000/3584 = %28) -> HATA DEGIL.
+# Modulun kendi yorumu "yalnizca cok dusukse VE pagefile da zorlaniyorsa anlam
+# kazanir" diyordu ama kod pagefile'a hic bakmiyordu; saglikli her Exchange
+# sunucusunda ESE onbellegi yuzunden tekrarlayan yanlis alarm ureten satir
+# buydu. Operator bunu "bellek yetmiyor" diye okuyup RAM eklemeye gidiyordu.
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500))    # %2 bos, pagefile rahat
+$memoryRow = Get-EDTestRow $rows 'Bellek'
+Assert-Equal '%2 bos bellek + rahat pagefile -> OK' 'OK' $memoryRow.Status
+Assert-True 'ESE davranisi oldugu soylendi' ($memoryRow.Note -like '*BEKLENEN davranisidir*') $memoryRow.Note
+
+# 2d-3. Iki kosul BIRLIKTE saglanirsa uyari verilir (%2 bos + pagefile %84)
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500 -PageUsedMb 3000))
+$memoryRow = Get-EDTestRow $rows 'Bellek'
+Assert-Equal 'Bos bellek %2 VE pagefile %84 -> WARN' 'WARN' $memoryRow.Status
+Assert-True 'Iki kosulun birlikte saglandigi yazildi' ($memoryRow.Note -like '*iki kosul birlikte saglandi*') $memoryRow.Note
+
+# 2d-4. Pagefile OKUNAMADIYSA baglagin ikinci kosulu bilinmiyordur; ne uyari
+# verilir ne de "saglikli" denir.
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72 -TotalMb 24000 -FreeMb 500 -PageTotalMb 0 -PageUsedMb 0))
+$memoryRow = Get-EDTestRow $rows 'Bellek'
+Assert-Equal 'Pagefile okunamazsa bellek hukmu yok' 'N/A' $memoryRow.Status
+Assert-True 'Hukum verilmedigi acikca yazildi' ($memoryRow.Note -like '*hukum verilmedi*') $memoryRow.Note
+Assert-Equal 'Pagefile satiri da N/A' 'N/A' (Get-EDTestRow $rows 'Pagefile').Status
+
+# 2d-5. Pagefile satiri artik kosulsuz OK yazmiyor; kullanim yuzdesi gosterilir
+$rows = @(& $m05.Run (New-OsContext -UptimeHours 72))
+$pageRow = Get-EDTestRow $rows 'Pagefile'
+Assert-True 'Pagefile kullanim yuzdesi yazildi' ($pageRow.Values['MBX1'] -like '*%*') $pageRow.Values['MBX1']
 
 # 2e. .NET raporlanir ama hukum verilmez
 $rows = @(& $m05.Run (New-OsContext -UptimeHours 72))

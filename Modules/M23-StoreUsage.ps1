@@ -13,10 +13,24 @@
     Bu birim karistirildiginda "50 bin" korkutucu gorunur ama aslinda
     50 saniyedir; ya da tersi, gercek bir sorun onemsiz sanilir.
 
-    DIKKAT: "Yuksek" MUTLAK bir esik degildir. Brief Bolum 7: mutlak esikten
-    cok SAGLIKLI BIR DB ILE GORELI KIYAS anlamlidir. Bu yuzden "yuksek"
-    kararlari ortamin kendi ortancasina gore verilir ve rapor her zaman
-    en saglikli DB'yi referans olarak gosterir.
+    DIKKAT - HANGI HUKUM NEREDEN GELIYOR? Ikisi karistirilmamalidir:
+      - Satirin OK/WARN/FAIL durumu MUTLAK esikten gelir: storeTimeInServerMs
+        (thresholds.json). Goreli kiyastan gelmez.
+      - ROPCount / PageRead / LogRecordCount teshisleri GORELIDIR: ortancanin
+        10 kati esas alinir.
+
+    DIKKAT - BU ORTANCA "ORTAMIN ORTANCASI" DEGILDIR. Get-StoreUsageStatistics
+    veritabani basina yalnizca EN AGIR TUKETICILERI dondurur; siradan kullanici
+    bu kumede hic yoktur. Dolayisiyla hesaplanan ortanca "en agirlarin
+    ortancasi"dir ve "ortalama kullaniciya gore 10 kat" anlamina GELMEZ,
+    "zaten agir olanlarin ortancasina gore 10 kat" anlamina gelir. Not bunu
+    oldugu gibi yazar; orneklemin ne oldugunu gizleyip goreli bir sayiyi
+    otoriter gostermek brief ilke 11'e aykiridir.
+
+    DIKKAT - TEK VERITABANI VARSA REFERANS YOKTUR. En saglikli DB'yi referans
+    gostermek ancak kiyaslanacak ikinci bir DB varken anlamlidir; tek DB'de
+    referans ile inceleme konusu ayni satirdir ve cumle bos bir tekrardan
+    ibaret kalir.
 
     Sistem posta kutulari (HealthMailbox vb.) kanitta kalir ama "en agir
     kullanici" hukmunden cikarilir: Exchange'in kendi izleme trafigini
@@ -141,18 +155,49 @@ Register-EDModule @{
         $pageUsable = $medianPage -gt 0
         $logUsable = $medianLog -gt 0
 
+        # --- Buyukluk tabani: oran tek basina teshis degildir ---
+        # Eski kosul "TimeInCPU -le 0 -or oran -ge 5" idi ve iki ayri sekilde
+        # yanlis teshis uretiyordu:
+        #   (1) TimeInCPU = 0 dogrudan "BEKLIYOR"a kisa devre yapiyordu;
+        #   (2) Max(TimeInCPU, 1) tabani, milisaniye altindaki CPU icin orani
+        #       sunicen sisiriyordu.
+        # Sonuc: TimeInServer = 3 ms / TimeInCPU = 0 olan bir posta kutusu
+        # "kilit cekismesi" ilan edilip M21/M22'ye yonlendiriliyordu. Bos bir
+        # sistemde kanit dosyasinin cogu satiri boylece "bulgu" gibi okunuyordu.
+        #
+        # 3 ms'lik bir bekleme hicbir kullanicinin hissedebilecegi bir gecikme
+        # DEGILDIR. Taban = 1000 ms: teshis konulabilmesi icin posta kutusunun
+        # olcum penceresinde en az BIR SANIYE sunucu zamani harcamis olmasi
+        # gerekir. (Satir hukmunun esigi storeTimeInServerMs = 30.000 ms'dir;
+        # 1000 ms onun cok altinda kalir, yani gercek bulgu elenmez - yalnizca
+        # gurultu elenir.) Deger thresholds.json'a EKLENMEDI: orada tanimsiz
+        # bir anahtar Get-EDStatus'u throw ettirir ve bu sayi bir kullanici
+        # esigi degil, teshisin anlamli oldugu en kucuk buyukluktur.
+        $diagnosisFloorMs = 1000.0
+        # CPU tarafinda 1 ms altindaki degerler olcum cozunurlugunun altindadir;
+        # oran hesabina sokulmaz, ayri kol olarak ele alinir.
+        $cpuFloorMs = 1.0
+
         function Get-EDUsageDiagnosis {
             <# Brief Bolum 7 yorum tablosunu tek bir mailbox'a uygular. #>
             param($Entry)
 
             $findings = @()
 
-            if ($Entry.TimeInServer -gt 0) {
-                if ($Entry.TimeInCPU -le 0 -or ($Entry.TimeInServer / [math]::Max($Entry.TimeInCPU, 1)) -ge 5) {
-                    $findings += 'BEKLIYOR (TimeInServer >> TimeInCPU): kilit cekismesi veya I/O -> M21/M22'
+            if ($Entry.TimeInServer -ge $diagnosisFloorMs) {
+                if ($Entry.TimeInCPU -lt $cpuFloorMs) {
+                    # CPU olculemeyecek kadar kucuk ama sunucuda 1 sn+ gecmis:
+                    # oran hesaplanamaz, yine de bekleme oldugu soylenebilir.
+                    $findings += ('BEKLIYOR (TimeInServer {0:N0} ms, TimeInCPU olculemeyecek kadar dusuk): kilit cekismesi veya I/O -> M21/M22' -f $Entry.TimeInServer)
                 }
-                elseif (($Entry.TimeInServer / [math]::Max($Entry.TimeInCPU, 1)) -le 2) {
-                    $findings += 'CPU YAKIYOR (TimeInServer ~ TimeInCPU): agir sorgu veya arama -> M24'
+                else {
+                    $ratio = $Entry.TimeInServer / $Entry.TimeInCPU
+                    if ($ratio -ge 5) {
+                        $findings += 'BEKLIYOR (TimeInServer >> TimeInCPU): kilit cekismesi veya I/O -> M21/M22'
+                    }
+                    elseif ($ratio -le 2) {
+                        $findings += 'CPU YAKIYOR (TimeInServer ~ TimeInCPU): agir sorgu veya arama -> M24'
+                    }
                 }
             }
 
@@ -211,7 +256,13 @@ Register-EDModule @{
         $referenceDatabase = $null
         if ($byDatabase.Count -gt 0) {
             $ranked = @($byDatabase.Values | Sort-Object -Property MaxTimeInServer)
-            $referenceDatabase = $ranked[0]
+            # TEK DB VARSA REFERANS SECILMEZ. $ranked[0] o durumda incelenen
+            # veritabaninin KENDISIDIR; "Referans (en saglikli) veritabani:
+            # DB01" demek ve ardindan "referansin kat kat uzerindeyse" diye
+            # kiyas cumlesi kurmak, DB01'i kendisiyle kiyaslamaktir. Kanitta da
+            # "Referans = True" isaretlenip tek satirlik bir tabloda bu satirin
+            # saglikli oldugu ima ediliyordu - hicbir sey olcmeden.
+            if ($ranked.Count -ge 2) { $referenceDatabase = $ranked[0] }
             foreach ($bucket in $byDatabase.Values) {
                 $databaseValues[$bucket.Database] = [math]::Round($bucket.MaxTimeInServer, 0)
             }
@@ -223,7 +274,7 @@ Register-EDModule @{
                         EnYuksekTimeInServerMs = [math]::Round($_.MaxTimeInServer, 0)
                         EnYuksekTimeInServerSn = [math]::Round($_.MaxTimeInServer / 1000, 1)
                         MailboxSayisi   = $_.MailboxCount
-                        Referans        = ($_.Database -eq $referenceDatabase.Database)
+                        Referans        = ($null -ne $referenceDatabase -and $_.Database -eq $referenceDatabase.Database)
                     }
                 }
             ) | Out-Null
@@ -262,10 +313,17 @@ Register-EDModule @{
         # M24 bu listeyi kullanir: agir mailbox'lar klasor taramasinin hedefidir.
         $Context.Cache['HeavyMailboxes'] = @($comparisonSet | Sort-Object -Property TimeInServer -Descending)
 
-        $note = "TimeInServer MILISANIYEDIR (50.000 = 50 sn). Hukumler ortamin kendi ortancasina gore verilir; mutlak esik degil goreli kiyas esastir. "
+        # Notun anlattigi sey kodun YAPTIGI sey olmalidir: satir hukmu mutlak
+        # esikten gelir, goreli kiyas yalnizca teshis sutununda kullanilir ve
+        # kullanilan ortanca ortamin degil, EN AGIR TUKETICILERIN ortancasidir.
+        $note = ("TimeInServer MILISANIYEDIR (50.000 = 50 sn). Bu satirin hukmu MUTLAK esikten gelir (storeTimeInServerMs). Goreli kiyas yalnizca teshis sutunundaki ROPCount/PageRead/LogRecordCount oruntuleri icindir ve kullanilan ortanca ORTAMIN DEGIL, Get-StoreUsageStatistics'in dondurdugu EN AGIR TUKETICILERIN ortancasidir ({0} posta kutusu) - siradan kullanici bu kumede yoktur. Teshis icin en az {1:N0} ms sunucu zamani aranir; altindaki degerler icin oruntu iddia edilmez. " -f `
+            @($comparisonSet).Count, $diagnosisFloorMs)
         if ($referenceDatabase) {
             $note += ("Referans (en saglikli) veritabani: {0} - en yuksek TimeInServer {1:N0} ms. " -f `
                 $referenceDatabase.Database, $referenceDatabase.MaxTimeInServer)
+        }
+        elseif ($byDatabase.Count -eq 1) {
+            $note += 'Tek veritabani bulundu: kiyaslanacak referans veritabani YOK, DB bazinda goreli hukum kurulmadi. '
         }
         if ($userMailboxes.Count -eq 0) {
             $note += 'UYARI: yalnizca sistem posta kutusu bulundu; gercek kullanici trafigi yok, bulgular temsili degil. '
@@ -280,7 +338,7 @@ Register-EDModule @{
         $rows += New-EDRow -Module 'M23' -Check 'En agir mailbox (ad)' -Values $nameValues -Status 'OK' `
             -Note 'Sistem posta kutulari (HealthMailbox vb.) hukumden cikarildi, kanitta kalir.'
         $rows += New-EDRow -Module 'M23' -Check 'Bekleme orani (Server/CPU)' -Values $waitRatioValues -Unit 'x' -Status 'OK' `
-            -Note '5x ve uzeri: mailbox BEKLIYOR (kilit veya I/O). 2x ve alti: gercekten CPU yakiyor.'
+            -Note ('5x ve uzeri: mailbox BEKLIYOR (kilit veya I/O). 2x ve alti: gercekten CPU yakiyor. ORAN TEK BASINA TESHIS DEGILDIR: 3 ms sunucu zamaninin 0 ms CPU''ya orani da sonsuzdur ama kimse beklemiyordur - bu yuzden teshis yalnizca {0:N0} ms ve uzeri sunucu zamani icin konulur.' -f $diagnosisFloorMs)
         $rows += New-EDRow -Module 'M23' -Check 'Teshis (yorum tablosu)' -Values $diagnosisValues -Status 'OK' `
             -Note 'Tum posta kutulari ve teshisleri: M23-store-usage.csv'
 
@@ -288,6 +346,10 @@ Register-EDModule @{
             $referenceNote = 'Veritabani bazinda en yuksek TimeInServer. '
             if ($referenceDatabase) {
                 $referenceNote += ("Referans sutun: {0} (en saglikli). Bir DB'nin degeri referansin kat kat uzerindeyse kok neden DB seviyesindedir - M22 (paylasilan volume) ve M24 (buyuk klasorler) ile surdurun." -f $referenceDatabase.Database)
+            }
+            else {
+                # Tek DB: kiyas cumlesi kurulmaz, cunku kiyaslanacak sey yok.
+                $referenceNote += "Tek veritabani var; kiyaslanacak referans YOK. Bu sayi tek basina 'yuksek' ya da 'dusuk' degildir - ayni ortamdan farkli zamanlarda alinmis taramalarla (-CompareWith) veya M20/M21 ile birlikte okunmalidir."
             }
             $rows += New-EDRow -Module 'M23' -Check 'TimeInServer max (DB bazinda)' -Values $databaseValues -Unit 'ms' -Status 'OK' -Note $referenceNote
         }
