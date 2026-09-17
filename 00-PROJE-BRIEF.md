@@ -63,6 +63,23 @@ Araç bu tipik teşhis örüntülerini **otomatik olarak** yüzeye çıkarabilme
 | P7 | Yoğun saatte tepe, sakin saatte normal | Kapasite/eşzamanlılık sınırı |
 | P8 | Aktif kopyalar `ActivationPreference` dışında dağılmış | Failover sonrası dengelenmemiş yük |
 
+### Örgüler ne zaman iddia edilir
+
+Bir örüntüyü "yakalayabilmek" yetmez; **yanlış yakalamamak** da gerekir. İlk sürümde dördü matematiksel olarak yanlış tetikleniyordu — iki sunuculu ortamda ortanca daima büyük elemanı seçtiği için P1 hiç kurulamıyor, buna karşılık tek teslimlik bir sunucu "150x yavaş" ilan edilebiliyordu. Bugünkü koşullar:
+
+| # | Koşul | Neyi engeller |
+|---|---|---|
+| P1 | 3+ kıyaslanabilir sunucuda `en yavaş / ortanca ≥ 3x`; tam 2 sunucuda doğrudan kıyas. Kıyas kümesine yalnızca **20+ teslim ölçülmüş** ve hücresi `PASSIVE` olmayan sunucular girer, dışarıda kalanlar notta adlandırılır | Tek ölçümden hüküm; pasif site sunucusunu suçlamak |
+| P2 | Baskın faz `Store` **ve** uçtan uca p95 ≥ `deliveryLatencyP95Sec.warn / 2` (varsayılanla 30 sn) | İç Exchange trafiğinde Store payı zaten en büyüktür; büyüklük tabanı olmadan sağlıklı sistem suçlanır |
+| P3 | En az 2 DB **ve** en yüksek pay ≥ `min(max(100/N × 2, 50), 80)` — yani beklenen 1/N payının iki katı, %50-80 arasına kırpılmış. Oran **eşleştirilebilen** teslimler üzerinden hesaplanır ve örneklem cümlenin içinde yazar | İki DB'li ortamda %50 eşiğinin matematiksel garantisi; 300 alıcılık örneklemi tam tarama gibi sunmak |
+| P4 | RPC p95 eşiği aşmış **ve** disk gerçekten ölçülmüş **ve** okuma/yazma hükmü `OK` **ve** kuyruk p95 < 2 | Ölçülemeyen diski "sağlıklı" sayıp operatörü depolamadan uzaklaştırmak |
+| P5 | Aynı volume üzerinde 2+ DB **ve** o volume'un kendi disk hükmü `WARN`/`FAIL`. M20/M21 koşmadıysa satır `N/A` | Paylaşımı tek başına bulgu saymak |
+| P6 | `p99 / ortalama ≥ 10` | — (ortalamanın yanıltıcılığını göstermek için; hüküm üretmez) |
+| P7 | En az **6 farklı saatte 20+ teslim**; tepe ve sakin saat p95'e göre seçilir, `≥ 3x` fark `WARN` üretir. **Kapasite iddiası** yalnızca tepe saatin hacmi saatlik ortancanın altında değilse kurulur | Trafiğin binde birini taşıyan 03:00 saatini "yoğun saat" ilan edip `MaxConcurrentMailboxDeliveries` ayarına yönlendirmek |
+| P8 | Aktif kopyalardan herhangi biri `ActivationPreference > 1`. Yük dengesizliği **ayrı** bir hükümdür: boşalmış bir düğüm, ya da `max ≥ 1.5 × ortalama` **ve** `max − min ≥ 2` | Oranın 10/10/10/0 dağılımını kaçırması; mutlak fark olmadan 3/2 dağılımına alarm vermek |
+
+> P7'de gecikme tepesi ile yük tepesi **ayrı** raporlanır: düşük hacimli bir tepe gerçek bir sinyaldir ama sebebi kapasite değildir; araç bu durumda o saatte çalışan yedekleme, bakım işi veya toplu taşıma aramayı söyler.
+
 ---
 
 ## 4. Tasarım ilkeleri
@@ -70,7 +87,7 @@ Araç bu tipik teşhis örüntülerini **otomatik olarak** yüzeye çıkarabilme
 1. **Salt okunur.** Hiçbir modül ortamı değiştirmez. Düzeltme öneren modüller komutu **metin olarak** raporlar, çalıştırmaz.
 2. **Sıfır sabit kod.** Sunucu adı, DB adı, sürücü harfi, domain — hiçbiri script içinde geçmez. Hepsi keşif veya config.
 3. **Modüler.** Her kontrol bağımsız bir modül; tek tek veya toplu çalışır (`-Module M10,M20`).
-4. **Her modül kendi eşiğini bilir.** Çıktı ham veri değil, **yorumlanmış sonuç**: `OK` / `WARN` / `FAIL` / `N/A` + kanıt.
+4. **Her modül kendi eşiğini bilir.** Çıktı ham veri değil, **yorumlanmış sonuç**: `OK` / `WARN` / `FAIL` + kanıt. Buna terk edilen iş için `TIMEOUT` ve patlayan modül için `ERROR` eklenir; `N/A` (ölçülemedi) ile `PASSIVE` (pasif site) ise **birer hüküm değildir** ve satır özetini ele geçirmezler (Bölüm 10). Sıralama: `OK` < `N/A`/`PASSIVE` < `TIMEOUT` < `WARN` < `ERROR` < `FAIL`.
 5. **Tüm sunucular, aynı anda.** Kıyas olmadan tek sunucu ölçümü anlamsız. Her modül tüm sunucuları döner, **yan yana** raporlar.
 6. **Ortalama yasak, persentil zorunlu.** Süre/gecikme ölçen her yerde min / p50 / p90 / p95 / p99 / max.
 7. **Zaman damgalı arşiv.** Her çalıştırma `output\yyyyMMdd-HHmmss\` altına yazılır → yoğun/sakin saat karşılaştırması mümkün olur.
@@ -80,7 +97,10 @@ Araç bu tipik teşhis örüntülerini **otomatik olarak** yüzeye çıkarabilme
    yürütücü o işi **terk eder** ve devam eder. Bu yüzden uzun süren yerel işler ayrıca **kooperatif bir bütçe** alır
    (`BudgetSeconds = 840` < `TimeoutSeconds = 900`): bütçe dolunca ayrıştırıcı kendi durur ve **kısmi sonuç** döndürür.
    Kısmi sonuç sessiz kalmaz — M10/M11 satırı `WARN` olur ve notta "PENCERE KISMI" yazar. Terk edilen her iş için
-   havuz tavanı bir artırılır, aksi halde sonraki modüller kendi bütçelerini harcamadan sıra bekleyip `TIMEOUT` olurdu.
+   havuz tavanı bir artırılır (en çok başlangıç değerinin iki katına kadar), aksi halde sonraki modüller kendi
+   bütçelerini harcamadan sıra bekleyip `TIMEOUT` olurdu. Terk sayısı da gizlenmez: çalıştırmanın sonunda
+   `CORE / Terk edilen is` satırı `WARN` olarak rapora düşer ve tavan yükseltilemediyse (uzak uç nokta reddetti,
+   ya da tavan doldu) **o çalıştırmadaki diğer `TIMEOUT` hücrelerine güvenilmemesi** gerektiğini söyler.
 10. **Maliyet bilinci.** Ağır modüller (geniş aralıklı log taramaları) `-Heavy` bayrağı arkasında, varsayılan kapalı.
 11. **Kanıt sakla.** Her `WARN`/`FAIL` için ham veri CSV olarak diske yazılır; sonradan tartışılabilsin.
 12. **Sürüm duyarlı.** Bir cmdlet/sayaç o sürümde yoksa modül `N/A` döner, hata vermez.
@@ -102,8 +122,11 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
   "excludeServers": [],           // taranmayacaklar (ör. Edge)
   "passiveSites": [],             // boş = otomatik tespit
   "trackingWindowHours": 1,       // varsayılan log penceresi
-  "parallelism": 4,               // eşzamanlı runspace sayısı — ⚠️ tavan 8, bkz. Bölüm 10
+  "parallelism": 4,               // eşzamanlı runspace sayısı — tavanı araç kendisi kısar, ↓
   "logAccess": "auto",            // "auto" | "smb" | "cmdlet" — bkz. Bölüm 14
+  "exchangeUri": "",              // boş = otomatik keşif; "http://<sunucu>/PowerShell/"
+  "authentication": "Kerberos",
+  "moduleTimeoutSeconds": 120,    // modül başına varsayılan yürütücü timeout'u
   "maxRecipientLookups": 300,     // M12: sorgulanacak en fazla benzersiz alıcı
   "perfSampleCount": 20,          // M20/M21: kaç örnek (persentil için)
   "perfSampleIntervalSeconds": 1, // örnekler arası hedef aralık
@@ -111,7 +134,7 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
 }
 ```
 
-> ⚠️ **`parallelism` keyfi büyütülemez.** Exchange throttling policy'sindeki `PowerShellMaxConcurrency` (varsayılan 18) kullanıcı başına eşzamanlı oturum sayısını sınırlar. Araç bu değeri okuyup kendi tavanını ona göre kısmalı; aksi halde kendi kendini boğar ve diğer yöneticilerin oturum açmasını engeller.
+> ⚠️ **`parallelism` keyfi büyütülemez.** Exchange throttling policy'sindeki `PowerShellMaxConcurrency` (varsayılan 18) kullanıcı başına eşzamanlı oturum sayısını sınırlar. Araç bu değeri okuyup kendi tavanını ona göre kısar: **Global kapsamlı policy'lerin en düşüğünün yarısı** (diğer yöneticilere yer bırakmak için), değer sınırsızsa 8, policy hiç okunamazsa 4. Buraya yazılan daha büyük bir sayı bu tavanla kırpılır; aksi halde araç kendi kendini boğar ve diğer yöneticilerin oturum açmasını engeller.
 
 ### `Config\thresholds.json`
 
@@ -130,9 +153,15 @@ Tüm eşikler tek yerde, ortama göre ayarlanabilir:
   "calendarItemCount":       { "warn": 5000,  "fail": 20000 },
   "certExpiryDays":          { "warn": 30,  "fail": 7 },
   "cpuPercent":              { "warn": 70,  "fail": 90 },
-  "storeTimeInServerMs":     { "warn": 30000, "fail": 60000 }
+  "storeTimeInServerMs":     { "warn": 30000, "fail": 60000 },
+  "diskFreePercent":         { "warn": 20,  "fail": 10 },      // düşük kötü (M22/M25)
+  "backupAgeDays":           { "warn": 3,   "fail": 7 },       // M45
+  "eventErrorCount":         { "warn": 50,  "fail": 500 },     // M41: pencere başına HAM olay
+  "updatesBehind":           { "warn": 1,   "fail": 3 }        // M43: referans SU listesine göre
 }
 ```
+
+> ⚠️ **Eksik anahtar sessiz kalmaz.** Bir eşikte `warn`/`fail` yoksa veya sayısal değilse araç açık hata verir. Eskiden eksik `fail` sessizce `0` oluyor, `warn > fail` karşılaştırması yönü **tersine** çeviriyordu: boş kuyruk `FAIL`, 5000 mesajlık kuyruk `OK`.
 
 ### `Config\profiles.json`
 
@@ -150,6 +179,8 @@ Ortam tipine göre hangi kontrollerin **geçerli olmadığını** tanımlar:
   }
 }
 ```
+
+> **`ignoreFindings` bastırması görünür olmak zorundadır.** Desen satırın `Modül`, `Kontrol` ve `Not` alanlarına karşı denenir (`M45:NoRecentBackup` biçimi modülü de sınırlar) ve yalnızca `WARN`/`FAIL` satırları bastırılabilir. Bastırılan satırın hükmü `N/A`'e çekilir, notunun başına `[BASTIRILDI: profil …, desen …]` yazılır ve çalıştırmanın sonuna `CORE / Bastirilan bulgu` adıyla bir `WARN` satırı düşer. **Görünmeyen bastırma, yanlış negatifle aynıdır** — nitekim bu ayar bir süre config'de, profillerde ve bu brief'te belgeli olduğu hâlde kod tarafında hiç okunmuyordu.
 
 ### `Config\reference.json`
 
@@ -213,7 +244,7 @@ Sıra teşhis mantığına göre: önce "ortam neye benziyor", sonra "neresi boz
 | **M11** | Faz kırılımı | Gecikme hangi aşamada | `network-message-id` üzerinden RECEIVE/DELIVER join'i — bkz. ↓ | P2 |
 | **M12** | Gecikmeli teslimlerin hedef DB'leri | Gecikme belirli DB'lerde mi | Yavaş `DELIVER` → alıcılar → `Get-Recipient`.Database → grupla | P3 |
 | **M13** | Saat bazlı dağılım | Yoğun saat korelasyonu | Tracking log → saat bazlı p95 | P7 |
-| **M14** | Transport kuyrukları | Kuyruk derinliği, ertelenmiş mesajlar | `Get-Queue`, `Get-QueueDigest` | Eşik: `queueMessageCount` |
+| **M14** | Transport kuyrukları | Kuyruk derinliği (**yerel teslim / uzak hedef ayrı**), retry, poison | `Get-Queue` | Eşik: `queueMessageCount` |
 | **M15** | Back pressure | Kaynak baskısı olayları | Event 15004 / 15006 / 15007 | Herhangi biri = `FAIL` |
 | **M16** | Transport ayarları | Teslim paralelliği ve limitler | `Get-MailboxTransportService`, `Get-TransportService` | `MaxConcurrentMailboxDeliveries` vb. |
 
@@ -240,7 +271,7 @@ DELIVER                    ← MSGTRKMD*.LOG
 | ID | Modül | Ne bakar | Anahtar komutlar | Örüntü |
 |---|---|---|---|---|
 | **M20** | Store RPC latency | Store içi bekleme | `MSExchangeIS Store(*)\RPC Average Latency` | P4 |
-| **M21** | Disk latency | Depolama darboğazı | `Avg. Disk sec/Read`, `Avg. Disk sec/Write` | P4 |
+| **M21** | Disk latency | Depolama darboğazı | `Win32_PerfRawData_PerfDisk_LogicalDisk` → `AvgDisksecPerRead/Write` (ham sayaç, ↓ Bölüm 10) | P4 |
 | **M22** | DB → volume haritası | Hangi DB'ler diski paylaşıyor | `Get-MailboxDatabase` → `EdbFilePath`, `LogFolderPath` | **P5 testi** |
 | **M23** | Ağır kullanıcılar | DB başına en yoğun tüketiciler | `Get-StoreUsageStatistics` | Yorum tablosu ↓ |
 | **M24** | Büyük klasörler | Aşırı öğe sayısı | `Get-MailboxFolderStatistics` | Eşik: `folderItemCount` |
@@ -254,7 +285,7 @@ DELIVER                    ← MSGTRKMD*.LOG
 | ID | Modül | Ne bakar | Anahtar komutlar | Örüntü |
 |---|---|---|---|---|
 | **M30** | Kopya durumu | Tüm kopyaların sağlığı | `Get-MailboxDatabaseCopyStatus` | — |
-| **M31** | Kuyruk uzunlukları | Replikasyon gecikmesi | `CopyQueueLength`, `ReplayQueueLength` | Eşik: config |
+| **M31** | Kuyruk uzunlukları | Replikasyon gecikmesi | `CopyQueueLength`, `ReplayQueueLength` | Eşik: config. **Lagged kopyalar replay hükmüne girmez** — orada büyük kuyruk tasarımdır; hangi kopyanın neden çıkarıldığı yazılır |
 | **M32** | Aktif kopya dağılımı | Yük dengesi | Aktif DB / sunucu + `ActivationPreference` | **P8** |
 | **M33** | Replikasyon sağlığı | Kapsamlı test | `Test-ReplicationHealth` | Hepsi `Passed` |
 | **M34** | Siteler arası log trafiği | Uzak siteye giden log hacmi | Log üretim hızı + uzak site kuyruk uzunluğu | WAN darboğazı |
@@ -310,7 +341,8 @@ ExchangeDiag\
 │   ├─ TrackingLogParser.cs
 │   ├─ PercentileEngine.cs
 │   ├─ ParallelExecutor.cs
-│   ├─ Config.ps1 · Connect.ps1 · Framework.ps1 · Report.ps1
+│   ├─ Config.ps1 · Connect.ps1 · Framework.ps1 · Report.ps1 · Compare.ps1
+│   ├─ Replication.ps1         ← kopya envanteri (M30-M34 ortak girdisi)
 │   ├─ TrackingLog.ps1         ← SMB/cmdlet erişim katmanı
 │   └─ PerfCounter.ps1         ← sayaç örnekleme + volume envanteri
 ├─ Modules\
@@ -324,17 +356,24 @@ ExchangeDiag\
 │   ├─ reference.json
 │   └─ known-issues.json
 ├─ Config.sample\              ← repoda örnek config; gerçekler .gitignore'da
+├─ Sample-Output\              ← sentetik örnek rapor (repoya commit edilir)
 ├─ Tests\                      ← yalnızca geliştirme; teslimat için gerekmez
-│   ├─ ExchangeDiag.Core.Tests.csproj
-│   ├─ fixtures\               ← sentetik MSGTRK*.LOG
+│   ├─ Invoke-EDTests.ps1      ← tüm paketleri KÜLTÜR BAŞINA koşturur
+│   ├─ Test-*.ps1              ← paketler; fixture'lar %TEMP% altına yazılır
+│   ├─ EDTestHelpers.ps1       ← paylaşılan sahte yürütücü / satır yardımcıları
+│   ├─ New-*Fixture.ps1        ← sentetik MSGTRK*.LOG üreticileri
+│   ├─ New-SampleOutput.ps1    ← Sample-Output\ üreticisi
 │   └─ Assert-ReadOnly.ps1     ← salt okunurluk AST lint'i
 └─ output\                     ← .gitignore
     └─ 20260917-143000\
         ├─ SUMMARY.html        ← renkli özet, sunucular yan yana
         ├─ SUMMARY.csv
+        ├─ run-meta.json       ← çalıştırmanın kapsamı (-CompareWith bunu okur)
         ├─ M10-latency.csv     ← ham kanıt
         └─ run.log             ← modül başına süre ölçümü dahil
 ```
+
+> ⚠️ **Testler depo içine yazmaz.** Fixture'lar `%TEMP%` altındadır; iki paket bir zamanlar paylaşılan `Tests\fixtures` klasörünün **ebeveynini** siliyor ve birbirinin 83 MB'lık verisini yok ediyordu. Fixture kullanan paketler `-FixtureDir` alır ve koşturucu her paket/kültür çifti için ayrı bir klasör verir.
 
 > ⚠️ **`output\` ve gerçek `Config\` dosyaları `.gitignore`'a girmeli.** Çıktı sunucu adı, kullanıcı adı ve mailbox bilgisi içerir — repoya gitmemeli.
 
@@ -365,7 +404,21 @@ M21    Disk sec/Write        0.003   0.002   0.004    0.003   OK
 | Tek sunucu | `-Server <ad>` | Derin inceleme |
 | Kuru çalıştırma | `-ListModules` | Hangi modüller bu ortamda geçerli |
 | Log erişim modu | `-LogAccess Auto\|Smb\|Cmdlet` | Ham dosya okuma vs cmdlet (Bölüm 14) |
-| Parser doğrulama | `-VerifyParser` | Ham parse sonucunu cmdlet'e karşı doğrular. **M10 içinden çalışır — `-Heavy` gerekir**, yoksa rapora `N/A` satırı düşer |
+| Parser doğrulama | `-VerifyParser` | Ham parse sonucunu cmdlet'e karşı doğrular (%1 tolerans). **M10 içinden çalışır — `-Heavy` gerekir**, yoksa rapora `WARN` satırı düşer: "doğrulama çalıştırılamadı, gecikme türetimi DOĞRULANMIŞ SAYILMAZ" |
+
+#### `-VerifyParser` kıyas yapamadığında
+
+"Kıyaslanacak bir şey çıkmadı" sessizce geçilemez — doğrulayıcının varlık sebebi tam olarak buradadır. Ham yol veri üretemediyse kök neden ayrılır ve **her birinin hükmü farklıdır**:
+
+| Durum | Hüküm | Gerekçe |
+|---|---|---|
+| Olaylar okundu ama hiçbirinden gecikme türetilemedi | `FAIL` | `message-info` biçimi değişmiş olabilir — **ayrıştırıcı regresyonu** şüphesi; doğrulayıcının yakalaması gereken sınıf tam olarak budur |
+| Baskın neden negatif gecikme (`NegativeLatency ≥ LatencyMissing`) | `WARN` | Bu bir ayrıştırıcı hatası değil **saat kayması** bulgusudur; önce zaman senkronizasyonu düzeltilir |
+| Ham okuma zaman bütçesine takıldı (`Truncated`) | `N/A` | Kısmi pencere, cmdlet'in tam penceresiyle karşılaştırılamaz; `FAIL` demek doğrulayıcıyı yalancı çıkarır |
+| Ham yol hiç kullanılmadı (`-LogAccess Cmdlet`, erişim yok) | `N/A` | Karşılaştırılacak bir şey yok |
+| Cmdlet veri döndürmedi ama ham yol buldu | `ERROR` | Kıyas kurulamadı; iki yoldan biri yanlış ve hangisi olduğu bilinmiyor |
+
+Kök neden tespiti `-LogAccess`'ten **bağımsız** yapılır: `Smb` modu tam da ham ayrıştırıcıyı zorlamak için seçilir, orada kör kalmak anlamsızdır.
 
 ---
 
@@ -415,9 +468,15 @@ Bunlar **sürümden bağımsız, tekrar tekrar yanlış yapılan** noktalar. Mod
 
 - ⚠️ **M24 tüm posta kutularını taramaz, kanıtı takip eder.** `Get-MailboxFolderStatistics` her posta kutusu için ayrı bir çağrıdır ve büyük kutularda saniyeler sürer; hiçbir dil bunu hızlandırmaz. Tek doğru cevap **kapsamı daraltmaktır**: adaylar M23'ün ağır kullanıcılarından ve M12'nin yavaş teslim alıcılarından gelir, `maxFolderScans` ile sınırlanır. **Kapsam oranı her zaman raporlanmalıdır** — kısıtlı bir örneklemi tam tarama gibi sunmak, "büyük klasör yok" hükmünü dayanaksız bırakır.
 
-- ⚠️ **Perf sayacı yolları işletim sistemi diline göre yerelleşir.** Türkçe bir sunucuda `\LogicalDisk(*)\Avg. Disk sec/Read` **bulunamaz**. `Win32_PerfFormattedData_*` sınıflarının özellik adları ise dil-nötrdür (`AvgDisksecPerRead` her yerde aynı). Araç "ortamdan bağımsız" olacaksa sayaçlara **CIM üzerinden** erişmelidir. Exchange'in kendi sayaçları İngilizce kalır, ama OS sayaçları kalmaz — ikisini aynı mekanizmayla okumak bu tuzağı tamamen kapatır.
+- ⚠️ **Perf sayacı yolları işletim sistemi diline göre yerelleşir.** Türkçe bir sunucuda `\LogicalDisk(*)\Avg. Disk sec/Read` **bulunamaz**. `Win32_Perf*Data_*` sınıflarının özellik adları ise dil-nötrdür (`AvgDisksecPerRead` her yerde aynı) — ham sınıfta da böyledir. Araç "ortamdan bağımsız" olacaksa sayaçlara **CIM üzerinden** erişmelidir. Exchange'in kendi sayaçları İngilizce kalır, ama OS sayaçları kalmaz — ikisini aynı mekanizmayla okumak bu tuzağı tamamen kapatır.
 
-- ⚠️ **Hesaplanmış (cooked) sayaçların ilk örneği atılmalıdır.** Bu sayaçlar iki örnek arasındaki farktan üretilir; ilk sorgu çoğu zaman `0` döner. Bu sıfırı gerçek ölçüm saymak "disk mükemmel" gibi yanlış bir sonuç üretir.
+- ⚠️ **Disk gecikmesi HESAPLANMIŞ sınıftan okunamaz; ham sayaçtan türetilir.** `Win32_PerfFormattedData_PerfDisk_LogicalDisk`'in `AvgDisksecPerRead/Write` alanları `UInt32`'dir — yani **tam saniye**. Eşikler 0,020/0,050 sn olduğu için bu sınıf sorulduğunda gerçek bir disk **her zaman 0** okunur; sıfırdan farklı en küçük değer 1000 ms, yani `FAIL` eşiğinin 20 katıdır. Ölçüldü: gerçek 0,0006 sn'lik yazma gecikmesinde `Get-Counter` 0,0006 dönerken CIM dört örneğin dördünde de 0 döndü.
+  > Zarar "ölçüm kayboldu"dan ibaret değildi: M20'nin P4 iddiası (*"disk sağlıklı → darboğaz Store içinde → disk değiştirmek işe yaramaz"*) bu sabit sıfıra dayanıyordu. Disk boğulurken araç operatörü **depolamadan uzaklaştırıyordu** — bir teşhis aracının verebileceği en pahalı yanlış yönlendirme.
+  Gecikme artık `Win32_PerfRawData_*` üzerinden `PERF_AVERAGE_TIMER` formülüyle hesaplanır: `((X1-X0) / (B1-B0)) / Frequency_PerfTime`. Kuyruk uzunluğu ve boşta yüzdesi tam sayı değerler olduğu için hesaplanmış sınıftan gelmeye devam eder.
+
+- ⚠️ **Hesaplanmış (cooked) sayaçların ilk örneği atılmalıdır.** Bu sayaçlar iki örnek arasındaki farktan üretilir; ilk sorgu çoğu zaman `0` döner. Bu sıfırı gerçek ölçüm saymak "disk mükemmel" gibi yanlış bir sonuç üretir. **Ham sayaçta tersi geçerlidir:** orada ilk tur farkın bir ucudur ve atılmaz.
+
+- ⚠️ **Ölçülemeyen yere `0` yazılmaz.** Sayaç sarmasında (`UInt32`), I/O olmayan aralıkta veya taban değeri değişmemişse **örnek üretilmez**; M21 o volume için `N/A` yazar ve hiçbir volume ölçülemediyse sunucu için sayı vermez. M20 de P4 örgüsünü yalnızca disk **gerçekten ölçüldüyse** kurar. "Ölçüm yok" ile "0 sn" ayrı şeylerdir; ikisini karıştırmak sağlıklı bir hüküm uydurmaktır.
 
 - ⚠️ **Örnekleme aralığından sorgu süresini düşün.** Sorgu 0,8 sn sürüyorsa ve aralık 1 sn ise, `Start-Sleep 1` gerçek aralığı 1,8 sn yapar ve toplam süre sessizce ikiye katlanır. Ölçülen örnek: 20 örnek × 1 sn hedefi **37,3 sn** sürüyordu; sorgu süresi düşülünce **21 sn**'ye indi. Ulaşılan gerçek aralık hedefin belirgin üstündeyse bu **raporlanmalıdır** — kadans gizlenmez.
 
@@ -429,11 +488,21 @@ Bunlar **sürümden bağımsız, tekrar tekrar yanlış yapılan** noktalar. Mod
 
 - ⚠️ **Üretici varsayılanları sürümler arasında değişir.** "Bu ayar değiştirilmiş" demek için elde doğrulanmış bir referans olmalı; yoksa araç **hiçbir iddiada bulunmamalıdır**. Geliştirme sırasında bu hatanın canlı örneği görüldü: hafızadan yazılan varsayılan tablo, hiç dokunulmamış bir SE kurulumuna "değiştirilmiş" etiketi bastı. Referans değerler `Config\reference.json`'a taşındı ve ifade "referans varsayılan X, bu ortamda Y — farklı olması tek başına hata değildir" şeklinde düzeltildi.
 
-- ⚠️ **Kuyruk derinliği anlık bir ölçümdür.** `Get-Queue` tarama anındaki fotoğrafı verir. Sakin saatte boş görünen bir kuyruk yoğun saatte dolup boşalıyor olabilir; M14 tek başına değil M13 ile birlikte okunmalıdır. Ayrıca **gölge (shadow) kuyruklar DAG'da normalde doludur** ve toplam derinliğe katılırsa yanlış alarm üretir.
+- ⚠️ **Kuyruk derinliği anlık bir ölçümdür.** `Get-Queue` tarama anındaki fotoğrafı verir. Sakin saatte boş görünen bir kuyruk yoğun saatte dolup boşalıyor olabilir; M14 tek başına değil M13 ile birlikte okunmalıdır. Ayrıca **gölge (shadow) kuyruklar DAG'da normalde doludur** ve toplam derinliğe katılırsa yanlış alarm üretir — derinliğin dışında tutulur, yalnızca kanıt dosyasında görünür.
+
+- ⚠️ **Yerel teslim kuyruğu ile uzak hedef kuyruğu AYNI SATIRDA toplanmaz.** İkisi de mesaj biriktirir ama **suçlu farklıdır**: `MapiDelivery`/`SmtpDeliveryToMailbox` gibi kuyruklar bu sunucunun Store'una gider, `DnsConnectorDelivery`/`SmartHostConnectorDelivery` gibi olanlar dışarıya. Tek bir toplamda, alan tarafındaki bir MX arızası bu sunucuyu yavaş gösterir ve teşhis yanlış altsisteme kayar. Eşik ikisine de aynı uygulanır; değişen eşik değil **hükmün sahibidir**. Tanınmayan bir teslim tipi "belirsiz" kovasına düşer, yerel toplama katılır (temkinli taraf) ve notta **adıyla** yazılır.
+
+- ⚠️ **Sayı ayrıştırması kültüre bırakılmaz.** `[double]::TryParse`'ın tek argümanlı hâli `CurrentCulture` ile ayrıştırır, ama PowerShell sayıları **her zaman invariant** biçimde string'e çevirir (`"0.07"`). tr-TR ve de-DE'de `.` binlik ayracıdır; değer sessizce **100 kat** büyür. Ölçülen sonuçlar (düzeltme öncesi, tr-TR): 12,5 ms RPC → `FAIL`; 3,5 gün kalan sertifika → `OK`. Yani hem sahte `FAIL` hem **sessizce kaçırılan** `FAIL` — ikincisi daha tehlikelidir. Kural: karşılaştırma ve aritmetik **invariant** kültürle yapılır (`ConvertTo-EDNumber`), sunum biçimi HTML'in işidir, `SUMMARY.csv` ise bir **veri sözleşmesidir** ve invariant yazılır (`-CompareWith` onu makine olarak okur).
+  > Bu hata sınıfı tek kültürde koşan bir test paketiyle görülemez; nöbetçisi `Tests\Invoke-EDTests.ps1`'dir (Bölüm 11).
+
+- ⚠️ **`RunLocal` YEREL havuzda koşar; `ExecTask`'ta hedef sunucu alanı YOKTUR** (`Key` yalnızca bir etikettir). Makine seviyesinde veri isteyen bir modül, scriptblock'un **içine** `Invoke-Command -ComputerName $Server` koymak zorundadır. Koymayan modül, aracın koştuğu makineyi N kez okuyup sonuçları MBX1/MBX2/MBX3 diye etiketler — tek sunuculu bir lab'da sonuç tesadüfen doğru çıktığı için hiçbir test kırmızı olmaz.
+  > **Canlı örnek:** M05, M41, M42 ve M44 tam olarak bunu yapıyordu; bulan şey davranış testi değil, kaynağı okuyan yapısal bir sözleşme testi oldu (`Tests\Test-ModuleContracts.ps1`). Gerçekten yerel çalışması gereken kod `# ED-LOCAL-OK: <gerekçe>` ile muaf tutulur.
 
 - ⚠️ **Back pressure sırasında kuyruklar BOŞ görünür.** Mesajlar reddedildiği için kuyruğa hiç alınmamıştır. "Kuyruk boş, demek ki transport iyi" çıkarımı bu yüzden yanlıştır — M14 ve M15 birlikte okunmalıdır.
 
 - ⚠️ **Eşzamanlılık Exchange tarafında sınırlıdır.** Throttling policy'deki `PowerShellMaxConcurrency` (varsayılan 18) aşılırsa yeni oturumlar reddedilir ve araç hem kendini hem diğer yöneticileri kilitler. `parallelism` tavanı bu değerden türetilmeli, sabit büyük bir sayı verilmemeli.
+
+- ⚠️ **OKUMA HATASI ile NORMAL DURUM ayrı raporlanır.** Bu, tek tek modüllerde defalarca aynı biçimde yapılan hatadır ve hepsinin sonucu aynı cümledir: *ölçülemeyen şey sağlıklı sayılır.* Birkaç canlı örnek — DB listesi okunamadığında aktif DB sayısına `0` yazmak (M01; bu sayı P8'i besler), sayfa dosyası okunamadığında bellek hükmünü yine de vermek (M05), olay günlüğü okunamayan sunucuya `0 hata / OK` demek (M41), hiçbir posta kutusu taranamamışken "büyük klasör yok" demek (M24), hiçbir DB birime eşlenememişken "hiçbiri boş alandan büyük değil" demek (M25), `Unknown` indeks durumunu bozuk saymak (M26). Kural üç maddedir: **(1)** okunamayan değer `N/A` yazılır, **(2)** okuma hatası varsa satır en az `WARN` olur ve `N/A`'lerin "sıfır" anlamına gelmediği notta yazar, **(3)** ölçüm yokken olumlu cümle **kurulmaz**.
 
 - ⚠️ **`N/A` ve `PASSIVE` birer hüküm değildir**, satır özetini ele geçirmemelidirler. Bir satırda üç sunucudan biri ölçülemediyse (`N/A`) veya pasif sitedeyse (`PASSIVE`), satır başlığı yine de diğer ikisinin gerçek hükmünü göstermelidir. Aksi halde **çalışmış ve geçmiş bir kontrol, hiç çalışmamış gibi görünür.** Kural: gerçek bir hüküm (`OK`/`WARN`/`FAIL`/`TIMEOUT`/`ERROR`) varsa o kazanır; hiçbiri yoksa satır gerçekten ölçülememiştir ve `N/A` döner.
   > **Canlı örnek:** M32'de DR sitesindeki sunucu `PASSIVE` işaretlendiği için, denge kontrolü çalışıp *geçmiş* olmasına rağmen satır başlığı `PASSIVE` çıkıyordu. Faz D testleriyle yakalandı.
@@ -488,18 +557,46 @@ Bunlar **sürümden bağımsız, tekrar tekrar yanlış yapılan** noktalar. Mod
 8. ✅ **M23, M24** — store kullanıcı analizi + büyük klasör tespiti
    > M23 Bölüm 7'deki yorum tablosunu uygular ve **teşhis** üretir, ham sayı değil. M24 kanıtı takip eder: adaylarını M23 ve M12'den alır.
 9. ✅ **Faz D (M30-M34)** — DAG yoksa temiz `N/A`
-   > Bu lab'da DAG olmadığı için mantık **sentetik kopya envanteriyle** doğrulandı (54 test). Gerçek ortam doğrulaması hâlâ gereklidir; ayrıntı Bölüm 10'daki uyarıda.
+   > Bu lab'da DAG olmadığı için mantık **sentetik kopya envanteriyle** doğrulandı. Gerçek ortam doğrulaması hâlâ gereklidir; ayrıntı Bölüm 10'daki uyarıda.
 10. ✅ **Faz E (M40-M45)** + `known-issues.json` filtresi
-    > M40 ve M41 `known-issues.json` ile bastırma uygular. M43 ve M42 **referans listesi boşken hiçbir iddiada bulunmaz** (M16 disiplini). M44'ün özellik adları (`IsExchangeTrialEdition`, `RemainingTrialPeriod`) ve M45'inkiler (`LastFullBackup`, `CircularLoggingEnabled`) canlı ortamdan **doğrulanarak** yazıldı, tahmin edilmedi. 63 test.
+    > M40 ve M41 `known-issues.json` ile bastırma uygular. M43 ve M42 **referans listesi boşken hiçbir iddiada bulunmaz** (M16 disiplini). M44'ün özellik adları (`IsExchangeTrialEdition`, `RemainingTrialPeriod`) ve M45'inkiler (`LastFullBackup`, `CircularLoggingEnabled`) canlı ortamdan **doğrulanarak** yazıldı, tahmin edilmedi.
 11. ✅ **M04, M05, M25, M26** — brief Bölüm 6'da tanımlı olup atlanmış Faz A/C modülleri
-    > M04'ün enum çözümlemesi ve M25'in bayt ayrıştırması canlı ortamdan **doğrulanarak** yazıldı. M25 ve M26, kasıtlı olarak **iddia etmeyi reddettikleri** şeylerle tanımlanır: whitespace'e eşik uygulanmaz, bozuk indeks teslimle ilişkilendirilmez. M05 çalışma süresini bulgu değil **bağlam** olarak raporlar. 65 test.
+    > M04'ün enum çözümlemesi ve M25'in bayt ayrıştırması canlı ortamdan **doğrulanarak** yazıldı. M25 ve M26, kasıtlı olarak **iddia etmeyi reddettikleri** şeylerle tanımlanır: whitespace'e eşik uygulanmaz, bozuk indeks teslimle ilişkilendirilmez. M05 çalışma süresini bulgu değil **bağlam** olarak raporlar.
 12. ✅ **HTML/CSV rapor + `-CompareWith` delta motoru**
-    > Delta motorunun asıl işi fark hesaplamak değil, **hangi farkın anlamsız olduğunu söylemektir**: kapsam farkı (`run-meta.json`), `N/A` sınırı, küçük sayıda büyük yüzde, saat farkı. 50 test.
+    > Delta motorunun asıl işi fark hesaplamak değil, **hangi farkın anlamsız olduğunu söylemektir**: kapsam farkı (`run-meta.json`), `N/A` sınırı, küçük sayıda büyük yüzde, saat farkı.
 13. ~~Zamanlanmış görev + yoğun saat otomasyonu~~ — *kapsam dışı bırakıldı (kullanıcı kararı)*
 14. ✅ **`Tests\Assert-ReadOnly.ps1`** — 1. ilkenin otomatik güvencesi
-    > AST tarar (grep değil: M32 düzeltme komutunu **metin olarak** raporlar, düz arama yanlış alarm üretir). Exchange kanalından çağrılan **15 cmdlet'in tamamı `Get-`/`Test-`**. Yerleştirilmiş sahte bir `Set-TransportService` ile yakaladığı doğrulandı — her zaman geçen bir lint işe yaramaz.
+    > AST tarar (grep değil: M32 düzeltme komutunu **metin olarak** raporlar, düz arama yanlış alarm üretir). Exchange kanalından çağrılan **15 cmdlet'in tamamı `Get-`/`Test-`**. Denetimin kendisi de sınanır (`Tests\Test-ReadOnlyLint.ps1`): düşmanca bir sahte depoya karşı koşturulduğunda yirmi kadar yazma yolundan yalnızca ikisini yakaladığı görüldü ve sertleştirildi — **bir denetim betiğinin sessizliği, temizlikten ayırt edilemediği için en kötü başarısızlık biçimidir.**
 15. ✅ **`README.md`, örnek çıktı, `Config.sample\`**
-    > Örnek rapor `Tests\New-SampleOutput.ps1` ile **sentetik** üretilir — gerçek bir çalıştırmanın çıktısı sunucu ve posta kutusu adları taşıdığı için dağıtılamaz. Üretilen senaryo sekiz örgünün (P1-P8) tamamını içerir.
+    > Örnek rapor `Tests\New-SampleOutput.ps1` ile **sentetik** üretilir — gerçek bir çalıştırmanın çıktısı sunucu ve posta kutusu adları taşıdığı için dağıtılamaz. Üretilen senaryo sekiz örgünün (P1-P8) tamamını içerir. `Sample-Output\` depoya commit edilmiş bir **demo**dur: kod düzeldiğinde o da tazelenmezse rapor katmanının doğru davranışını yalanlar.
+
+### Test paketi neden kültür başına koşar
+
+Paketler geliştiricinin makinesinde (çoğunlukla en-US) koşuyordu ve **tek bir test bile kırmızı değilken** her eşik hükmü Türkçe bir sunucuda yanlış çıkıyordu (Bölüm 10, kültür uyarısı). Bu yüzden `Tests\Invoke-EDTests.ps1` her paketi **her kültür için ayrı bir alt süreçte** koşturur — varsayılan `en-US` + `tr-TR`; kültür aynı oturumda değiştirilirse önceden yüklenmiş tipler ve biçimlendiriciler yarım kalır.
+
+**Geçmek yetmez, iki kültürde de geçmek gerekir.** Bir iddia yalnızca tek kültürde geçiyorsa ya ürün kültüre bağımlıdır (hata) ya da iddianın kendisi geliştiricinin ondalık ayracını varsayıyordur (test hatası); ikisi de düzeltilir. Sonuç satırı üretmeyen bir paket "0 hata" sayılmaz, `COKTU` olarak raporlanır.
+
+Bugünkü durum — **15 paket × 2 kültür = 1490 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
+
+| Paket | Doğrulama | Kapsam |
+|---|---|---|
+| `Test-TrackingLogParser` | 58 | C# ayrıştırıcı: `#Fields:` eşlemesi, tırnaklı CSV, UTC, gecikme türetimi, zaman bütçesi, performans |
+| `Test-CoreUnits` | 76 | C# çekirdek birim testleri: `PercentileEngine`, `StatsAccumulator`, `CsvLineSplitter` |
+| `Test-LatencyModules` | 47 | M10-M13 uçtan uca (**canlı Exchange uç noktası ister**) |
+| `Test-LatencyPatterns` | 14 | P1/P2/P3/P7 hüküm mantığı, sahte yürütücüyle |
+| `Test-TransportModules` | 46 | M14-M16 |
+| `Test-PerfModules` | 31 | M20-M22, örgü P4 ve P5 |
+| `Test-StoreModules` | 42 | M23-M24, yorum tablosu |
+| `Test-BaselineModules` | 84 | M04, M05, M25, M26 |
+| `Test-DagModules` | 64 | M30-M34 (sentetik DAG) |
+| `Test-HealthModules` | 63 | M40-M45 |
+| `Test-CompareEngine` | 74 | Delta motoru ve kapsam koruması |
+| `Test-ReportLayer` | 58 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
+| `Test-ReadOnlyLint` | 38 | Salt okunurluk denetiminin **kendi** testi |
+| `Test-ModuleContracts` | 22 | Yapısal sözleşme: `RunLocal` kullanan modül hedefe gidiyor mu |
+| `Test-TimeoutVerdict` | 28 | `TIMEOUT` sıralaması: `N/A` < `TIMEOUT` < `WARN` < `ERROR` < `FAIL` |
+
+> `Test-LatencyModules` dışındaki paketler gerçek sunucuya sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır. `Test-LatencyModules` ise bağlanır ve M01'i koşturur; bu yüzden örgülerin **karar** mantığı orada değil `Test-LatencyPatterns`'ta sınanır — iki sunuculu, pasif siteli, tek örneklemli senaryolar canlı ortamda üretilemez.
 
 ---
 
@@ -536,7 +633,7 @@ Araç saf PowerShell 5.1 ile yazılırsa kullanılamayacak kadar yavaş kalır. 
 | Darboğaz | Neden | Çözüm |
 |---|---|---|
 | `Get-MessageTrackingLog` | Her satırı zengin nesneye deserialize eder, uzaktan çalışırsa üstüne CliXml serileştirmesi biner. ~2-10k satır/sn | Ham `MSGTRK*.LOG` dosyasını okuyup parse et: 500k-2M satır/sn |
-| Sıralı yürütme | 45 modül × N sunucu, teker teker. PS 5.1'de `ForEach-Object -Parallel` yok | C# `ParallelExecutor` + paylaşılan runspace havuzu |
+| Sıralı yürütme | 30 modül × N sunucu, teker teker. PS 5.1'de `ForEach-Object -Parallel` yok | C# `ParallelExecutor` + paylaşılan runspace havuzu |
 | Persentil matematiği | Milyonlarca `TimeSpan` üzerinde PS sıralama/gruplama | `double[]` + `Array.Sort` |
 
 **Dil seçimi C#, çünkü:** Exchange yönetim cmdlet'lerinin desteklenen bir .NET API'si yoktur. Go/Rust seçilse bile sonunda PowerShell çağrılmak zorunda kalınır. C# ise `System.Management.Automation`'ı doğrudan host edip runspace havuzunu kendi yönetebilir.
@@ -550,11 +647,17 @@ Araç saf PowerShell 5.1 ile yazılırsa kullanılamayacak kadar yavaş kalır. 
 | Perf sayacı örnekleme, volume envanteri | PowerShell | ↓ bkz. "Neden perf tarafında C# yok" |
 | Cmdlet-only modüller (M03, M04, M25, M26, M30-M33, M40, M44, M45) | PowerShell scriptblock | Ucuz çağrılar; C# yürütücüde paralel koşarlar |
 
-**Kritik kural:** Modüller kendileri `Invoke-Command` çağırmaz. Her modül *bildirir*: hedef sunucular + scriptblock + timeout. `ParallelExecutor` bunları tek bir paylaşılan havuzda, tek bir timeout politikasıyla koşturur.
+**Kritik kural:** Modüller kendi runspace'ini/havuzunu açmaz, kendi paralelliğini yönetmez. Her modül *bildirir*: hedef sunucular + scriptblock + timeout. `ParallelExecutor` bunları tek bir paylaşılan havuzda koşturur. (Makine seviyesindeki veriyi isteyen modül, `Invoke-Command -ComputerName`'i **scriptblock'un içinde** kendisi yazar — Bölüm 10'daki `RunLocal` uyarısı.)
 
-> **Timeout'un sınırı.** Bir iş yerel koda girdikten sonra dışarıdan durdurulamaz (bkz. Bölüm 2, madde 9).
-> `TIMEOUT` hücresi "iş durduruldu" değil, **"iş terk edildi, arka planda sürüyor olabilir"** demektir.
-> Gerçek sınır, ayrıştırıcıya verilen kooperatif bütçedir; o da bloke bir SMB okumasını kesemez.
+> **Timeout'un sınırı.** Yürütücünün `TimeoutSeconds`'ı tek katman değildir ve tek başına bir sınır da sayılmaz.
+> Bir iş yerel koda girdikten sonra dışarıdan durdurulamaz (bkz. Bölüm 4, madde 9): `PowerShell.Stop()` senkrondur,
+> yerel kodda dönen bir iş durma isteğini görmez. Yürütücü o işi **terk eder**, temizliği arka plana devreder ve
+> çağırana hemen döner. Bu yüzden `TIMEOUT` hücresi "iş durduruldu" değil, **"iş terk edildi, arka planda sürüyor
+> olabilir"** demektir; kuyrukta beklerken zaman aşan işler de aynı sayaca düşer ve ikisi ayırt edilemez.
+> Gerçek sınır, ayrıştırıcıya verilen kooperatif bütçedir (`BudgetSeconds`); o da bloke bir SMB okumasını kesemez.
+> Bütçe, iş **başladıktan** sonra hesaplanır — kuyrukta bekleme bütçeyi yemez — ve eksik/0 verilirse **sınırsız**
+> kabul edilir: aksi halde geçmişte bir son teslim anı üretilir, bütün dosyalar atlanır ve sonuç "boş pencere" gibi
+> görünürdü. Bu, aracın üretebileceği en tehlikeli çıktı biçimidir.
 
 ### Teslimat ve derleme
 
@@ -566,7 +669,8 @@ Teslimat **`.ps1` dosyalarıdır** — imzasız `.exe` güven sorunu yoktur, tü
 - ⚠️ **Dil sürümü C# 5 ile sınırlıdır.** `Add-Type`, PS 5.1'de .NET Framework'ün `csc.exe`'sini kullanır. String interpolation, `?.`, `nameof`, tuple, pattern matching **kullanılamaz**. Generics, LINQ, `async/await`, `Parallel.ForEach` kullanılabilir.
 - **.NET SDK ve xunit test projesi KURULMADI — bilinçli karar.** Planda `Tests\ExchangeDiag.Core.Tests.csproj` (`<LangVersion>5</LangVersion>`) öngörülmüştü; gerekçesi iki maddeydi ve ikisi de başka yoldan karşılandığı için vazgeçildi:
   - *C# 5 kısıtını derleme anında zorlamak:* `Add-Type` zaten .NET Framework `csc.exe`'sini kullanıyor. Ölçülerek doğrulandı — C# 6 string interpolation içeren bir kaynak `Unexpected character '$'` ile **reddedildi**. `CoreLoader` her SHA256 değişiminde yeniden derlediği için ihlal ilk test çalıştırmasında görünür. `LangVersion 5` bu garantiyi tekrarlar, eklemez.
-  - *C# birim testleri:* Parser 56 testle sınanıyor ve bunlar **Add-Type'ın ürettiği gerçek assembly** üzerinden koşuyor — yani üretimde çalışan ikilinin ta kendisi. xunit ayrı bir derleme çıktısını test ederdi; mevcut düzen bu açıdan daha yakındır.
+  - *C# birim testleri:* Çekirdek iki paketle sınanıyor — `Test-TrackingLogParser` (58) ayrıştırıcıyı, `Test-CoreUnits` (76) `PercentileEngine` / `StatsAccumulator` / `CsvLineSplitter`'ı doğrudan — ve bunlar **Add-Type'ın ürettiği gerçek assembly** üzerinden koşuyor, yani üretimde çalışan ikilinin ta kendisi. xunit ayrı bir derleme çıktısını test ederdi; mevcut düzen bu açıdan daha yakındır.
+    > Bu argüman "dolaylı test yeterlidir" demek değildir. Çekirdek sınıfların **doğrudan** testi bir süre yoktu ve hepsi yalnızca sentetik log üzerinden, beklenen değerler de aynı motorun varsayımlarından türetilerek ölçülüyordu: `PercentileEngine.Percentile` doğrusal interpolasyondan nearest-rank'e çevrildiğinde **tüm paket yeşil kaldı.** `Test-CoreUnits`'teki değerler bu yüzden elle hesaplanmış ve sabit yazılmıştır.
   - Teslimat zaten SDK gerektirmez; müşteri tarafında yalnızca `.ps1` dosyaları çalışır.
   - **Ne zaman yeniden değerlendirilmeli:** C# tarafı bugün üç dosya. On dosyaya çıkarsa PowerShell üzerinden test etmek hantallaşır ve gerçek bir debugger gerekir; o noktada `dotnet test` kurulumu kendini amorti eder.
 
