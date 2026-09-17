@@ -11,7 +11,12 @@
     hicbir posta kutusuna dokunulmaz.
 #>
 [CmdletBinding()]
-param()
+param(
+    # Depo icine YAZILMAZ. Bu paketler eskiden Tests\fixtures'i olusturup
+    # sonunda EBEVEYN klasoru siliyordu, yani baska bir paketin fixture'ini
+    # da yok ediyordu (olculdu: 83 MB'lik parser fixture'i silindi).
+    [string]$FixtureDir = (Join-Path $env:TEMP ('ed-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -143,7 +148,7 @@ function New-EDTestContext {
     }
 }
 
-$script:OutputDir = Join-Path $PSScriptRoot 'fixtures\store-output'
+$script:OutputDir = Join-Path $FixtureDir 'store-output'
 if (Test-Path -LiteralPath $script:OutputDir) { Remove-Item -LiteralPath $script:OutputDir -Recurse -Force }
 New-Item -ItemType Directory -Path $script:OutputDir -Force | Out-Null
 
@@ -375,7 +380,8 @@ Assert-True 'Sinir ve kapsam orani raporlandi' `
     ($cappedFolderRow.Note -like '*maxFolderScans=1*' -and $cappedFolderRow.Note -like '*%50*') $cappedFolderRow.Note
 
 # ---------------------------------------------------------------------------
-Remove-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures') -Recurse -Force -ErrorAction SilentlyContinue
+# Yalnizca KENDI klasorunu siler.
+Remove-Item -LiteralPath $FixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "`n=== Sonuc ===" -ForegroundColor Cyan
 Write-Host ("  Gecen: {0}   Kalan: {1}" -f $script:Passed, $script:Failed) -ForegroundColor $(if ($script:Failed -eq 0) { 'Green' } else { 'Red' })

@@ -19,7 +19,12 @@
       - M22 : baglama noktasi (mount point) surucu harfiyle karistirilmaz
 #>
 [CmdletBinding()]
-param()
+param(
+    # Depo icine YAZILMAZ. Bu paketler eskiden Tests\fixtures'i olusturup
+    # sonunda EBEVEYN klasoru siliyordu, yani baska bir paketin fixture'ini
+    # da yok ediyordu (olculdu: 83 MB'lik parser fixture'i silindi).
+    [string]$FixtureDir = (Join-Path $env:TEMP ('ed-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -147,7 +152,7 @@ function New-EDTestServer {
     }
 }
 
-$script:OutputDir = Join-Path $PSScriptRoot 'fixtures\perf-output'
+$script:OutputDir = Join-Path $FixtureDir 'perf-output'
 if (Test-Path -LiteralPath $script:OutputDir) { Remove-Item -LiteralPath $script:OutputDir -Recurse -Force }
 New-Item -ItemType Directory -Path $script:OutputDir -Force | Out-Null
 
@@ -358,7 +363,38 @@ Assert-Equal 'Sunucu yanit vermezse M21 N/A' 'N/A' $rows[0].Status
 Assert-Equal 'Hucre ERROR isaretlendi' 'ERROR' $rows[0].CellStatus['SRV1']
 
 # ---------------------------------------------------------------------------
-Remove-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures') -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "`n=== Disk olculemedigi zaman (0 DEGIL N/A) ===" -ForegroundColor Cyan
+
+# NEDEN: Win32_PerfFormattedData_*.AvgDisksecPerRead/Write UInt32'dir, yani
+# tam saniye; gercek bir disk HER ZAMAN 0 okunuyordu. Sayac ham sinifa
+# tasindi, ama asil tehlike sayinin kendisi degil: olculemeyen bir diske
+# 0 yazmak "disk mukemmel" demektir ve M20 buna dayanip "darbogaz Store
+# icinde, disk degistirmek ise yaramaz" diyordu. Olcum yoksa N/A olmali.
+$context = New-EDTestContext -Config $config -Servers $servers -Databases $databases
+$entry = New-EDTestPerfEntry -Server 'SRV1' -RpcLatencyMs 250 -Volumes @{
+    'C:' = @{ Read = 0.004; Write = 0.003; Queue = 1 }
+}
+# Ornekleme araliklarinda hic I/O olmadi: gecikme anahtarlari YOK.
+$entry.Stats.disk['C:'].Remove('AvgDisksecPerRead')
+$entry.Stats.disk['C:'].Remove('AvgDisksecPerWrite')
+$context.Cache['PerfSamples'] = @{ SRV1 = $entry }
+
+$rows = @(& $m21.Run $context)
+$readRow = Get-EDTestRow -Rows $rows -Check 'Disk sec/Read p95 (en kotu volume)'
+$writeRow = Get-EDTestRow -Rows $rows -Check 'Disk sec/Write p95 (en kotu volume)'
+Assert-Equal 'Olculemeyen disk 0 DEGIL N/A (okuma)' 'N/A' $readRow.Values['SRV1']
+Assert-Equal 'Olculemeyen disk 0 DEGIL N/A (yazma)' 'N/A' $writeRow.Values['SRV1']
+Assert-True 'Olculemeyen disk OK hukmu almiyor' ($writeRow.CellStatus['SRV1'] -ne 'OK') $writeRow.CellStatus['SRV1']
+
+# M20: RPC yuksek ama disk olculemedi -> P4 orgusu KURULMAMALI.
+$rows = @(& $m20.Run $context)
+$rpcRow = Get-EDTestRow $rows 'RPC Average Latency p95'
+Assert-True 'Disk olculemeden P4 orgusu kurulmuyor' `
+    ($rpcRow.Note -notlike '*ORGU P4*' -and $rpcRow.Note -notlike '*disk degistirmek*') $rpcRow.Note
+
+# ---------------------------------------------------------------------------
+# Yalnizca KENDI klasorunu siler.
+Remove-Item -LiteralPath $FixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "`n=== Sonuc ===" -ForegroundColor Cyan
 Write-Host ("  Gecen: {0}   Kalan: {1}" -f $script:Passed, $script:Failed) -ForegroundColor $(if ($script:Failed -eq 0) { 'Green' } else { 'Red' })

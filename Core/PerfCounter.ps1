@@ -18,6 +18,21 @@
     (AvgDisksecPerRead her yerde ayni). Arac "ortamdan bagimsiz" olacaksa
     sayaclara CIM uzerinden erisilmelidir.
 
+    ⚠️ DISK GECIKMESI HAM SAYACTAN TURETILIR.
+    Win32_PerfFormattedData_PerfDisk_LogicalDisk.AvgDisksecPerRead/Write
+    alanlari UInt32'dir, yani TAM SANIYE. Esikler 0.020/0.050 sn oldugu icin
+    bu sinif sorulursa gercek bir disk her zaman 0 olarak okunur: sifirdan
+    farkli en kucuk deger 1000 ms, FAIL esiginin 20 kati. Olculdu: gercek
+    0.0006 sn'lik yazma gecikmesinde CIM 0, Get-Counter 0.0006 dondu.
+    Sonuc yalnizca "olcum kayboldu" degildi - M20 bu sabit sifira dayanarak
+    "disk saglikli, darbogaz Store icinde, disk degistirmek ise yaramaz"
+    diyordu; yani disk bogulurken operatoru depolamadan UZAKLASTIRIYORDU.
+
+    Bu yuzden gecikme Win32_PerfRawData_* uzerinden PERF_AVERAGE_TIMER
+    formuluyle hesaplanir:  ((X1-X0) / (B1-B0)) / Frequency_PerfTime
+    Ham sinifin ozellik adlari da dil-notrdur, yani Turkce sunucu sorunu
+    geri gelmez. Dogrulandi: turetilen degerler Get-Counter ile ayni.
+
     ⚠️ ILK ORNEK ATILIR. Hesaplanmis (cooked) sayaclar iki ornek arasindaki
     farktan uretilir; ilk sorgu cogu zaman 0 doner. Bu sifiri gercek olcum
     saymak "disk mukemmel" gibi yanlis bir sonuc uretir.
@@ -29,15 +44,29 @@ function Get-EDPerfCounterDefinitions {
         M20 ve M21 ayri ayri ornekleme yapip duvar saatini ikiye katlamaz.
     #>
     return [ordered]@{
+        # Gecikme: ham sayac + turetme (bkz. dosya basligi).
+        diskLatency = [ordered]@{
+            Alias      = 'disk'
+            Kind       = 'averageTimer'
+            Class      = 'Win32_PerfRawData_PerfDisk_LogicalDisk'
+            Properties = @('AvgDisksecPerRead', 'AvgDisksecPerWrite')
+        }
+        # Kuyruk ve bosta yuzdesi: anlik/ tam sayi degerler, hesaplanmis sinif yeterli.
         disk = [ordered]@{
+            Alias      = 'disk'
+            Kind       = 'formatted'
             Class      = 'Win32_PerfFormattedData_PerfDisk_LogicalDisk'
-            Properties = @('AvgDisksecPerRead', 'AvgDisksecPerWrite', 'CurrentDiskQueueLength', 'PercentIdleTime')
+            Properties = @('CurrentDiskQueueLength', 'PercentIdleTime')
         }
         store = [ordered]@{
+            Alias      = 'store'
+            Kind       = 'formatted'
             Class      = 'Win32_PerfFormattedData_MSExchangeISStore_MSExchangeISStore'
             Properties = @('RPCAverageLatency', 'RPCRequests', 'RPCOperationsPersec', 'PercentRPCRequests')
         }
         cpu = [ordered]@{
+            Alias      = 'cpu'
+            Kind       = 'formatted'
             Class      = 'Win32_PerfFormattedData_PerfOS_Processor'
             Properties = @('PercentProcessorTime')
         }
@@ -78,11 +107,14 @@ function Get-EDPerfSamples {
 
     $definitions = Get-EDPerfCounterDefinitions
     # Uzak tarafa gonderilebilmesi icin duz bir yapiya cevrilir.
-    $plan = foreach ($alias in $definitions.Keys) {
+    # Birden fazla tanim ayni alias'i paylasabilir (disk gecikmesi ham,
+    # kuyruk hesaplanmis siniftan gelir); modul tarafi farki gormez.
+    $plan = foreach ($key in $definitions.Keys) {
         [pscustomobject]@{
-            Alias      = $alias
-            Class      = $definitions[$alias]['Class']
-            Properties = @($definitions[$alias]['Properties'])
+            Alias      = $definitions[$key]['Alias']
+            Kind       = $definitions[$key]['Kind']
+            Class      = $definitions[$key]['Class']
+            Properties = @($definitions[$key]['Properties'])
         }
     }
 
@@ -99,6 +131,9 @@ function Get-EDPerfSamples {
             # anahtar: "alias|instance|property" -> deger listesi
             $collected = @{}
             $missingClasses = @()
+            # Ham sayaclar birikimlidir: onceki turun ham degerleri saklanir
+            # ve aradaki FARKTAN gecikme turetilir.
+            $previousRaw = @{}
 
             # Ilk tur ISINMADIR ve atilir: cooked sayaclar iki ornek arasindaki
             # farktan hesaplanir, ilk sorgu genelde 0 doner.
@@ -119,14 +154,41 @@ function Get-EDPerfSamples {
                         continue
                     }
 
-                    if ($i -eq 0) { continue }   # isinma turu
+                    # Ham sayacta isinma turu ATILMAZ: o tur, farkin ilk
+                    # ucudur (X0/B0). Hesaplanmis sayacta ise atilir.
+                    if ($i -eq 0 -and $counter.Kind -ne 'averageTimer') { continue }
 
                     foreach ($instance in $instances) {
                         $instanceName = [string]$instance.Name
                         foreach ($property in $counter.Properties) {
+                            $key = "$($counter.Alias)|$instanceName|$property"
+
+                            if ($counter.Kind -eq 'averageTimer') {
+                                # PERF_AVERAGE_TIMER: ((X1-X0)/(B1-B0))/Frequency
+                                $raw = $instance.$property
+                                $base = $instance."${property}_Base"
+                                $frequency = $instance.Frequency_PerfTime
+                                if ($null -eq $raw -or $null -eq $base -or -not $frequency) { continue }
+
+                                $current = [pscustomobject]@{ Raw = [double]$raw; Base = [double]$base }
+                                if ($previousRaw.ContainsKey($key)) {
+                                    $deltaRaw = $current.Raw - $previousRaw[$key].Raw
+                                    $deltaBase = $current.Base - $previousRaw[$key].Base
+                                    # deltaBase = 0: bu aralikta HIC I/O olmadi.
+                                    # Buraya 0 yazmak "disk mukemmel" yalani olur;
+                                    # olcum yoksa ornek de yoktur.
+                                    # Negatif fark: UInt32 sayaci sarmis demektir.
+                                    if ($deltaBase -gt 0 -and $deltaRaw -ge 0) {
+                                        if (-not $collected.ContainsKey($key)) { $collected[$key] = New-Object System.Collections.ArrayList }
+                                        [void]$collected[$key].Add(($deltaRaw / $deltaBase) / [double]$frequency)
+                                    }
+                                }
+                                $previousRaw[$key] = $current
+                                continue
+                            }
+
                             $value = $instance.$property
                             if ($null -eq $value) { continue }
-                            $key = "$($counter.Alias)|$instanceName|$property"
                             if (-not $collected.ContainsKey($key)) { $collected[$key] = New-Object System.Collections.ArrayList }
                             [void]$collected[$key].Add([double]$value)
                         }

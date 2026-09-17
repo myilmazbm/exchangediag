@@ -98,19 +98,28 @@ Register-EDModule @{
             # Disk verisi ayni ornekleme turundan geldigi icin ek maliyet yok.
             if ($status -in @('WARN', 'FAIL')) {
                 $worstRead = 0.0; $worstWrite = 0.0; $worstQueue = 0.0
+                $diskMeasured = $false
                 foreach ($volume in (Get-EDPerfInstances -PerfEntry $entry -Alias 'disk' -ExcludeTotal)) {
                     $read = Get-EDPerfStat -PerfEntry $entry -Alias 'disk' -Instance $volume -Property 'AvgDisksecPerRead'
                     $write = Get-EDPerfStat -PerfEntry $entry -Alias 'disk' -Instance $volume -Property 'AvgDisksecPerWrite'
                     $queue = Get-EDPerfStat -PerfEntry $entry -Alias 'disk' -Instance $volume -Property 'CurrentDiskQueueLength'
-                    if ($read -and $read.P95 -gt $worstRead) { $worstRead = $read.P95 }
-                    if ($write -and $write.P95 -gt $worstWrite) { $worstWrite = $write.P95 }
-                    if ($queue -and $queue.P95 -gt $worstQueue) { $worstQueue = $queue.P95 }
+                    if ($read -and $read.Count -gt 0) { $diskMeasured = $true; if ($read.P95 -gt $worstRead) { $worstRead = $read.P95 } }
+                    if ($write -and $write.Count -gt 0) { $diskMeasured = $true; if ($write.P95 -gt $worstWrite) { $worstWrite = $write.P95 } }
+                    if ($queue -and $queue.Count -gt 0 -and $queue.P95 -gt $worstQueue) { $worstQueue = $queue.P95 }
                 }
 
                 $readStatus = Get-EDStatus -Value $worstRead -ThresholdName 'diskSecPerRead' -Config $Context.Config
                 $writeStatus = Get-EDStatus -Value $worstWrite -ThresholdName 'diskSecPerWrite' -Config $Context.Config
-                $diskHealthy = ($readStatus -eq 'OK' -and $writeStatus -eq 'OK')
+                # ORGU P4'un tamami "disk SAGLIKLI" iddiasina dayanir. Disk
+                # hic olculemediyse bu iddia KURULAMAZ - olculmemis bir diski
+                # saglikli saymak operatoru depolamadan uzaklastirir ki bu,
+                # verilebilecek en pahali yanlis yonlendirmedir.
+                $diskHealthy = ($diskMeasured -and $readStatus -eq 'OK' -and $writeStatus -eq 'OK')
                 $queueLow = ($worstQueue -lt 2)
+
+                if (-not $diskMeasured) {
+                    $log.Warn("M20/$server : RPC gecikmesi yuksek ama disk olculemedi; P4 orgusu (darbogaz Store icinde) KURULMADI.")
+                }
 
                 if ($diskHealthy -and $queueLow) {
                     $p4Candidates += ('{0}: RPC p95 {1:N0} ms, en kotu disk okuma {2:N4} sn / yazma {3:N4} sn, kuyruk {4:N1}' -f `
