@@ -171,8 +171,10 @@ Register-EDModule @{
         $rows += New-EDRow -Module 'M21' -Check 'Disk sec/Read p95 (en kotu volume)' -Values $readValues `
             -CellStatus $readCellStatus -Unit 'sn' -Status 'OK'
         $rows += New-EDRow -Module 'M21' -Check 'En kotu volume' -Values $worstVolumeValues -Status 'OK'
+        # Notu zaten P4'u anlatiyordu ama satir orgu tasimiyordu: brief P4
+        # kosulu "kuyruk p95 < 2" ile bu sayiyi ACIKCA iddianin parcasi yapar.
         $rows += New-EDRow -Module 'M21' -Check 'Disk kuyrugu p95 (ayni volume)' -Values $queueValues -Unit 'istek' -Status 'OK' `
-            -Note 'Kuyruk YUKSEK + latency yuksek = depolama yuke yetismiyor. Kuyruk DUSUK + latency yuksek = gecikme problemi; M20 ile birlikte orgu P4`u kurar.'
+            -Patterns @('P4') -Note 'Kuyruk YUKSEK + latency yuksek = depolama yuke yetismiyor. Kuyruk DUSUK + latency yuksek = gecikme problemi; M20 ile birlikte orgu P4`u kurar.'
         $rows += New-EDRow -Module 'M21' -Check 'Olculen volume sayisi' -Values $volumeCountValues -Unit 'adet' -Status 'OK'
 
         return $rows

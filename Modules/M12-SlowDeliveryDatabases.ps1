@@ -246,8 +246,10 @@ Register-EDModule @{
         foreach ($database in ($byDatabase.Values | Sort-Object -Property SlowDeliveries -Descending | Select-Object -First 8)) {
             $dbValues[$database.Database] = $database.SlowDeliveries
         }
+        # P3'un tanimi ("alicilar belirli DB'lerde toplaniyor") tam olarak bu
+        # dagilimdir; orgu etiketi yalnizca sunucu kirilimindaydi.
         $rows += New-EDRow -Module 'M12' -Check 'Yavas teslim (veritabani bazinda)' -Values $dbValues -Unit 'adet' -Status 'OK' `
-            -Note 'Tam liste: M12-slow-by-database.csv. Alici kirilimi: M12-slow-recipients.csv'
+            -Patterns @('P3') -Note 'Tam liste: M12-slow-by-database.csv. Alici kirilimi: M12-slow-recipients.csv'
 
         return $rows
     }

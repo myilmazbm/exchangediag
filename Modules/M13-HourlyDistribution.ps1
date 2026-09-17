@@ -174,9 +174,13 @@ Register-EDModule @{
         $rows += New-EDRow -Module 'M13' -Check 'Yogun/sakin p95 orani' -Values $ratioValues -CellStatus $cellStatus `
             -Unit 'x' -Status (Get-EDWorstStatus @($cellStatus.Values)) -Patterns @('P7') -Note $note
         $rows += New-EDRow -Module 'M13' -Check 'Yogun saat (yerel)' -Values $peakHourValues -Status 'OK'
-        $rows += New-EDRow -Module 'M13' -Check 'Yogun saat p95' -Values $peakP95Values -Unit 'sn' -Status 'OK'
+        # Oran satirinin PAYI ve PAYDASI: brief P7'yi "tepe ve sakin saat
+        # p95'e gore secilir" diye tanimlar, yani iddia dogrudan bu iki
+        # olcume dayanir. Saat etiketi (kacinci saat) bir olcum degildir,
+        # o yuzden etiketsiz birakilir.
+        $rows += New-EDRow -Module 'M13' -Check 'Yogun saat p95' -Values $peakP95Values -Unit 'sn' -Status 'OK' -Patterns @('P7')
         $rows += New-EDRow -Module 'M13' -Check 'Sakin saat (yerel)' -Values $quietHourValues -Status 'OK'
-        $rows += New-EDRow -Module 'M13' -Check 'Sakin saat p95' -Values $quietP95Values -Unit 'sn' -Status 'OK' `
+        $rows += New-EDRow -Module 'M13' -Check 'Sakin saat p95' -Values $quietP95Values -Unit 'sn' -Status 'OK' -Patterns @('P7') `
             -Note 'Saat kirilimi: M13-hourly.csv. Sakin saatte alinan olcum yaniltir - karsilastirma icin yogun saatte tekrar calistirin.'
 
         return $rows

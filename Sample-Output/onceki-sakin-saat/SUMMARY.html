@@ -22,6 +22,9 @@
  .NA, .PASSIVE { background:#f0f0f4 !important; color:#777; }
  .outlier { outline: 2px solid #d43b3b; outline-offset: -2px; font-weight: 700; }
  .note { color:#666; font-size: 12px; white-space: normal; max-width: 420px; }
+ /* Orgu hucresi: etiket + brief'teki anlami. Sarmalanmazsa tek satirda
+    tabloyu yatay kaydirmaya zorlar ve aciklama ekranin disinda kalir. */
+ .orgu { font-size: 12px; white-space: normal; max-width: 300px; color:#3a4a8a; }
  .empty { color:#888; font-style: italic; }
 </style>
 </head><body>
@@ -35,15 +38,15 @@ Pasif/DR site: <code>Felaket</code> &mdash; bu sitelerdeki dusuk is yuku normald
 Persentil yontemi: siralanmis dizide dogrusal interpolasyon. Ortalama bilerek raporlanmaz (tail gizlenir).
 </div>
 <h2>Bulgular (8)</h2>
-<table><tr><th>Durum</th><th>Modul</th><th>Kontrol</th><th>Aciklama</th></tr>
-<tr><td class="st WARN">WARN</td><td>M02</td><td>Gercek build (ExSetup.exe)</td><td class="note">Sunucular arasi build farki var: 15.02.2562.049 / 15.02.2562.017. MBX02 geride. Yama seviyesi tum sunucularda esitlenmeli.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M04</td><td>SMTP sertifikasi kalan sure</td><td class="note">MBX03: SMTP sertifikasi &#39;Posta&#39; 18 gun icinde doluyor - TLS el sikismasi basarisiz olur ve giden posta KUYRUKTA BIRIKIR. M14 ile birlikte okuyun.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M13</td><td>Yogun saat (p95)</td><td class="note">ORGU P7: yogun saatte belirgin tepe var - MBX02: 09:00 -&gt; p95 305.0 sn, 07:00 -&gt; p95 14.4 sn (21.2x). Kapasite/eszamanlilik siniri suphesi: M16 (MaxConcurrentMailboxDeliveries) ve M14 (kuyruk derinligi) ile surdurun.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M16</td><td>MaxConcurrentMailboxDeliveries</td><td class="note">Referans varsayilan 20, bu ortamda 20. Farkli olmasi tek basina hata degildir. M13 yogun saatte tepe gordugu icin bu ayar incelenmeye deger.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M21</td><td>En kotu volume - yazma</td><td class="note">MBX03/E:: okuma 0.0289 sn, yazma 0.0312 sn, kuyruk 3.1. _Total DEGIL en kotu volume gosterilir; on diskten dokuzu saglikliyken biri bogulmus olabilir.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M22</td><td>DB paylasan volume sayisi</td><td class="note">ORGU P5: MBX03/E:\: 2 DB ayni volume uzerinde ve volume yavas (okuma 0.0289 sn, yazma 0.0312 sn) -&gt; DB02; DB03. Bu volume uzerindeki TUM veritabanlari kendi kullanici profillerinden bagimsiz olarak etkilenir. Agir kullanici yalnizca bir veritabaninda gorunse bile komsu veritabaninin yavasligi buradan gelir - M23 ile birlikte okuyun.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M23</td><td>Teshis (yorum tablosu)</td><td class="note">TimeInServer MILISANIYEDIR (50.000 = 50 sn). Hukumler ortamin kendi ortancasina gore verilir; mutlak esik degil goreli kiyas esastir.</td></tr>
-<tr><td class="st WARN">WARN</td><td>M32</td><td>Aktif DB sayisi</td><td class="note">ORGU P8: 2 veritabani ActivationPreference disinda calisiyor - DB05 aktif MBX02 uzerinde (tercih 2), DB07 aktif MBX02 uzerinde (tercih 3). Failover sonrasi dengelenmemis olabilir. DENGESIZ YUK: MBX02 sunucusunda 4 aktif DB var, ortalama 2.7. Duzeltme komutu METIN olarak: Move-ActiveMailboxDatabase &lt;DB&gt; -ActivateOnServer &lt;tercih-1-sunucu&gt;  --  BU ARAC CALISTIRMAZ.</td></tr>
+<table><tr><th>Durum</th><th>Modul</th><th>Kontrol</th><th>Orgu</th><th>Aciklama</th></tr>
+<tr><td class="st WARN">WARN</td><td>M02</td><td>Gercek build (ExSetup.exe)</td><td class="orgu"></td><td class="note">Sunucular arasi build farki var: 15.02.2562.049 / 15.02.2562.017. MBX02 geride. Yama seviyesi tum sunucularda esitlenmeli.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M04</td><td>SMTP sertifikasi kalan sure</td><td class="orgu"></td><td class="note">MBX03: SMTP sertifikasi &#39;Posta&#39; 18 gun icinde doluyor - TLS el sikismasi basarisiz olur ve giden posta KUYRUKTA BIRIKIR. M14 ile birlikte okuyun.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M13</td><td>Yogun saat (p95)</td><td class="orgu"></td><td class="note">ORGU P7: yogun saatte belirgin tepe var - MBX02: 09:00 -&gt; p95 305.0 sn, 07:00 -&gt; p95 14.4 sn (21.2x). Kapasite/eszamanlilik siniri suphesi: M16 (MaxConcurrentMailboxDeliveries) ve M14 (kuyruk derinligi) ile surdurun.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M16</td><td>MaxConcurrentMailboxDeliveries</td><td class="orgu"></td><td class="note">Referans varsayilan 20, bu ortamda 20. Farkli olmasi tek basina hata degildir. M13 yogun saatte tepe gordugu icin bu ayar incelenmeye deger.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M21</td><td>En kotu volume - yazma</td><td class="orgu"></td><td class="note">MBX03/E:: okuma 0.0289 sn, yazma 0.0312 sn, kuyruk 3.1. _Total DEGIL en kotu volume gosterilir; on diskten dokuzu saglikliyken biri bogulmus olabilir.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M22</td><td>DB paylasan volume sayisi</td><td class="orgu"></td><td class="note">ORGU P5: MBX03/E:\: 2 DB ayni volume uzerinde ve volume yavas (okuma 0.0289 sn, yazma 0.0312 sn) -&gt; DB02; DB03. Bu volume uzerindeki TUM veritabanlari kendi kullanici profillerinden bagimsiz olarak etkilenir. Agir kullanici yalnizca bir veritabaninda gorunse bile komsu veritabaninin yavasligi buradan gelir - M23 ile birlikte okuyun.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M23</td><td>Teshis (yorum tablosu)</td><td class="orgu"></td><td class="note">TimeInServer MILISANIYEDIR (50.000 = 50 sn). Hukumler ortamin kendi ortancasina gore verilir; mutlak esik degil goreli kiyas esastir.</td></tr>
+<tr><td class="st WARN">WARN</td><td>M32</td><td>Aktif DB sayisi</td><td class="orgu"></td><td class="note">ORGU P8: 2 veritabani ActivationPreference disinda calisiyor - DB05 aktif MBX02 uzerinde (tercih 2), DB07 aktif MBX02 uzerinde (tercih 3). Failover sonrasi dengelenmemis olabilir. DENGESIZ YUK: MBX02 sunucusunda 4 aktif DB var, ortalama 2.7. Duzeltme komutu METIN olarak: Move-ActiveMailboxDatabase &lt;DB&gt; -ActivateOnServer &lt;tercih-1-sunucu&gt;  --  BU ARAC CALISTIRMAZ.</td></tr>
 </table>
 <h2>Ozet &mdash; tum sunucular yan yana</h2>
 <table><tr><th>Modul</th><th>Kontrol</th><th>Birim</th>

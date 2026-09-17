@@ -335,8 +335,11 @@ Register-EDModule @{
         $p99Status = $(if ($tailNotes.Count -gt 0) { 'WARN' } else { 'OK' })
         $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi p99' -Values $p99 -Unit 'sn' -Status $p99Status -Patterns @('P6') -Note ($partialTag + $p99Note)
         $rows += New-EDRow -Module 'M10' -Check 'Teslim gecikmesi max' -Values $maxValues -Unit 'sn' -Status 'OK' -Note $partialTag
+        # Orgu P6 "ortalama dusuk, p99 cok yuksek" iddiasinin OTEKI yarisi bu
+        # satirdir; etiketi yalnizca p99'a koymak, kiyasin dayandigi sayiyi
+        # orguden kopuk birakirdi.
         $rows += New-EDRow -Module 'M10' -Check 'Ortalama (tek basina YANILTIR)' -Values $meanValues -Unit 'sn' -Status 'OK' `
-            -Note ($partialTag + 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.')
+            -Patterns @('P6') -Note ($partialTag + 'Yalnizca p99 ile kiyas icin gosterilir; karar verirken kullanilmaz.')
         $rows += New-EDRow -Module 'M10' -Check 'Olculen teslim sayisi' -Values $counts -Unit 'adet' -Status 'OK' -Note $partialTag
         $rows += New-EDRow -Module 'M10' -Check 'Okuma yolu' -Values $viaValues -Status 'OK'
         $rows += $contextRows
