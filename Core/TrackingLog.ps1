@@ -37,6 +37,36 @@ function ConvertTo-EDUncPath {
     return "\\$ServerName\$drive`$\$rest"
 }
 
+function Get-EDPartialAdvice {
+<#
+    .SYNOPSIS
+        Kismi bir okuma icin SEBEBE UYGUN tavsiye uretir.
+
+    .DESCRIPTION
+        Tek bir tavsiye butun sebeplere uymaz. "Pencereyi daraltin" yalnizca
+        ZAMAN SINIRI icin dogrudur; dosya okunamadiginda pencereyi
+        daraltmak sorunu cozmez, yalnizca operatorun vaktini alir. Bu ayrim
+        yapilmadigi icin M11 bir sure kilitli/eksik veride "pencereyi
+        genisletin" diyordu; ayni hatanin burada tekrarlanmamasi icin
+        tavsiye tek yerden uretilir.
+#>
+    [CmdletBinding()]
+    param([string]$Reason)
+
+    if ($Reason -like '*okuma hatasi*') {
+        $advice = 'Dosya OKUNAMADI: pencereyi daraltmak bunu COZMEZ. '
+        $advice += 'Paylasim/NTFS izinlerini, dosya kilidini (yedekleme ya da AV taramasi) ve SMB baglantisini kontrol edin.'
+        if ($Reason -like '*zaman siniri*') {
+            $advice += ' Ayrica zaman siniri da asildi; iki sebep birlikte var.'
+        }
+        return $advice
+    }
+    if ($Reason -like '*zaman siniri*') {
+        return 'Zaman siniri asildi: pencereyi -WindowHours ile DARALTIP tekrar deneyin (genisletmek durumu kotulestirir).'
+    }
+    return 'Sonuc kismi; kapsami dogrulamadan hukum cikarmayin.'
+}
+
 function Get-EDTrackingLogLocation {
 <#
     .SYNOPSIS
@@ -397,10 +427,18 @@ function Get-EDDeliveryAnalysis {
                 # Tespit LogAccess'ten BAGIMSIZ yapilir - Smb modu tam da ham
                 # parser'i zorlamak icin secilir, orada kor kalmak anlamsizdir.
                 if ($analysis.Overall.Count -eq 0) {
-                    if ($analysis.Truncated) {
-                        $detail = "Ham log okumasi zaman sinirina takildi "
-                        $detail += "($($analysis.FilesProcessed)/$($analysis.FilesScanned) dosya islendi); gecikme uretilemedi. "
-                        $detail += "Ayristirici hatasi DEGIL - pencereyi daraltin (-WindowHours)."
+                    # SEBEBI SOYLEMEMEK KOTU, YANLIS SEBEP SOYLEMEK DAHA KOTUDUR.
+                    # Burada bir sure kosulsuz "zaman sinirina takildi ...
+                    # pencereyi daraltin" yaziyordu. Kismiligin ikinci bir
+                    # sebebi var: dosya OKUNAMAMASI (ACL, kilit, rollover,
+                    # SMB kopmasi). O durumda pencereyi daraltmak hicbir ise
+                    # yaramaz - operator bir tur bosa ayar avina cikar.
+                    if ($analysis.IsPartial) {
+                        $detail = "Ham log okumasi KISMI kaldi (sebep: $($analysis.PartialReason)) "
+                        $detail += "($($analysis.FilesProcessed)/$($analysis.FilesScanned) dosya islendi"
+                        if ($analysis.FilesFailed -gt 0) { $detail += ", $($analysis.FilesFailed) dosya OKUNAMADI" }
+                        $detail += "); gecikme uretilemedi. Ayristirici hatasi DEGIL. "
+                        $detail += Get-EDPartialAdvice -Reason $analysis.PartialReason
                         $log.Warn("$($result.Key): $detail")
                         $rawPathIssues[$result.Key] = [pscustomobject]@{ Status = 'N/A'; Detail = $detail }
                     }
@@ -526,10 +564,15 @@ function Test-EDParserAgreement {
         # $window.StartUtc/EndUtc araligini bastan sona okur, ham yol ise
         # butce bitince kesilmistir. Fark ayristiricinin degil zaman
         # sinirinin eseridir; FAIL demek dogrulayiciyi yalanci cikarir.
-        if ($smb.Truncated) {
+        if ($smb.IsPartial) {
+            # Sebep ayrimi burada da sart: dogrulayici "ham yol ile cmdlet
+            # ayni mi" sorusunu cevaplar ve kismi bir pencereyle bu soru
+            # cevaplanamaz - ama SEBEBE gore yapilacak sey farklidir.
+            $failedNote = $(if ($smb.FilesFailed -gt 0) { ", $($smb.FilesFailed) dosya OKUNAMADI" } else { '' })
             $findings += [pscustomobject]@{
                 Server = $server; Status = 'N/A'
-                Detail = "Ham yol zaman sinirina takildi ($($smb.FilesProcessed)/$($smb.FilesScanned) dosya); kismi pencere tam pencereyle karsilastirilamaz. Pencereyi daraltip (-WindowHours) tekrar deneyin."
+                Detail = ("Ham yol KISMI kaldi (sebep: {0}) ({1}/{2} dosya{3}); kismi pencere tam pencereyle karsilastirilamaz. {4}" -f `
+                    $smb.PartialReason, $smb.FilesProcessed, $smb.FilesScanned, $failedNote, (Get-EDPartialAdvice -Reason $smb.PartialReason))
             }
             continue
         }
