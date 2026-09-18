@@ -472,6 +472,122 @@ Assert-True 'Not, kapinin config anahtarini adiyla soyluyor' `
     ($defaultFloor.Not -like '*storeDiagnosisFloorMs*') $defaultFloor.Not
 
 # ---------------------------------------------------------------------------
+Write-Host "`n=== 11. M24: kapi listeden ONCE uygulanir (kare karmasiklik) ===" -ForegroundColor Cyan
+<#
+    NE OLCULUYOR
+    M24 adaylari once SINIRSIZ bir PowerShell dizisine '+=' ile topluyor,
+    sonra iki kez siralayip tekillestiriyor, kapiyi (maxFolderScans) EN SONDA
+    uyguluyordu. PowerShell dizisi sabit boyutludur: '+=' her eklemede diziyi
+    bastan kopyalar, yani O(n^2). Olculdu (ayni sahte yurutucu):
+        n= 5.000 -> 0,56 sn   n=20.000 -> 10,14 sn   n=50.000 -> 69,76 sn
+    Girdi kirpilmaz: TrackingLogParser.SlowRecipients sozlugun TAMAMINI
+    dondurur ve "yavas alici" = esigi asan teslimi olan benzersiz posta
+    kutusudur. Sunucunun tamami yavasken bu sayi POSTA KUTUSU SAYISINA
+    esitlenir (8 x 25.000 = 200.000) ve bu kosumun zaman siniri YOKTUR.
+
+    Bu yuzden iddia yalnizca "sonuc dogru" degil, "n ile patlamiyor"dur;
+    sure ustu sinir mutasyonun tek yakalanabilir izidir. Sinir 4 sn: eski kod
+    bu girdide ~10 sn harciyordu, yenisi 0,1 sn'nin altinda.
+#>
+
+$scaleN = 20000
+$scaleServers = @('SRV1', 'SRV2', 'SRV3')
+$perServer = [int]($scaleN / $scaleServers.Count)
+
+# Sahte yurutucu: her hedef icin esigi asan tek bir klasor.
+$scaleExecutor = New-EDMockExecutor -ResponsesByCommand @{
+    'Get-MailboxFolderStatistics' = {
+        param($Key, $Identity)
+        return @([pscustomobject]@{ Name = 'Inbox'; FolderPath = '/Inbox'; FolderType = 'Inbox'
+                                    ItemsInFolder = 120000; ItemsInFolderAndSubfolders = 120000; FolderSize = '12 GB' })
+    }
+}
+$scaleConfig = Get-EDConfig -ProjectRoot $projectRoot
+$scaleConfig.Environment['maxFolderScans'] = 5
+$scaleContext = New-EDTestContext -Config $scaleConfig -Executor $scaleExecutor
+$scaleContext.Topology = [pscustomobject]@{
+    Servers = @($scaleServers | ForEach-Object { New-EDTestServer $_ })
+    Sites = @(); Dags = @(); Databases = @(); HasDag = $false
+}
+
+# Parser gibi: sunucu basina Count'a gore AZALAN liste.
+$analysisCache = @{}
+foreach ($srv in $scaleServers) {
+    $list = New-Object 'System.Collections.Generic.List[object]'
+    for ($i = $perServer; $i -ge 1; $i--) {
+        $list.Add([pscustomobject]@{ Recipient = ('user{0}@{1}.test' -f $i, $srv); Count = [long]$i
+                                     MaxSeconds = [double]$i; SumSeconds = [double]$i })
+    }
+    $analysisCache[$srv] = [pscustomobject]@{ SlowRecipients = $list }
+}
+# AYNI posta kutusu iki sunucuda: en yuksek sirali olan kazanmali.
+$analysisCache['SRV1'].SlowRecipients.Add([pscustomobject]@{ Recipient = 'ortak@x.test'; Count = [long]1
+                                                             MaxSeconds = 1.0; SumSeconds = 1.0 })
+$analysisCache['SRV2'].SlowRecipients.Insert(0, [pscustomobject]@{ Recipient = 'ORTAK@X.TEST'; Count = [long]999999
+                                                                   MaxSeconds = 9.0; SumSeconds = 9.0 })
+# TURKCE I. Tekillestirme kulture duyarli hale gelirse tr-TR altinda
+# ToLower('I') noktasiz 'i' verir, bu iki kayit AYRI aday sayilir, ayni posta
+# kutusu iki kez sorgulanir ve kapsam paydasi sisirilir.
+# Bugunku kod bu tuzaga DUSMUYOR (ne duz '@{}' ne de acik OrdinalIgnoreCase
+# karsilastirici duserdi); bu satirlar bir hata duzeltmesinin degil, o
+# invaryantin BEKCISIDIR - paket zaten iki kulturde kosuyor.
+$analysisCache['SRV1'].SlowRecipients.Insert(0, [pscustomobject]@{ Recipient = 'Ilker@x.test'; Count = [long]999998
+                                                                   MaxSeconds = 8.0; SumSeconds = 8.0 })
+$analysisCache['SRV3'].SlowRecipients.Insert(0, [pscustomobject]@{ Recipient = 'ilker@x.test'; Count = [long]999997
+                                                                   MaxSeconds = 7.0; SumSeconds = 7.0 })
+$scaleContext.Cache['DeliveryAnalysis'] = $analysisCache
+
+[GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+$scaleWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$scaleRows = @(& $m24.Run $scaleContext)
+$scaleWatch.Stop()
+
+$scaleFolderRow = Get-EDTestRow $scaleRows 'Esigi asan klasor'
+$scaleScannedRow = Get-EDTestRow $scaleRows 'Taranan posta kutusu'
+$scannedTotal = 0
+foreach ($srv in $scaleServers) { $scannedTotal += [int]$scaleScannedRow.Values[$srv] }
+
+Write-Host ("  n={0} aday, {1:N2} sn" -f $scaleN, $scaleWatch.Elapsed.TotalSeconds) -ForegroundColor Gray
+
+Assert-True ('{0} aday 4 sn altinda islendi' -f $scaleN) ($scaleWatch.Elapsed.TotalSeconds -lt 4.0) `
+    ("olculen: {0:N2} sn (kare kalipta ~10 sn)" -f $scaleWatch.Elapsed.TotalSeconds)
+Assert-Equal 'Kapi uygulandi: yalnizca 5 posta kutusu tarandi' 5 $scannedTotal
+# Benzersiz anahtar sayisi: sunucu basina $perServer, arti BIRER KEZ sayilan
+# 'ortak' ve 'ilker' kayitlari. Ham sayi ikisi icin de bir fazladir (her biri
+# iki sunucuda gecer) ve paydaya GIRMEZ - yoksa kapsam orani oldugundan kucuk
+# cikardi.
+$expectedUnique = ($perServer * $scaleServers.Count) + 2
+Assert-True 'Kapsam paydasi BENZERSIZ aday sayisi' `
+    ($scaleFolderRow.Note -like ('*KAPSAM: {0} aday*' -f $expectedUnique)) $scaleFolderRow.Note
+Assert-True 'Ham aday sayisi ayri raporlandi (tekrarli)' `
+    ($scaleFolderRow.Note -like ('*M12 ({0} yavas teslim alicisi)*' -f ($expectedUnique + 2))) $scaleFolderRow.Note
+
+# En yuksek sirali adaylar secildi mi? SRV2'deki 999999 ortak kaydi ve her
+# sunucunun en buyuk Count'lari (6666, 6666, 6666, 6665, ...) beklenir.
+$scaleEvidence = @(Import-Csv (Join-Path $script:OutputDir 'M24-large-folders.csv'))
+$scaleTargets = @($scaleEvidence | ForEach-Object { $_.Mailbox })
+Assert-True 'Iki sunucudan gelen ortak aday SECILDI' ($scaleTargets -contains 'ORTAK@X.TEST') ($scaleTargets -join ', ')
+Assert-True 'Ortak aday EN YUKSEK sirali kayitla (SRV2) alindi' `
+    ((@($scaleEvidence | Where-Object { $_.Mailbox -eq 'ORTAK@X.TEST' })[0]).Server -eq 'SRV2')
+Assert-True 'Ortak aday iki kez taranmadi' `
+    ((@($scaleTargets | Where-Object { $_ -eq 'ORTAK@X.TEST' })).Count -eq 1)
+Assert-True 'Turkce I: Ilker/ilker TEK aday sayildi' `
+    ((@($scaleTargets | Where-Object { $_ -like '*lker@x.test' })).Count -eq 1) ($scaleTargets -join ', ')
+Assert-True 'Turkce I: en yuksek sirali kayit (SRV1) kaldi' `
+    ((@($scaleEvidence | Where-Object { $_.Mailbox -like '*lker@x.test' })[0]).Server -eq 'SRV1')
+# Kapi 5 kisi aliyor: ORTAK (999999) ve uc sunucunun tepe kaydi ($perServer),
+# arti bir sonraki en yuksek ($perServer - 1). Bu kumenin DISINDA hicbir aday
+# taranmamali - taransaydi secim sirasi bozulmus olurdu.
+$allowedTop = @('ORTAK@X.TEST', 'Ilker@x.test')
+foreach ($srv in $scaleServers) {
+    $allowedTop += ('user{0}@{1}.test' -f $perServer, $srv)
+    $allowedTop += ('user{0}@{1}.test' -f ($perServer - 1), $srv)
+}
+Assert-True 'Secilenlerin hepsi en ust sirali adaylardan' `
+    ((@($scaleTargets | Where-Object { $allowedTop -notcontains $_ })).Count -eq 0) `
+    ($scaleTargets -join ', ')
+
+# ---------------------------------------------------------------------------
 # Yalnizca KENDI klasorunu siler.
 Remove-Item -LiteralPath $FixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 

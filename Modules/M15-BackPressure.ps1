@@ -113,7 +113,14 @@ Register-EDModule @{
 
         $pressureValues = @{}; $rejectValues = @{}; $recoveryValues = @{}; $lastValues = @{}
         $cellStatus = @{}
-        $evidence = @()
+        # '+=' DEGIL: PowerShell dizisi sabit boyutludur ve '+=' her eklemede
+        # diziyi bastan kopyalar, yani n olay icin O(n^2) kopyalama yapar.
+        # Buradaki n sinirsizdir: 24 saatlik pencerede SUREKLI baski altindaki
+        # bir transport sunucusu 15004/15005 ciftini binlerce kez yazar ve
+        # sayi TUM SUNUCULAR uzerinden toplanir. Olculdu (M24'teki ayni kalip):
+        # n=20.000 -> 10,1 sn, n=50.000 -> 69,8 sn. Yani modulun en yavas
+        # kostugu an, tam da en cok bulgu oldugu andi.
+        $evidence = New-Object 'System.Collections.Generic.List[object]'
         $problems = @()
         $recoveryNotes = @()
         # Olculemeyen sunucular. Bunlar icin "olay yok" DENEMEZ; sayilari
@@ -150,45 +157,89 @@ Register-EDModule @{
             $anyData = $true
             $events = @(Get-EDProperty $row 'Events' @())
 
-            $increased = @($events | Where-Object { [int](Get-EDProperty $_ 'Id') -eq 15004 })
-            $decreased = @($events | Where-Object { [int](Get-EDProperty $_ 'Id') -eq 15005 })
-            $rejecting = @($events | Where-Object { [int](Get-EDProperty $_ 'Id') -in @(15006, 15007) })
-
-            $pressureValues[$server] = $increased.Count
-            $rejectValues[$server] = $rejecting.Count
-            $recoveryValues[$server] = $decreased.Count
-
-            $latest = @($events | Sort-Object -Property { Get-EDProperty $_ 'Time' } -Descending | Select-Object -First 1)
-            $latestId = 0
+            # OLAY LISTESI UZERINDE TEK GECIS.
+            #
+            # Eskiden ayni liste BES kez dolasiliyordu: uc `Where-Object`
+            # suzgeci, "son olay" icin bir `Sort-Object` ve kanit dongusu.
+            # Her adim olay basina en az bir `Get-EDProperty` cagiriyordu;
+            # o da `[CmdletBinding()]` tasiyan gelismis bir fonksiyondur ve
+            # cagri basina parametre baglama maliyeti oder. OLCULDU (sahte
+            # yurutucu, 4.195 olay): bes gecis 2,2 sn, tek gecis 0,4 sn.
+            # n sinirsizdir - surekli baski altindaki bir transport sunucusu
+            # 24 saatte 15004/15005 ciftini binlerce kez yazar ve sayilar TUM
+            # SUNUCULAR uzerinden toplanir. Yani modul, tam da en cok bulgu
+            # oldugu anda en yavas kosuyordu.
+            #
+            # Get-EDProperty'nin varlik sebebi korunur: uzak oturumdan gelen
+            # deserialize nesnede `$o.Properties['X']` null doner, dogru yazim
+            # `$o.PSObject.Properties['X']`'tir. Sicak dongude fonksiyon degil
+            # DOGRUDAN bu yazim kullanilir - ayni semantik, baglama maliyeti yok.
+            $increasedCount = 0
+            $decreasedCount = 0
+            $rejectingCount = 0
+            $latestEvent = $null
             $latestTime = $null
-            if ($latest.Count -gt 0) {
-                $latestId = [int](Get-EDProperty $latest[0] 'Id' 0)
-                $time = Get-EDProperty $latest[0] 'Time'
-                if ($time) { $latestTime = [datetime]$time }
+
+            foreach ($event in $events) {
+                $properties = $event.PSObject.Properties
+
+                $idProperty = $properties['Id']
+                $id = $(if ($null -ne $idProperty -and $null -ne $idProperty.Value) { [int]$idProperty.Value } else { 0 })
+                if ($id -eq 15004) { $increasedCount++ }
+                elseif ($id -eq 15005) { $decreasedCount++ }
+                elseif ($id -eq 15006 -or $id -eq 15007) { $rejectingCount++ }
+
+                # EN GEC OLAY: tek gecis, siralama yok. Eskiden
+                # `Sort-Object -Property { Get-EDProperty $_ 'Time' }` ile TUM
+                # olaylar siralanip ilki aliniyordu - yalnizca MAKSIMUMU bulmak
+                # icin n log n PSObject karsilastirmasi.
+                $timeProperty = $properties['Time']
+                $timeValue = $(if ($null -ne $timeProperty) { $timeProperty.Value } else { $null })
+                if ($timeValue) {
+                    $parsed = [datetime]$timeValue
+                    if ($null -eq $latestTime -or $parsed -gt $latestTime) {
+                        $latestTime = $parsed
+                        $latestEvent = $event
+                    }
+                }
+
+                $providerProperty = $properties['Provider']
+                $messageProperty = $properties['Message']
+                $message = $(if ($null -ne $messageProperty -and $null -ne $messageProperty.Value) { [string]$messageProperty.Value } else { '' })
+                if ($message.Length -gt 400) { $message = $message.Substring(0, 400) + '...' }
+
+                $evidence.Add([pscustomobject]@{
+                    Server    = $server
+                    OlayId    = $id
+                    Zaman     = $(if ($timeValue) { [string]$timeValue } else { '' })
+                    Saglayici = $(if ($null -ne $providerProperty -and $null -ne $providerProperty.Value) { [string]$providerProperty.Value } else { '' })
+                    Mesaj     = $message
+                })
+            }
+
+            $pressureValues[$server] = $increasedCount
+            $rejectValues[$server] = $rejectingCount
+            $recoveryValues[$server] = $decreasedCount
+
+            # Zamani okunamayan olaylar da bir "son olay" adayi olmali: hicbiri
+            # zaman tasimiyorsa ilk olayin ID'si yine de bildirilir.
+            if ($null -eq $latestEvent -and $events.Count -gt 0) { $latestEvent = $events[0] }
+
+            $latestId = 0
+            if ($null -ne $latestEvent) {
+                $latestId = [int](Get-EDProperty $latestEvent 'Id' 0)
                 $lastValues[$server] = $(if ($latestTime) { $latestTime.ToString('MM-dd HH:mm') } else { '-' })
             }
             else { $lastValues[$server] = '-' }
 
-            foreach ($event in $events) {
-                $message = [string](Get-EDProperty $event 'Message')
-                if ($message.Length -gt 400) { $message = $message.Substring(0, 400) + '...' }
-                $evidence += [pscustomobject]@{
-                    Server    = $server
-                    OlayId    = [int](Get-EDProperty $event 'Id')
-                    Zaman     = [string](Get-EDProperty $event 'Time')
-                    Saglayici = [string](Get-EDProperty $event 'Provider')
-                    Mesaj     = $message
-                }
-            }
-
             # Brief: herhangi biri = FAIL.
-            if ($rejecting.Count -gt 0) {
+            if ($rejectingCount -gt 0) {
                 $cellStatus[$server] = 'FAIL'
-                $problems += "$server : $($rejecting.Count) reddetme olayi (15006/15007)"
+                $problems += "$server : $rejectingCount reddetme olayi (15006/15007)"
             }
-            elseif ($increased.Count -gt 0) {
+            elseif ($increasedCount -gt 0) {
                 $cellStatus[$server] = 'FAIL'
-                $problems += "$server : $($increased.Count) kaynak baskisi olayi (15004)"
+                $problems += "$server : $increasedCount kaynak baskisi olayi (15004)"
             }
             else {
                 $cellStatus[$server] = 'OK'
@@ -209,7 +260,7 @@ Register-EDModule @{
                     $ageText = $(if ($minutes -lt 90) { "$minutes dakika once" }
                                  else { "{0} saat once" -f [int][math]::Round($minutes / 60) })
                 }
-                $counts = "15004 x$($increased.Count), 15005 x$($decreased.Count), 15006/15007 x$($rejecting.Count)"
+                $counts = "15004 x$increasedCount, 15005 x$decreasedCount, 15006/15007 x$rejectingCount"
                 if ($latestId -eq 15005) {
                     $recoveryNotes += ("{0}: son olay TOPARLANMA (15005), {1} - baski gecmis gorunuyor ({2}). Hukum yine de FAIL: baski YASANDI ve o sirada mesajlar kabul edilmedi; gecikme sikayeti o pencereye denk geliyorsa sebep budur." -f $server, $ageText, $counts)
                 }

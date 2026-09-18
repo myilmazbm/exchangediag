@@ -561,6 +561,79 @@ $before = $script:CimCalls['Win32_Volume']
 Get-EDVolumeInventory -Context $context | Out-Null
 Assert-Equal 'Ikinci cagri sunucuya gitmedi' $before $script:CimCalls['Win32_Volume']
 
+# ---------------------------------------------------------------------------
+Write-Host "`n=== 10. Bellek ongorusu (Get-EDMemoryForecast) ===" -ForegroundColor Cyan
+<#
+    NE OLCULUYOR
+    Aracin kodunda bellek MIKTARINA bakan tek bir satir yoktu; tek fren
+    `parallelism <= 8` idi ve olculen tepe kullanim eszamanlilikla TAM x N
+    buyuyordu (M11: 313 / 593 / 1.225 MB - 1/2/4 es zamanli is). Buradaki
+    iddia "fonksiyon bir sayi dondurdu" degil, HUKMUN ve ONERININ girdilerle
+    birlikte DEGISTIGIDIR: ayni makinede yalnizca pencere buyudugunde ongoru
+    OK'ten WARN'a gecmeli, oneri de kucultmeli.
+
+    Bellek DISARIDAN verilir; test makinesinin o anki bos bellegine bagli
+    kalirsa iddia deterministik olmaz.
+#>
+
+$coef = Get-EDMemoryCoefficients
+Assert-True 'Katsayilar tek yerde toplandi' `
+    ($coef.BaseMegabytes -gt 0 -and $coef.MegabytesPerLogMb -gt 0 -and $coef.AbandonFactor -ge 1)
+
+# 10a. Sigan kosum OK; oneri kirpilmaz.
+# is basina = 50 + 1000 x 0.12 = 170 MB; tepe = 170 x 2 x 2 = 680 MB.
+# kullanilabilir = 30.000 - max(1024, 32.768 x 0.20 = 6.554) = 23.446 MB.
+$fit = Get-EDMemoryForecast -Parallelism 2 -WindowHours 1 -LogMegabytesPerServer 1000 `
+    -AvailableMegabytes 30000 -TotalMegabytes 32768
+Assert-Equal 'Sigan kosum OK' 'OK' $fit.Verdict
+Assert-Equal 'Is basina ongoru 170 MB' 170 $fit.PerJobMegabytes
+Assert-Equal 'Tepe ongorusu terk carpanini iceriyor' 680 $fit.ForecastMegabytes
+Assert-Equal 'Esme derecesi kisilmadi' 2 $fit.SafeParallelism
+Assert-True 'Olculmus hacim oldugu notta yazili' ($fit.Message -like '*OLCULDU*') $fit.Message
+
+# 10b. AYNI makine, YALNIZCA pencere buyudu -> WARN ve daha kucuk oneri.
+# is basina = 50 + 40.000 x 0.12 = 4.850 MB; en kotu is = 9.700 MB.
+# tepe = 4.850 x 4 x 2 = 38.800 > 23.446 -> WARN, safe = floor(23.446/9.700) = 2.
+$tight = Get-EDMemoryForecast -Parallelism 4 -WindowHours 8 -LogMegabytesPerServer 40000 `
+    -AvailableMegabytes 30000 -TotalMegabytes 32768
+Assert-Equal 'Pencere buyuyunce hukum WARN' 'WARN' $tight.Verdict
+Assert-Equal 'Daha kucuk esme derecesi onerildi' 2 $tight.SafeParallelism
+Assert-True 'Onerilen sayi notta adiyla gecti' ($tight.Message -like '*yerine 2 onerilir*') $tight.Message
+Assert-True 'Sessizce takasa dusmenin bedeli yazildi' ($tight.Message -like '*takasa dusen*')
+
+# 10c. Tek is bile sigmiyorsa "esmeyi kis" DEMEZ - pencereyi daraltmayi soyler.
+# 16 GB is istasyonu, 24 saatlik pencere, sunucu basina 100.800 MB log:
+# is basina = 50 + 12.096 = 12.146 MB, en kotu 24.292 MB; kullanilabilir
+# = 12.000 - max(1024, 16.384 x 0.20 = 3.277) = 8.723 MB.
+$hopeless = Get-EDMemoryForecast -Parallelism 4 -WindowHours 24 -LogMegabytesPerServer 100800 `
+    -AvailableMegabytes 12000 -TotalMegabytes 16384
+Assert-Equal 'Tek is bile sigmiyorsa yine WARN' 'WARN' $hopeless.Verdict
+Assert-True 'Esmeyi kismanin YETMEYECEGI soylendi' ($hopeless.Message -like '*yapmak bile YETMEZ*') $hopeless.Message
+Assert-True 'Cozum olarak pencere daraltmak gosterildi' ($hopeless.Message -like '*WindowHours*')
+Assert-True 'Yaniltici "esme X onerilir" cumlesi KURULMADI' ($hopeless.Message -notlike '*onerilir*')
+
+# 10d. Hacim olculmediyse dayanak CUMLENIN BASINDA soylenir.
+$assumed = Get-EDMemoryForecast -Parallelism 4 -WindowHours 8 `
+    -AvailableMegabytes 30000 -TotalMegabytes 32768
+Assert-True 'Varsayim oldugu basta yazili' ($assumed.Message -like 'VARSAYIMA DAYALI ONGORU*') $assumed.Message
+Assert-Equal 'Olculmedigi alanda da isaretli' $false $assumed.LogMeasured
+
+# 10e. Bellek OKUNAMADIYSA hukum verilmez - "yeterli bellek var" DENMEZ.
+# Yerel olcum yolu, bilinmeyen bir CIM sinifi gibi patlatilarak zorlanir.
+function Get-CimInstance { param([string]$ClassName, $ErrorAction) throw 'CIM kapali' }
+$unknown = Get-EDMemoryForecast -Parallelism 4 -WindowHours 8
+Remove-Item -LiteralPath 'function:\Get-CimInstance' -Force
+Assert-Equal 'Bellek okunamazsa N/A' 'N/A' $unknown.Verdict
+Assert-True 'Sessizce OK denmedi' ($unknown.Message -like '*DEGILDIR*') $unknown.Message
+Assert-Equal 'Okunamayan bellek 0 UYDURULMADI' $null $unknown.AvailableMegabytes
+
+# 10f. Eszamanlilik dogrusal carpar (olculen davranis: tam x N).
+$one = Get-EDMemoryForecast -Parallelism 1 -WindowHours 1 -LogMegabytesPerServer 1000 `
+    -AvailableMegabytes 30000 -TotalMegabytes 32768
+$four = Get-EDMemoryForecast -Parallelism 4 -WindowHours 1 -LogMegabytesPerServer 1000 `
+    -AvailableMegabytes 30000 -TotalMegabytes 32768
+Assert-Equal 'Dort es zamanli is dort kat ongoru' (4 * $one.ForecastMegabytes) $four.ForecastMegabytes
+
 Write-EDTestSummary
 if (Test-Path -LiteralPath $script:OutputDir) {
     Remove-Item -LiteralPath $script:OutputDir -Recurse -Force -ErrorAction SilentlyContinue

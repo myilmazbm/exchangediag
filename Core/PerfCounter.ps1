@@ -435,3 +435,244 @@ function Get-EDPerfInstances {
     }
     return @($names | Sort-Object)
 }
+
+# ---------------------------------------------------------------------------
+# BELLEK ONGORUSU
+#
+# NEDEN BURADA: bu katmanin isi "makinenin kaynagini olcmek"tir. Sayac
+# ornekleyen fonksiyonlarla ayni dosyada durmasi, olcum kodunu tek yerde
+# toplar.
+#
+# NEDEN VAR: aracin kodunda bellek MIKTARINA bakan tek bir satir yoktu; tek
+# fren `parallelism <= 8` idi. Olculdu (gercek yurutucu, N eszamanli is):
+#     eszamanli 1 -> M11 tepe   313 MB, M10 tepe  69 MB
+#     eszamanli 2 -> M11 tepe   593 MB
+#     eszamanli 4 -> M11 tepe 1.225 MB, M10 tepe 258 MB
+# Yani tam x N. Ustune brief md.9'daki terk telafisi havuz tavanini baslangic
+# degerinin IKI KATINA kadar cikarabilir.
+#
+# Pencere ile buyume ayristiricinin kendisinden olculdu (bu depo, sentetik
+# MSGTRKMD fixture'i, ic paralellik 2; tepe yonetilen yigin AYNI surecte ayri
+# bir runspace ile 2 ms'de bir orneklendi):
+#     log  86 MB (  240.600 satir) -> tepe  51,0 MB
+#     log 172 MB (  480.600 satir) -> tepe  53,5 MB
+#     log 345 MB (  960.600 satir) -> tepe  62,9 MB
+#     log 692 MB (1.920.600 satir) -> tepe 101,8 MB
+# En buyuk iki noktadan egim: (101,8-62,9)/(692-345) = 0,112 MB yigin / MB log.
+# Asagidaki katsayilar bilerek TEMKINLI yuvarlandi (0,12 ve 50 MB taban):
+# bu fonksiyonun isi UYARMAKTIR. Hafife almak sessizce takasa dusmek demektir;
+# fazla tahmin etmenin bedeli yalnizca bir uyari fazlasidir.
+#
+# ⚠️ BU BIR TAVAN DEGILDIR. Arac hicbir seyi zorla sinirlamaz; ongoruyu
+# operatore SOYLER ve gerekiyorsa daha kucuk bir esme derecesi ONERIR -
+# `PowerShellMaxConcurrency` icin zaten yapilan sey (brief md.5, bolum 5).
+# Sessizce takasa dusmek kabul edilemez: arac o anda teshis etmeye calistigi
+# ortami birakip kendi makinesini boger ve basta SURE olcumleri olmak uzere
+# butun sonuclari tartismali hale getirir.
+# ---------------------------------------------------------------------------
+
+function Get-EDMemoryCoefficients {
+    <#
+        Ongoru katsayilari TEK YERDE ve ezilebilir. Sabit sayilarin govdeye
+        dagilmasi, olcum degistiginde birini gozden kacirmak demektir.
+    #>
+    return [pscustomobject]@{
+        # Is basina sabit maliyet (runspace + dosya tamponlari + ayristirici
+        # iskeleti). Olcumdeki 24-50 MB araliginin UST ucu alindi.
+        BaseMegabytes       = 50.0
+        # Pencereye dusen ham log MB'i basina yonetilen yigin MB'i.
+        MegabytesPerLogMb   = 0.12
+        # Log uretim hizi bilinmiyorsa kullanilan varsayilan (sunucu basina,
+        # saatte). Musteri olcegi: ~5,2M satir / ~4,2 GB saat basina.
+        DefaultLogMbPerHour = 4200.0
+        # Brief md.9: terk edilen her is icin havuz tavani bir artirilir, en
+        # cok baslangic degerinin IKI KATINA kadar. Ongoru bunu saymazsa en
+        # kotu hali degil en iyi hali soylemis olur.
+        AbandonFactor       = 2.0
+        # Isletim sistemine ve digerlerine birakilan pay.
+        ReserveFraction     = 0.20
+        ReserveMinMegabytes = 1024.0
+    }
+}
+
+function Get-EDLocalMemoryMb {
+<#
+    .SYNOPSIS
+        Bu makinenin toplam ve bos fiziksel bellegi (MB). Okunamazsa $null.
+
+    .DESCRIPTION
+        Arac YONETICI IS ISTASYONUNDA kosar; riske giren bellek de orasininki.
+        Bu yuzden olcum uzak sunucudan degil YERELDEN alinir.
+
+        Okunamadiginda 0 DONDURULMEZ: sifir "hic bellek yok" demek olur ve
+        ongoru her zaman uyari verirdi. Bilinmiyor bilinmiyordur ($null) ve
+        cagiran hukum vermez - brief md.4'teki N/A ilkesi.
+#>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        # Her iki alan da KB'dir (Win32_OperatingSystem sozlesmesi).
+        $total = [double]$os.TotalVisibleMemorySize / 1024.0
+        $free = [double]$os.FreePhysicalMemory / 1024.0
+        if ($total -le 0) { return $null }
+        return [pscustomobject]@{ TotalMegabytes = $total; FreeMegabytes = $free }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-EDMemoryForecast {
+<#
+    .SYNOPSIS
+        Bir kosumun tepe bellek kullanimini ONCEDEN tahmin eder ve gerekirse
+        daha kucuk bir esme derecesi onerir.
+
+    .DESCRIPTION
+        Hesap:
+            isBasinaMB = Taban + (PencereLogMB x MBperLogMB)
+            tepeMB     = isBasinaMB x EsmeDerecesi x TerkCarpani
+        Kullanilabilir = bos fiziksel bellek - isletim sistemi payi.
+
+        Hukum:
+            N/A  - bellek OKUNAMADI; tahmin yapilmaz, "sorun yok" da denmez
+            OK   - ongoru kullanilabilir bellegin altinda
+            WARN - ongoru asiyor. Tek is bile sigmiyorsa esme derecesini
+                   kismak COZMEZ ve bu acikca soylenir: tek kaldirac penceredir.
+
+    .OUTPUTS
+        Ongoru nesnesi: Verdict / Message / SafeParallelism / sayilar.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Parallelism,
+        [Parameter(Mandatory)][double]$WindowHours,
+        # Pencereye dusen ham log buyuklugu (SUNUCU BASINA, MB). Biliniyorsa
+        # verilir; o zaman tahmin degil OLCUM kullanilmis olur ve notta yazar.
+        [double]$LogMegabytesPerServer = 0,
+        # Bilinmiyorsa saatlik log hizi. 0 ise katsayi tablosundaki varsayilan.
+        [double]$LogMegabytesPerHour = 0,
+        # Cagiran ezmesi ve test icin; negatif = yerelden olc.
+        [double]$AvailableMegabytes = -1,
+        [double]$TotalMegabytes = -1,
+        $Coefficients
+    )
+
+    if ($null -eq $Coefficients) { $Coefficients = Get-EDMemoryCoefficients }
+    if ($Parallelism -lt 1) { $Parallelism = 1 }
+    if ($WindowHours -lt 0) { $WindowHours = 0 }
+
+    if ($AvailableMegabytes -lt 0 -or $TotalMegabytes -lt 0) {
+        $local = Get-EDLocalMemoryMb
+        if ($null -eq $local) {
+            return [pscustomobject]@{
+                Verdict            = 'N/A'
+                AvailableMegabytes = $null
+                TotalMegabytes     = $null
+                ReserveMegabytes   = $null
+                UsableMegabytes    = $null
+                PerJobMegabytes    = $null
+                ForecastMegabytes  = $null
+                LogMegabytes       = $null
+                LogMeasured        = $false
+                Parallelism        = $Parallelism
+                SafeParallelism    = $Parallelism
+                WindowHours        = $WindowHours
+                Message            = ('Fiziksel bellek okunamadi (Win32_OperatingSystem); bu kosumun ' +
+                                      'bellek ayak izi ONGORULEMEDI. Bu "yeterli bellek var" DEMEK ' +
+                                      'DEGILDIR: esme derecesi ' + $Parallelism + ' ve ' + $WindowHours +
+                                      ' saatlik pencere ile tepe kullanim bu makinenin bellegini ' +
+                                      'asabilir.')
+            }
+        }
+        if ($AvailableMegabytes -lt 0) { $AvailableMegabytes = $local.FreeMegabytes }
+        if ($TotalMegabytes -lt 0) { $TotalMegabytes = $local.TotalMegabytes }
+    }
+
+    $logMb = $LogMegabytesPerServer
+    $measured = $true
+    if ($logMb -le 0) {
+        $measured = $false
+        $rate = $LogMegabytesPerHour
+        if ($rate -le 0) { $rate = [double]$Coefficients.DefaultLogMbPerHour }
+        $logMb = $rate * $WindowHours
+    }
+
+    $perJob = [double]$Coefficients.BaseMegabytes + ($logMb * [double]$Coefficients.MegabytesPerLogMb)
+    $forecast = $perJob * $Parallelism * [double]$Coefficients.AbandonFactor
+
+    # Isletim sistemi payi TOPLAM bellekten hesaplanir. Bos bellegin yuzdesini
+    # ayirmak, makine zaten doluyken payi da kucultur ve tam da uyarilmasi
+    # gereken durumda uyariyi zayiflatirdi.
+    $reserve = [math]::Max([double]$Coefficients.ReserveMinMegabytes,
+                           $TotalMegabytes * [double]$Coefficients.ReserveFraction)
+    $usable = $AvailableMegabytes - $reserve
+    if ($usable -lt 0) { $usable = 0 }
+
+    # Onerilen esme derecesi de terk carpanini icerir; aksi halde oneri,
+    # havuz tavani yukselir yukselmez yeniden asilirdi.
+    $perJobWorst = $perJob * [double]$Coefficients.AbandonFactor
+    $safe = 0
+    if ($perJobWorst -gt 0) { $safe = [int][math]::Floor($usable / $perJobWorst) }
+    if ($safe -lt 1) { $safe = 1 }
+    if ($safe -gt $Parallelism) { $safe = $Parallelism }
+
+    # Dayanak CUMLENIN BASINDA durur. Olculmemis bir hacme dayanan ongoru,
+    # olculmus bir ongoruyle ayni cumleyle sunulursa operatör aradaki farki
+    # goremez ve uyariyi ya hep ciddiye alir ya hic almaz.
+    $basis = ''
+    if ($measured) {
+        $basis = 'Pencereye dusen log OLCULDU ({0:N0} MB/sunucu). ' -f $logMb
+    }
+    else {
+        $basis = ('VARSAYIMA DAYALI ONGORU: pencereye dusen log olculmedi, sunucu basina saatte ' +
+                  '{0:N0} MB varsayildi ({1:N0} MB/sunucu). Gercek hacmi vererek daraltin.') -f `
+                    ($logMb / [math]::Max($WindowHours, 1)), $logMb
+        $basis += ' '
+    }
+    $head = $basis + ('Bellek ongorusu: is basina ~{0:N0} MB x esme {1} x terk carpani {2:N1} = ~{3:N0} MB tepe; ' +
+             'bos {4:N0} MB, isletim sistemi payi {5:N0} MB sonrasi kullanilabilir {6:N0} MB ' +
+             '(pencere {7} saat).') -f `
+                $perJob, $Parallelism, [double]$Coefficients.AbandonFactor, $forecast,
+                $AvailableMegabytes, $reserve, $usable, $WindowHours
+
+    if ($forecast -le $usable) {
+        $verdict = 'OK'
+        $message = $head
+    }
+    else {
+        $verdict = 'WARN'
+        $message = $head + ' ONGORU KULLANILABILIR BELLEGI ASIYOR.'
+        if ($perJobWorst -gt $usable) {
+            # Tek is bile sigmiyorsa esme derecesini kismak COZMEZ; tek kaldirac
+            # penceredir. Bunu soylemeden "esmeyi 1 yapin" demek, operatoru bos
+            # bir ayar avina yollamaktir.
+            $message += (' Esme derecesini 1 yapmak bile YETMEZ (tek is en kotu halde ~{0:N0} MB): ' +
+                         '-WindowHours ile pencereyi DARALTIN ya da daha cok bellegi olan bir ' +
+                         'makineden kosturun.') -f $perJobWorst
+        }
+        else {
+            $message += (' Esme derecesi {0} yerine {1} onerilir.' -f $Parallelism, $safe)
+        }
+        $message += (' Takasa dusen bir arac, teshis etmeye calistigi ortami birakip kendi makinesini ' +
+                     'boger; sure olcumleri de dahil tum sonuclar tartismali olur.')
+    }
+
+    return [pscustomobject]@{
+        Verdict            = $verdict
+        AvailableMegabytes = [math]::Round($AvailableMegabytes, 0)
+        TotalMegabytes     = [math]::Round($TotalMegabytes, 0)
+        ReserveMegabytes   = [math]::Round($reserve, 0)
+        UsableMegabytes    = [math]::Round($usable, 0)
+        PerJobMegabytes    = [math]::Round($perJob, 0)
+        ForecastMegabytes  = [math]::Round($forecast, 0)
+        LogMegabytes       = [math]::Round($logMb, 0)
+        LogMeasured        = $measured
+        Parallelism        = $Parallelism
+        SafeParallelism    = $safe
+        WindowHours        = $WindowHours
+        Message            = $message
+    }
+}

@@ -34,68 +34,187 @@ Register-EDModule @{
         $maxScans = 50
         if ($environment.Contains('maxFolderScans')) { $maxScans = [int]$environment['maxFolderScans'] }
 
-        # --- Adaylari kanittan topla ---
-        $candidates = @()
+        # --- Adaylari kanittan topla: KAPI LISTEDEN ONCE UYGULANIR ---
+        #
+        # NEDEN BU KADAR AYRINTILI:
+        # Eskiden her aday bir PowerShell dizisine '+=' ile ekleniyordu.
+        # PowerShell dizisi SABIT BOYUTLUDUR; '+=' her seferinde bir boy buyuk
+        # yeni dizi ayirip eskisinin TAMAMINI kopyalar, yani n aday icin
+        # O(n^2) kopyalama yapar. Olculdu (ayni sahte yurutucu, tek sunucu):
+        # n=5.000 -> 0,56 sn; n=20.000 -> 10,14 sn; n=50.000 -> 69,76 sn.
+        # 4 kat girdi 18 kat sure demek - kare egrisi.
+        #
+        # Bu maliyet teorik degil: M12'nin yavas alici listesi KIRPILMAZ
+        # (TrackingLogParser.AnalyzeDeliveryLatency sozlugun tamamini dondurur)
+        # ve "yavas alici" = esigi asan teslimi olan benzersiz posta kutusu
+        # demektir. Aracin calistirildigi asil durumda - sunucunun tamami yavas -
+        # bu sayi posta kutusu sayisina esitlenir: 8 x 25.000 = 200.000 aday.
+        # Ustune ayni N uzerinde iki Sort-Object (PSObject karsilastirmali) ve
+        # bir hashtable tekillestirme geliyordu.
+        #
+        # maxFolderScans kapisi UYGULANIYORDU ama sinirsiz liste kurulduktan,
+        # iki kez siralandiktan ve tekillestirildikten SONRA: kap Exchange'i
+        # koruyordu, ARACI korumuyordu. Ustelik bu kosumun zaman siniri yok -
+        # Get-MailboxFolderStatistics cagrilarinin timeout'u var, aday
+        # toplamanin yok.
+        #
+        # Simdi kapi girdiyi tararken uygulanir: bellekte en fazla $maxScans
+        # aday NESNESI tutulur. Aday sayisi (kapsam paydasi) yine dogru
+        # raporlanir; onun icin yalnizca anahtarlarin kumesi tutulur, nesne
+        # uretilmez.
+        #
+        # OLCULDU (ayni sahte yurutucu, maxFolderScans=50):
+        #   n=  5.000 : 0,56 sn -> 0,16 sn
+        #   n= 20.000 : 10,14 sn -> 0,05 sn
+        #   n= 50.000 : 69,76 sn -> 0,06 sn
+        #   n=200.000 (8 sunucu): ~16 dk (kare egriden) -> 0,15 sn
+        # En kotu hal - girdi ARTAN siralamayla gelse, yani her aday esigi
+        # assa - yine DOGRUSALDIR: n=50.000 icin 3,75 sn, n=200.000 icin
+        # 2,13 sn (8 sunucuya bolundugunde esik daha cabuk yukselir). Iki
+        # kaynak da (M23 Sort-Object TimeInServer -Descending; parserin
+        # SlowRecipients listesi Count'a gore azalan) AZALAN geldigi icin
+        # gercek kosumda sicak yol ilk $maxScans adaydan sonra hic calismaz.
+        $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $sources = @()
+        $heavyRaw = 0
+        $slowRaw = 0
+
+        # Kapi durumu tek bir hashtable'da tutulur: yardimci fonksiyon degeri
+        # DEGISTIREBILSIN diye. PowerShell'de alt kapsamdan degisken ATAMASI
+        # ust kapsami etkilemez, ama nesne icine yazmak etkiler.
+        $gate = @{
+            Max   = $maxScans
+            Items = (New-Object 'System.Collections.Generic.List[object]')
+            # Karsilastirici ACIKCA verilir: bu sozluk "hangi adaylar secildi",
+            # $seenKeys ise "kac benzersiz aday vardi" sorusunu cevaplar ve
+            # ikisi AYNI tekillestirmeye dayanmak zorundadir - yoksa kapsam
+            # paydasi ile taranan kume birbirini tutmaz.
+            #
+            # DURUST NOT: duz '@{}' de bu is icin yeterliydi. PowerShell'in
+            # hashtable'i degismez kulture gore buyuk-kucuk harf duyarsizdir;
+            # olculdu - 'Ilker' ile 'ilker' tr-TR altinda da AYNI anahtar
+            # sayildi, yani buradaki degisiklik olculmus bir hata duzeltmesi
+            # DEGILDIR. Acikca yazilmasinin sebebi, eski kodun bu garantiyi
+            # anahtar basina bir $key.ToLowerInvariant() STRINGI ayirarak
+            # almasi: 200.000 adayda o tahsisi yapmamak icin karsilastiriciyi
+            # soylemek gerekiyor, ve soyleniyorsa iki yapida da ayni olmali.
+            ByKey = (New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::OrdinalIgnoreCase))
+            # maxScans < 1 ise hicbir aday tutulmaz: +sonsuz esigi sicak yolda
+            # tek karsilastirmayla bunu saglar, ayrica bir bayrak gerekmez.
+            MinRank = $(if ($maxScans -lt 1) { [double]::PositiveInfinity } else { [double]::NegativeInfinity })
+        }
+
+        function Add-EDFolderScanCandidate {
+            <#
+                Kapiyi asan adayi sirali listeye yerlestirir, tasan en dusuk
+                siralamaliyi atar ve yeni esigi ($Gate.MinRank) gunceller.
+
+                NEDEN SIRALI EKLEME: liste en fazla $Gate.Max (varsayilan 50)
+                eleman tutar, yani bir yerlestirme O(K)'dir ve K girdiye BAGLI
+                DEGILDIR. Cagri sayisi da sinirlidir - sicak yolda esigi asmayan
+                aday buraya hic ugramaz.
+            #>
+            param($Gate, [string]$Key, $Candidate)
+
+            if ([int]$Gate.Max -lt 1) { return }
+
+            $rank = [double]$Candidate.Rank
+
+            # Ayni posta kutusu birden fazla kaynaktan gelebilir; en yuksek
+            # siraya sahip olani kalir.
+            if ($Gate.ByKey.ContainsKey($Key)) {
+                $existing = $Gate.ByKey[$Key]
+                if ([double]$existing.Rank -ge $rank) { return }
+                [void]$Gate.Items.Remove($existing)
+                [void]$Gate.ByKey.Remove($Key)
+            }
+
+            $position = $Gate.Items.Count
+            for ($i = 0; $i -lt $Gate.Items.Count; $i++) {
+                if ($rank -gt [double]$Gate.Items[$i].Rank) { $position = $i; break }
+            }
+            $Gate.Items.Insert($position, $Candidate)
+            $Gate.ByKey[$Key] = $Candidate
+
+            if ($Gate.Items.Count -gt [int]$Gate.Max) {
+                $dropped = $Gate.Items[$Gate.Items.Count - 1]
+                $Gate.Items.RemoveAt($Gate.Items.Count - 1)
+                [void]$Gate.ByKey.Remove([string]$dropped.Key)
+            }
+
+            if ($Gate.Items.Count -ge [int]$Gate.Max) {
+                $Gate.MinRank = [double]$Gate.Items[$Gate.Items.Count - 1].Rank
+            }
+        }
+
+        # Sicak yoldaki tek karsilastirma icin yerel kopya: hashtable indeksi
+        # yerine duz degisken okunur.
+        $minRank = [double]$gate.MinRank
 
         if ($Context.Cache.ContainsKey('HeavyMailboxes')) {
             foreach ($entry in @($Context.Cache['HeavyMailboxes'])) {
                 if ($entry.IsSystem) { continue }
-                $candidates += [pscustomobject]@{
+                $heavyRaw++
+                $key = [string]$entry.MailboxGuid
+                if (-not $key) { continue }
+                [void]$seenKeys.Add($key)
+                $rank = [double]$entry.TimeInServer
+                # Esigin ALTINDAKI aday icin nesne bile uretilmez. Esit olan da
+                # gecmez: kapi doluyken beraberlik ilk gelene kalir.
+                if ($rank -le $minRank) { continue }
+                Add-EDFolderScanCandidate -Gate $gate -Key $key -Candidate ([pscustomobject]@{
+                    Key      = $key
                     Identity = $entry.MailboxGuid
                     Display  = $entry.DisplayName
                     Server   = $entry.Server
                     Database = $entry.Database
                     Source   = 'M23 agir kullanici'
-                    Rank     = $entry.TimeInServer
-                }
+                    Rank     = $rank
+                })
+                $minRank = [double]$gate.MinRank
             }
-            if ($candidates.Count -gt 0) { $sources += "M23 ($($candidates.Count) agir kullanici)" }
+            if ($heavyRaw -gt 0) { $sources += "M23 ($heavyRaw agir kullanici)" }
         }
 
         if ($Context.Cache.ContainsKey('DeliveryAnalysis')) {
-            $slowRecipients = @()
             foreach ($server in @($Context.Cache['DeliveryAnalysis'].Keys)) {
                 foreach ($recipient in $Context.Cache['DeliveryAnalysis'][$server].SlowRecipients) {
-                    $slowRecipients += [pscustomobject]@{
+                    $slowRaw++
+                    $key = [string]$recipient.Recipient
+                    if (-not $key) { continue }
+                    # HashSet OrdinalIgnoreCase: ToLowerInvariant() cagrisi
+                    # aday basina bir string AYIRIRDI, 200.000 adayda bos yere.
+                    [void]$seenKeys.Add($key)
+                    $rank = [double]$recipient.Count
+                    if ($rank -le $minRank) { continue }
+                    Add-EDFolderScanCandidate -Gate $gate -Key $key -Candidate ([pscustomobject]@{
+                        Key      = $key
                         Identity = $recipient.Recipient
                         Display  = $recipient.Recipient
                         Server   = $server
                         Database = ''
                         Source   = 'M12 yavas teslim alicisi'
-                        Rank     = $recipient.Count
-                    }
+                        Rank     = $rank
+                    })
+                    $minRank = [double]$gate.MinRank
                 }
             }
-            if ($slowRecipients.Count -gt 0) {
-                $candidates += $slowRecipients
-                $sources += "M12 ($($slowRecipients.Count) yavas teslim alicisi)"
-            }
+            if ($slowRaw -gt 0) { $sources += "M12 ($slowRaw yavas teslim alicisi)" }
         }
 
-        if ($candidates.Count -eq 0) {
+        if (($heavyRaw + $slowRaw) -eq 0) {
             return @(New-EDRow -Module 'M24' -Check 'Buyuk klasorler' -Status 'N/A' `
                 -Note 'Taranacak aday yok. M24 kaniti takip eder: once M23 (agir kullanicilar) veya M10/M12 (yavas teslimler) calistirilmali. Tek basina tum posta kutularini taramak uretimde kabul edilemez.')
         }
 
-        # Ayni posta kutusu birden fazla kaynaktan gelebilir; en yuksek siraya
-        # sahip olani kalir.
-        $unique = @{}
-        foreach ($candidate in ($candidates | Sort-Object -Property Rank -Descending)) {
-            $key = [string]$candidate.Identity
-            if (-not $key) { continue }
-            if (-not $unique.ContainsKey($key.ToLowerInvariant())) {
-                $unique[$key.ToLowerInvariant()] = $candidate
-            }
-        }
+        # Kapsam paydasi: BENZERSIZ aday sayisi (eskiden $ranked.Count).
+        $candidateCount = $seenKeys.Count
+        $targets = $gate.Items.ToArray()
+        # Bolme guvenligi: $candidateCount bos olamaz (yukarida kontrol edilir)
+        # ama invaryant iki cagiranin garantisine dayaniyordu, yerel koruma yoktu.
+        $attemptCoverage = $(if ($candidateCount -gt 0) { [math]::Round(($targets.Count / $candidateCount) * 100, 1) } else { 0 })
 
-        $ranked = @($unique.Values | Sort-Object -Property Rank -Descending)
-        $targets = @($ranked | Select-Object -First $maxScans)
-        # Bolme guvenligi: $ranked bos olamaz (yukarida kontrol edilir) ama
-        # invaryant iki cagiranin garantisine dayaniyordu, yerel koruma yoktu.
-        $attemptCoverage = $(if ($ranked.Count -gt 0) { [math]::Round(($targets.Count / $ranked.Count) * 100, 1) } else { 0 })
-
-        $log.Info("M24: $($ranked.Count) aday posta kutusu ($($sources -join ', ')); $($targets.Count) tanesi taranacak (%$attemptCoverage).")
+        $log.Info("M24: $candidateCount aday posta kutusu ($($sources -join ', ')); $($targets.Count) tanesi taranacak (%$attemptCoverage).")
 
         # --- Klasor istatistikleri (pahali cagri, paralel) ---
         $tasks = @(foreach ($target in $targets) {
@@ -112,9 +231,13 @@ Register-EDModule @{
         $targetByKey = @{}
         foreach ($target in $targets) { $targetByKey[([string]$target.Identity).ToLowerInvariant()] = $target }
 
-        $oversizedFolders = @()
-        $oversizedCalendars = @()
-        $evidence = @()
+        # Buyuyen listeler icin '+=' KULLANILMAZ (bkz. aday toplama basligi).
+        # Buradaki n = taranan posta kutusu x posta kutusu basina klasor sayisi;
+        # 50 posta kutusu x birkac yuz klasor kolayca on binlere cikar ve ayni
+        # kare kopyalama egrisi burada da olusur.
+        $oversizedFolders = New-Object 'System.Collections.Generic.List[object]'
+        $oversizedCalendars = New-Object 'System.Collections.Generic.List[object]'
+        $evidence = New-Object 'System.Collections.Generic.List[object]'
         $scanned = 0
         $failed = 0
         # Sunucu basina BASARIYLA okunan posta kutusu sayisi. "Kac tanesini
@@ -164,8 +287,8 @@ Register-EDModule @{
                         Durum       = $status
                         Kaynak      = $(if ($target) { $target.Source } else { '' })
                     }
-                    $evidence += $record
-                    if ($isCalendar) { $oversizedCalendars += $record } else { $oversizedFolders += $record }
+                    $evidence.Add($record)
+                    if ($isCalendar) { $oversizedCalendars.Add($record) } else { $oversizedFolders.Add($record) }
                 }
             }
         }
@@ -215,16 +338,16 @@ Register-EDModule @{
         }
 
         # KAPSAM yuzdesi DENENEN degil BASARILI okunan sayidan hesaplanir.
-        # Eskiden $targets.Count / $ranked.Count kullaniliyor ama cumlede
+        # Eskiden $targets.Count / aday sayisi kullaniliyor ama cumlede
         # $scanned yaziliyordu: 4 adaydan 3 sorgu basarisiz olunca rapor
         # "4 adaydan 1 tanesi tarandi (%100)" diyordu.
-        $coverage = $(if ($ranked.Count -gt 0) { [math]::Round(($scanned / $ranked.Count) * 100, 1) } else { 0 })
-        $coverageNote = ("KAPSAM: $($ranked.Count) aday posta kutusundan $scanned tanesi BASARIYLA tarandi (%$coverage). " +
+        $coverage = $(if ($candidateCount -gt 0) { [math]::Round(($scanned / $candidateCount) * 100, 1) } else { 0 })
+        $coverageNote = ("KAPSAM: $candidateCount aday posta kutusundan $scanned tanesi BASARIYLA tarandi (%$coverage). " +
                          "Aday kaynagi: $($sources -join ', '). ")
         if ($failed -gt 0) {
             $coverageNote += "$failed posta kutusu sorgulanamadi (dis adres veya dagitim grubu olabilir). "
         }
-        if ($targets.Count -lt $ranked.Count) {
+        if ($targets.Count -lt $candidateCount) {
             $coverageNote += "Sinir maxFolderScans=$maxScans; genisletmek icin environment.json'dan artirin. "
         }
         $coverageNote += 'Bu bir ORNEKLEMDIR: burada bulunmamasi buyuk klasor olmadigi anlamina gelmez.'
