@@ -211,7 +211,14 @@ function Get-EDCmdletDeliveryAnalysis {
     $analysis.Via = 'cmdlet'
     $analysis.SlowThresholdSeconds = $SlowThresholdSeconds
 
-    $task = New-EDExchangeTask -Key $Server -Command 'Get-MessageTrackingLog' -TimeoutSeconds 600 `
+    # Cmdlet yolu tek basina 10 dakika yiyebilir; kalan kosum butcesiyle
+    # kirpilir. Burada kooperatif bir butce YOKTUR - Get-MessageTrackingLog
+    # uzak uctadir ve durma istegini gormez, yani bu timeout dolarsa is
+    # TERK EDILIR (ParallelExecutor). Alt sinir bu yuzden daha yuksek tutulur:
+    # her isi saniyelik timeout'la baslatmak, hepsini terk ettirip havuzu
+    # bogardi ve butceyi korurken kosumun geri kalanini yok ederdi.
+    $cmdletTimeout = Get-EDBudgetedSeconds -Context $Context -Requested 600 -Floor 60
+    $task = New-EDExchangeTask -Key $Server -Command 'Get-MessageTrackingLog' -TimeoutSeconds $cmdletTimeout `
         -Parameters @{
             Server     = $Server
             EventId    = 'DELIVER'
@@ -400,8 +407,24 @@ function Get-EDDeliveryAnalysis {
                 $Server, $UncPath, 'MSGTRKMD', $StartUtc, $EndUtc, $TopSlowCount, $InnerParallelism, $SlowThreshold, $deadlineUtc)
         }
 
+        # BUTCE IKI KATMANLIDIR VE USTTEKI KATMAN ARTIK KOSUM BUTCESIDIR.
+        #
+        # 840 < 900 iliskisi korunur (kooperatif butce, yurutucu timeout'unun
+        # 60 sn altinda kalir; gerekcesi brief Bolum 4 madde 9). Yeni olan,
+        # ikisinin de KOSUM butcesinden geriye kalanla kirpilmasi: geriye 2
+        # dakika kalmisken tek bir sunucunun log ayristirmasina 14 dakika
+        # vermek, kosum butcesini bastan anlamsiz kilardi. Kesilen pencere
+        # sessiz kalmaz - ayristirici kismi sonuc dondurur, M10/M11 satiri
+        # WARN olur ve notta "PENCERE KISMI" yazar.
+        #
+        # BudgetSeconds ASLA 0 GECILMEZ: orada 0 "sinirsiz" demektir ve
+        # butceyi korumak icin yapilan kirpma, butceyi tamamen KALDIRIRDI.
+        # Get-EDBudgetedSeconds'in alt siniri bunu garanti eder.
+        $parserBudget = Get-EDBudgetedSeconds -Context $Context -Requested 840 -Floor 30
+        $parserTimeout = $parserBudget + 60
+
         $tasks = foreach ($location in $smbTargets) {
-            New-EDLocalTask -Key $location.Server -Script $analyze -TimeoutSeconds 900 -Parameters @{
+            New-EDLocalTask -Key $location.Server -Script $analyze -TimeoutSeconds $parserTimeout -Parameters @{
                 Server           = $location.Server
                 UncPath          = $location.UncPath
                 StartUtc         = $startUtc
@@ -409,7 +432,7 @@ function Get-EDDeliveryAnalysis {
                 SlowThreshold    = $slowThreshold
                 TopSlowCount     = 100
                 InnerParallelism = 2
-                BudgetSeconds    = 840
+                BudgetSeconds    = $parserBudget
             }
         }
 

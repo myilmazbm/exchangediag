@@ -214,6 +214,128 @@ function New-EDLocalTask {
     return $task
 }
 
+# ---------------------------------------------------------------------------
+# Kosum genelinde zaman butcesi (isbirlikci son tarih)
+# ---------------------------------------------------------------------------
+#
+# NEDEN ISBIRLIKCI: bir isi disaridan durdurmak MUMKUN DEGILDIR. Brief
+# Bolum 4/14 - PowerShell.Stop() senkrondur ve yerel kodda (ham log
+# ayristirma) donen bir is durma istegini hic gormez; yurutucu onu terk
+# eder. Ayni gercek modul seviyesinde de gecerli: modulun Run blogu ana is
+# parcaciginda senkron kosar, yani "modulun ortasinda kes" diye bir sey
+# yoktur. Uygulanabilir olan tek sey, kararin VERILEBILDIGI noktalarda son
+# tarihe bakmaktir:
+#   - moduller arasinda (Invoke-ExchangeDiag.ps1 dongusu)
+#   - ayristiriciya gecirilen deadlineUtc (Core\TrackingLog.ps1)
+# Bu yuzden butce bir GARANTI degil HEDEFTIR; asilirsa en cok bir modulluk
+# asilir ve bu rapora yazilir.
+
+function Get-EDRunDeadlineUtc {
+<#
+    .SYNOPSIS
+        Butce dakikasindan UTC son tarih uretir; sinirsizsa $null doner.
+
+    .DESCRIPTION
+        0 = SINIRSIZ ve bu ayrim hayatidir: sifiri "sifir dakika" saymak
+        GECMISTE bir son tarih uretir, ilk modulden sonra her sey "butce
+        bitti" olur ve arac hicbir sey olcmeden yarim bir rapor birakir.
+        Ayni tuzak ayristiricinin BudgetSeconds parametresinde de vardir
+        (bkz. Core\TrackingLog.ps1) ve orada "aracin uretebilecegi en
+        tehlikeli cikti" olarak belgelenmistir.
+
+        Negatif deger bir niyet DEGIL bir yazim hatasidir; sessizce
+        sinirsiza ya da sifira cevrilmez, acik hata verilir.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$BudgetMinutes,
+        [datetime]$StartUtc = [datetime]::UtcNow
+    )
+
+    $minutes = ConvertTo-EDNumber $BudgetMinutes
+    if ($null -eq $minutes -or [double]::IsNaN($minutes) -or [double]::IsInfinity($minutes)) {
+        throw "Kosum butcesi sayisal olmali, verilen: '$BudgetMinutes' (0 = sinirsiz)."
+    }
+    if ($minutes -lt 0) {
+        throw "Kosum butcesi negatif olamaz, verilen: $minutes. Sinirsiz kosum icin 0 yazin."
+    }
+    if ($minutes -eq 0) { return $null }
+    return $StartUtc.AddMinutes($minutes)
+}
+
+function Get-EDRemainingBudgetSeconds {
+<#
+    .SYNOPSIS
+        Kosum butcesinden geriye kalan saniye; butce yoksa $null.
+
+    .DESCRIPTION
+        $null ile 0 KARISTIRILMAMALIDIR: $null "sinir yok", 0 "sinir doldu"
+        demektir. Cagiran taraf ikisini ayni kovaya koyarsa ya sinirsiz bir
+        kosumu hemen keser ya da dolmus bir butceyi gormez.
+
+        Baglam alani Get-EDProperty ile okunur: bu islev modul ve test
+        baglamlariyla da cagrilir ve StrictMode altinda olmayan bir alana
+        erismek TUM kosumu ciktisiz dusururdu. Alani tasimayan bir baglam
+        "butcesiz" sayilir - eski davranisin ta kendisi.
+#>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$Context)
+
+    if ($null -eq $Context) { return $null }
+    $deadline = Get-EDProperty -InputObject $Context -Name 'DeadlineUtc' -Default $null
+    if ($null -eq $deadline) { return $null }
+    return ([datetime]$deadline - [datetime]::UtcNow).TotalSeconds
+}
+
+function Test-EDBudgetExhausted {
+    <# Butce doldu mu? Butcesiz kosumda HER ZAMAN $false. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$Context)
+
+    $remaining = Get-EDRemainingBudgetSeconds -Context $Context
+    if ($null -eq $remaining) { return $false }
+    return ($remaining -le 0)
+}
+
+function Get-EDBudgetedSeconds {
+<#
+    .SYNOPSIS
+        Bir isin istedigi saniyeyi kalan kosum butcesine gore kirpar.
+
+    .DESCRIPTION
+        Ham log ayristirmasi tek basina 900 saniye isteyebilir. Kosum
+        butcesinden geriye 2 dakika kalmisken o istegi oldugu gibi vermek,
+        butceyi bastan anlamsiz kilardi.
+
+        ALT SINIR (Floor) NEDEN VAR: kalan butce 1 saniyeye dustugunde her
+        isi 1 saniyelik timeout'la baslatmak, hepsinin TERK EDILMESINE yol
+        acar (PowerShell.Stop() yerel kodu kesemez, bkz. ParallelExecutor).
+        Terk edilen her is havuzdan bir runspace goturur; yani butceyi
+        korumak icin yapilan sey, kosumun geri kalanini bogar. Bu yuzden
+        butce bir modul icinde en fazla Floor kadar ASILABILIR; asim
+        moduller arasindaki kapida zaten gorulur ve raporlanir.
+
+        Butce yoksa istenen deger AYNEN gecerlidir.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Context,
+        [Parameter(Mandatory)][int]$Requested,
+        [int]$Floor = 10
+    )
+
+    if ($Requested -lt 1) { throw "Get-EDBudgetedSeconds -Requested en az 1 olmali, verilen: $Requested." }
+    if ($Floor -lt 1) { $Floor = 1 }
+
+    $remaining = Get-EDRemainingBudgetSeconds -Context $Context
+    if ($null -eq $remaining) { return $Requested }
+
+    $left = [int][math]::Floor($remaining)
+    if ($left -lt $Floor) { $left = $Floor }
+    if ($left -lt $Requested) { return $left }
+    return $Requested
+}
+
 function ConvertFrom-EDByteQuantified {
 <#
     .SYNOPSIS

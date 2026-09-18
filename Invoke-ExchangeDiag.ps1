@@ -43,6 +43,18 @@
     Ham log ayristiricisini ayni pencerede Get-MessageTrackingLog'a karsi
     dogrular. Persentiller %1 toleransi disindaysa FAIL verir.
 
+.PARAMETER BudgetMinutes
+    Kosumun tamami icin zaman butcesi (dakika). 0 = SINIRSIZ. Verilmezse
+    environment.json'daki runBudgetMinutes kullanilir.
+
+    Butce dolunca kalan moduller HIC BASLATILMAZ. Her biri rapora ADIYLA ve
+    "BUTCE BITTI - bu kontrol YAPILMADI" notuyla TIMEOUT satiri olarak duser;
+    kosumun sonuna CORE / Kosum butcesi satiri eklenir ve cikis kodu 0 OLAMAZ.
+
+    Butce ISBIRLIKCIDIR: calisan bir modul ortasindan kesilemez (bkz. .NOTES
+    ve brief Bolum 4/14). Karar moduller arasinda verilir ve ayni son tarih
+    ham log ayristiricisina da gecirilir.
+
 .PARAMETER CompareWith
     Onceki bir calistirma klasoru ile delta karsilastirmasi.
 
@@ -61,8 +73,12 @@
     Cikis kodlari
 
     0 - Tarama TAMAMLANDI, esikleri asan bulgu yok. Rapor uretildi.
-    1 - Tarama TAMAMLANDI, en kotu bulgu WARN/ERROR/TIMEOUT. Rapor uretildi.
-    2 - Tarama TAMAMLANDI, en az bir FAIL var. Rapor uretildi.
+    1 - Tarama bitti, en kotu bulgu WARN/ERROR/TIMEOUT. Rapor uretildi.
+        KOSUM BUTCESINE TAKILAN tarama da buraya duser: butce dolunca kalan
+        moduller HIC KOSMAZ, her biri rapora adiyla TIMEOUT satiri olarak
+        girer ve kod 0 OLAMAZ. Yani 1, "tarama tam" demek DEGILDIR; raporun
+        CORE / Kosum butcesi satiri kapsamin eksik olup olmadigini soyler.
+    2 - Tarama bitti, en az bir FAIL var. Rapor uretildi.
     3 - ARAC CALISAMADI: tarama hic yapilamadi veya yarida kaldi.
         SUMMARY.csv/SUMMARY.html ve run-meta.json URETILMEDI.
         Tipik sebepler: bozuk Config\, Exchange'e baglanilamamasi, gecersiz
@@ -84,6 +100,7 @@ param(
     [string[]]$Server,
     [double]$WindowHours,
     [ValidateSet('Auto', 'Smb', 'Cmdlet')][string]$LogAccess,
+    [double]$BudgetMinutes,
     [switch]$VerifyParser,
     [string]$CompareWith,
     [int]$Parallelism,
@@ -112,6 +129,15 @@ $projectRoot = $PSScriptRoot
 # ---------------------------------------------------------------------------
 
 $runId = (Get-Date).ToString('yyyyMMdd-HHmmss')
+
+# BUTCE SAATI BURADA BASLAR, MODUL DONGUSUNDE DEGIL.
+#
+# Config okuma, Exchange'e baglanma ve M01 topoloji kesfi de kosumun
+# suresidir; operatorun "09:00'da baslattim" dedigi an burasidir. Sayaci
+# dongude baslatmak, baglantinin yavas oldugu bir ortamda butcenin
+# tamamini gorunmez kilardi.
+$runStartUtc = [datetime]::UtcNow
+
 if (-not $OutputRoot) { $OutputRoot = Join-Path $projectRoot 'output' }
 $outputDir = Join-Path $OutputRoot $runId
 
@@ -163,6 +189,35 @@ try {
         $WindowHours = [double]$config.Environment.trackingWindowHours
     }
     if (-not $LogAccess) { $LogAccess = [string]$config.Environment.logAccess }
+
+    # KOSUM GENELINDE ZAMAN BUTCESI.
+    #
+    # Eskiden modul basina Stopwatch vardi ama yalnizca OLCUYORDU; kosum
+    # genelinde ise hicbir sinir yoktu. Kodca izin verilen en kotu -Heavy
+    # kosumu ~3 saat 39 dakika surebiliyor ve onu kesecek hicbir sey yoktu:
+    # "yogun saatte olc" diye 09:00'da baslatilan kosum 12:40'ta bitiyor,
+    # rapor ise onu hala yogun saat saniyordu.
+    #
+    # -BudgetMinutes 0 SINIRSIZ demektir; negatif bir niyet degil yazim
+    # hatasidir ve -WindowHours ile AYNI kurala tabidir - sessizce config
+    # degeriyle degistirilmez, acik hata verilir. (Sifir burada mesru oldugu
+    # icin kural "-le 0" degil "-lt 0"dir; ikisinin ayrimi Get-EDRunDeadlineUtc
+    # icinde yazili.)
+    if ($PSBoundParameters.ContainsKey('BudgetMinutes')) {
+        if ($BudgetMinutes -lt 0) {
+            throw "-BudgetMinutes negatif olamaz, verilen: $BudgetMinutes. Sinirsiz kosum icin 0 yazin."
+        }
+    }
+    else {
+        $BudgetMinutes = [double]$config.Environment.runBudgetMinutes
+    }
+    $runDeadlineUtc = Get-EDRunDeadlineUtc -BudgetMinutes $BudgetMinutes -StartUtc $runStartUtc
+    if ($null -eq $runDeadlineUtc) {
+        $log.Warn('Kosum zaman butcesi KAPALI (runBudgetMinutes / -BudgetMinutes = 0). Kosum kendiliginden durmaz; -Heavy ile saatlerce surebilir.')
+    }
+    else {
+        $log.Info("Kosum zaman butcesi: $BudgetMinutes dk (son tarih $($runDeadlineUtc.ToLocalTime().ToString('HH:mm:ss')) yerel). Butce dolarsa kalan moduller KOSMAZ ve rapora adiyla yazilir.")
+    }
 
     Reset-EDModuleRegistry
     Import-EDModules -ModuleRoot (Join-Path $projectRoot 'Modules')
@@ -236,6 +291,12 @@ try {
         LogAccess    = $LogAccess.ToLowerInvariant()
         VerifyParser = [bool]$VerifyParser
         ServerFilter = $serverFilter
+        # Kosum butcesi baglamda tasinir ki ISBIRLIKCI son tarih olcum
+        # koduna kadar inebilsin: Core\TrackingLog.ps1 ham log ayristiricisina
+        # verdigi BudgetSeconds'i buradan kirpar. $null = sinirsiz.
+        # Alani Get-EDProperty ile okuyun; eski/test baglamlari tasimayabilir.
+        BudgetMinutes = [double]$BudgetMinutes
+        DeadlineUtc  = $runDeadlineUtc
         # Moduller arasi paylasilan onbellek: tracking log ayristirmasi pahalidir,
         # M10/M11/M12/M13 ayni veriyi yeniden okumamali.
         Cache        = @{}
@@ -357,11 +418,44 @@ try {
             -Note "-VerifyParser verildi ama calistirilamadi: $verifyParserBlocked. Gecikme turetimi DOGRULANMIS SAYILMAZ; -Heavy ile tekrar calistirin."
     }
 
+    # KOSUM BUTCESI: kesilen kosum kendini TAM kosum gibi sunmaz.
+    #
+    # Butceye takilan bir kontrol 'N/A' DEGILDIR. N/A "olculemedi" der ve
+    # rapor katmaninda bulgu tablosuna hic girmez (Core\Report.ps1); yani
+    # butce yuzunden hic kosmamis bir modul raporun EN GORUNMEZ satiri
+    # olurdu - "kismi sonucu tam sonuc gibi sunmak" kusurunun ta kendisi.
+    # TIMEOUT kullanilir: hem bulgu tablosuna girer, hem cikis kodunu 0'dan
+    # cikarir, hem de "is terk edildi / yetismedi" anlamiyla zaten uyumludur.
+    $budgetExhausted = $false
+    $budgetUnrun = @()          # kosmayan modullerin "M05 (OS / kaynak)" adlari
+    $budgetUnrunIds = @{}       # eksik kapsam taramasinin ayirt edebilmesi icin
+
     foreach ($item in $plan) {
         $moduleInfo = $item.Module
+
+        # SIRA ONEMLI: kendi gerekcesiyle atlanan modul butceye YAZILMAZ.
+        # 'ortamda DAG yok' diye atlanan M30'u "butce bitti" diye raporlamak,
+        # olmayan bir kapsam eksigi uydurmak olurdu.
         if ($item.SkipReason) {
             $log.Info("$($moduleInfo.Id) atlandi: $($item.SkipReason)")
             $allRows += New-EDRow -Module $moduleInfo.Id -Check $moduleInfo.Name -Status 'N/A' -Note $item.SkipReason
+            continue
+        }
+
+        # Karar YALNIZCA moduller arasinda verilebilir: modulun Run blogu ana
+        # is parcaciginda senkron kosar ve PowerShell.Stop() yerel kodu
+        # kesemez (brief Bolum 4/14). Yani butce bir garanti degil hedeftir;
+        # en cok bir modulluk asilir ve asim bu satirlarla gorunur olur.
+        if (-not $budgetExhausted -and (Test-EDBudgetExhausted -Context $context)) {
+            $budgetExhausted = $true
+        }
+        if ($budgetExhausted) {
+            $label = "$($moduleInfo.Id) ($($moduleInfo.Name))"
+            $budgetUnrun += $label
+            $budgetUnrunIds[$moduleInfo.Id] = $true
+            $log.Warn("$($moduleInfo.Id) KOSMADI: kosum zaman butcesi doldu.")
+            $allRows += New-EDRow -Module $moduleInfo.Id -Check $moduleInfo.Name -Status 'TIMEOUT' `
+                -Note ("BUTCE BITTI - bu kontrol YAPILMADI. Kosum zaman butcesi ({0} dk) modul baslamadan doldu; modul HIC KOSMADI ve bu satirda olculmus tek bir deger yok. Bu 'sorun bulunamadi' DEGIL 'bakilmadi' demektir. Ayrinti: CORE / Kosum butcesi." -f $BudgetMinutes)
             continue
         }
 
@@ -414,6 +508,25 @@ try {
     # runspace'lerini havuza geri vermez. Havuz tavani telafi edilse bile
     # operator bunu BILMELI: sonraki modullerin TIMEOUT'lari kendi
     # yavasliklarindan degil, kapasite daralmasindan olabilir.
+    # BUTCEYE TAKILAN KOSUM KOSUM SEVIYESINDE KONUSMAK ZORUNDA.
+    #
+    # Tek tek bakildiginda "M20 TIMEOUT" kucuk gorunur; hepsi bir arada ise
+    # raporun yarisinin HIC YAPILMADIGINI soyler. 'Terk edilen is' ve
+    # 'Eksik kapsam' satirlariyla ayni bicim bilerek kullanilir - operator
+    # kosum seviyesindeki uyarilari tek yerde, tek kalipta okur.
+    if ($budgetExhausted) {
+        $elapsedMinutes = [math]::Round(([datetime]::UtcNow - $runStartUtc).TotalMinutes, 1)
+        $budgetNote = ("KOSUM BUTCEYE TAKILDI: {0} dk'lik butce {1} dk'da doldu ve {2} modul HIC KOSMADI: {3}. " -f `
+            $BudgetMinutes, $elapsedMinutes, $budgetUnrun.Count, ($budgetUnrun -join ', '))
+        $budgetNote += 'BU RAPOR EKSIKTIR: kosmayan modullerin aradigi sorunlar burada GORUNMEZ ve gorunmemeleri '
+        $budgetNote += '"yok" ANLAMINA GELMEZ. Bu yuzden cikis kodu 0 olamaz. '
+        $budgetNote += 'Butceyi environment.json -> runBudgetMinutes ile ya da -BudgetMinutes ile yukseltin (0 = sinirsiz), '
+        $budgetNote += '-Module ile kapsami daraltin, veya -WindowHours ile log penceresini kisaltin. '
+        $budgetNote += 'NOT: butce ISBIRLIKCIDIR - calisan bir modul ortasindan kesilemez, bu yuzden gecen sure butceyi bir modul kadar asmis olabilir.'
+        $log.Warn("CORE: $budgetNote")
+        $allRows += New-EDRow -Module 'CORE' -Check 'Kosum butcesi' -Status 'WARN' -Note $budgetNote
+    }
+
     if ($suppressed.Count -gt 0) {
         $suppressNote = ("Profil '{0}' {1} bulguyu bastirdi: {2}. Bastirma bir COZUM DEGILDIR; " -f `
             $config.Environment.profile, $suppressed.Count, ($suppressed -join ' | '))
@@ -452,6 +565,11 @@ try {
     $scopeGapServers = @{}
     foreach ($row in $allRows) {
         if ($row.Module -eq 'CORE') { continue }
+        # BUTCE YUZUNDEN HIC KOSMAMIS MODUL 'EKSIK KAPSAM' DEGILDIR.
+        # O satirin cumlesi "EKSIK KAPSAMLA OLCULDU"dur; oysa burada hicbir
+        # sey olculmemistir. Iki ayri kusuru tek cumlede toplamak, ikisini de
+        # bulaniklastirir - butcenin kendi CORE satiri zaten yukarida dustu.
+        if ($budgetUnrunIds.ContainsKey($row.Module)) { continue }
         $badCells = @($row.CellStatus.Keys | Where-Object { $row.CellStatus[$_] -in @('ERROR', 'TIMEOUT') } | Sort-Object)
         if ($badCells.Count -gt 0) {
             foreach ($cell in $badCells) {
@@ -532,6 +650,24 @@ try {
 
     if ($worst -eq 'FAIL') { $exitCode = 2 }
     elseif ($worst -in @('WARN', 'ERROR', 'TIMEOUT')) { $exitCode = 1 }
+
+    # BUTCEYE TAKILAN KOSUM ASLA 0 ILE CIKMAZ - SON KILIT.
+    #
+    # DURUST OLMAK GEREKIRSE bu satir BUGUN yedektir: kosmayan modul satirlari
+    # TIMEOUT, CORE / Kosum butcesi satiri WARN'dir ve ikisi de yukaridaki
+    # kosuldan 1 uretir. Yedek olmasi KASITLIDIR, cunku kural hukum
+    # siralamasindan BAGIMSIZDIR: "hicbir kontrol kosmadan temiz sinyali
+    # verme" yasagi (bkz. .NOTES ve -Module korumasi) siralama tablosuna
+    # degil, aracin ne iddia ettigine bakar. EDStatusRank bir gun TIMEOUT'u
+    # N/A gibi HUKUMSUZ sayarsa - ki N/A ve PASSIVE zaten oyledir - yukaridaki
+    # iki sinyal de sessizce 0'a duserdi. Zamanlanmis gorev cikis kodunu okur,
+    # rapor metnini DEGIL.
+    #
+    # Yedegin GERCEKTEN is yaptigi olculmustur: Tests\Test-ReportLayer.ps1
+    # Bolum 8c'nin "0 ile CIKMIYOR" iddiasi, butce satirlari 'OK' yapilip
+    # CORE satiri da kaldirildiginda (cift mutasyon) YALNIZCA bu satir
+    # sayesinde yesil kalir; bu satir da silinirse kirmiziya doner.
+    if ($budgetExhausted -and $exitCode -eq 0) { $exitCode = 1 }
 }
 catch {
     # Buraya dusmek "tarama kotu sonuclandi" degil, "TARAMA YAPILAMADI"

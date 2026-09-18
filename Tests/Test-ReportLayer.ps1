@@ -450,6 +450,211 @@ Assert-True 'Mesru N/A icin eksik kapsam satiri URETILMEZ' `
     ($clean.Output -notlike '*Eksik kapsam*') 'yanlis alarm yok'
 
 # ===========================================================================
+Write-Host "`n=== 8c. UCTAN UCA: kosum butcesi - kesilen kosum kendini TAM sunmaz ===" -ForegroundColor Cyan
+
+# ARACIN OLCULMUS EN BUYUK ZAMAN KUSURU: modul basina Stopwatch vardi ama
+# yalnizca OLCUYORDU, kosum genelinde ise hicbir sinir yoktu. Kodca izin
+# verilen en kotu -Heavy kosumu ~3 saat 39 dakika surebiliyordu; "yogun
+# saatte olc" diye 09:00'da baslatilan kosum 12:40'ta bitiyor ve rapor onu
+# hala yogun saat saniyordu.
+#
+# BURADAKI ASIL IDDIA SINIR DEGIL, DURUSTLUKTUR. Butceye takilan bir kosum:
+#   - kosmayan modulleri ADIYLA sayar,
+#   - onlari 'N/A' degil "BUTCE BITTI - bu kontrol YAPILMADI" der
+#     (N/A bulgu tablosuna hic girmez; en gorunmez satir olurdu),
+#   - 0 ile CIKMAZ (zamanlanmis gorev cikis kodunu okur, rapor metnini degil).
+# Bu ucu ancak uctan uca denenebilir: modul satirlari -> bulgu tablosu ->
+# cikis kodu.
+
+$budgetStage = Join-Path $script:Root 'e2e-budget'
+New-Item -ItemType Directory -Path $budgetStage -Force | Out-Null
+Copy-Item -LiteralPath $entryScript -Destination (Join-Path $budgetStage 'Invoke-ExchangeDiag.ps1')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'Core') -Destination (Join-Path $budgetStage 'Core') -Recurse
+New-Item -ItemType Directory -Path (Join-Path $budgetStage 'Modules') -Force | Out-Null
+
+# CALISAN sahte yurutucu: bu testin konusu baglanti degil ZAMAN. Her is
+# temiz doner, yani butce disinda hicbir sey bulgu uretmez.
+@'
+function Connect-EDExchange {
+    param($Config, $Log, $Credential, $ParallelismOverride)
+    $executor = [pscustomobject]@{
+        ExchangeConnection  = 'test-stub'
+        Parallelism         = 1
+        AbandonedPipelines  = 0
+        CompensationRefused = 0
+    }
+    $handler = {
+        param($Tasks)
+        $results = @()
+        foreach ($task in $Tasks) {
+            $result = New-Object ExchangeDiag.ExecResult
+            $result.Key = $task.Key
+            $result.Output = [System.Management.Automation.PSObject[]]@()
+            $results += $result
+        }
+        return $results
+    }
+    $executor | Add-Member -MemberType ScriptMethod -Name RunExchange -Value $handler
+    $executor | Add-Member -MemberType ScriptMethod -Name RunLocal -Value $handler
+    $executor | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+    return $executor
+}
+'@ | Set-Content -LiteralPath (Join-Path $budgetStage 'Core\Connect.ps1') -Encoding UTF8
+
+@'
+Register-EDModule @{
+    Id = 'M01'; Name = 'Topoloji kesfi'; Phase = 'A'; Description = 'test'; Heavy = $false
+    Run = {
+        param($Context)
+        $Context.Topology = [pscustomobject]@{
+            Servers = @([pscustomobject]@{ Name = 'MBX1'; Fqdn = 'MBX1.test.local'; Site = 'Site1'; Roles = 'Mailbox'
+                                           Version = ''; Edition = ''; IsMailbox = $true; IsEdge = $false; IsTransport = $true
+                                           ActiveDbs = 0; DbCopies = 0; IsPassiveSite = $false })
+            Sites = @([pscustomobject]@{ Name = 'Site1'; IsPassive = $false })
+            Dags = @(); Databases = @(); HasDag = $false; DagsReadable = $true
+        }
+        return @(New-EDRow -Module 'M01' -Check 'Sunucular' -Values @{ MBX1 = 'Mailbox' } -Status 'OK')
+    }
+}
+'@ | Set-Content -LiteralPath (Join-Path $budgetStage 'Modules\M01-Topology.ps1') -Encoding UTF8
+
+# M02 BUTCEYI TUKETIR - ama Start-Sleep ILE DEGIL.
+#
+# Gercek zamana dayanan bir test, yavas bir makinede modulun hic baslamamasi
+# ya da hizli bir makinede butcenin dolmamasi yuzunden RASTGELE kirmizi/yesil
+# olur; bir zaman siniri testinin en kotu hali budur. Modul son tarihi
+# gecmise cekerek "butcemi harcadim" der: kapinin okudugu tek sey zaten
+# $Context.DeadlineUtc'tir, yani sinanan sey ayniyla urun mantigidir.
+# Butcenin GERCEKTEN duvar saatinden hesaplandigi ayrica denenir (asagida
+# -BudgetMinutes ile) ve Get-EDRunDeadlineUtc birimleri Test-TimeoutVerdict
+# Bolum 8'de sabitlenmistir.
+@'
+Register-EDModule @{
+    Id = 'M02'; Name = 'Gercek build'; Phase = 'A'; Description = 'test'; Heavy = $false
+    Run = {
+        param($Context)
+        $Context.DeadlineUtc = [datetime]::UtcNow.AddSeconds(-1)
+        return @(New-EDRow -Module 'M02' -Check 'Build' -Values @{ MBX1 = '15.2.2562.17' } -Status 'OK')
+    }
+}
+'@ | Set-Content -LiteralPath (Join-Path $budgetStage 'Modules\M02-Build.ps1') -Encoding UTF8
+
+@'
+Register-EDModule @{
+    Id = 'M03'; Name = 'Servis durumu'; Phase = 'A'; Description = 'test'; Heavy = $false
+    Run = { param($Context) return @(New-EDRow -Module 'M03' -Check 'Servisler' -Values @{ MBX1 = 'Running' } -Status 'OK') }
+}
+'@ | Set-Content -LiteralPath (Join-Path $budgetStage 'Modules\M03-ServiceHealth.ps1') -Encoding UTF8
+
+@'
+Register-EDModule @{
+    Id = 'M05'; Name = 'OS / kaynak'; Phase = 'A'; Description = 'test'; Heavy = $false
+    Run = { param($Context) return @(New-EDRow -Module 'M05' -Check 'CPU' -Values @{ MBX1 = 12 } -Status 'OK') }
+}
+'@ | Set-Content -LiteralPath (Join-Path $budgetStage 'Modules\M05-OsResources.ps1') -Encoding UTF8
+
+$budgetEntry = Join-Path $budgetStage 'Invoke-ExchangeDiag.ps1'
+
+function Get-EDBudgetRun {
+    <# Kosumu yapar ve SUMMARY.csv satirlarini geri verir. #>
+    param([string]$ArgumentLine, [string]$OutRoot)
+    $run = Invoke-EDEntryCommand -Script $budgetEntry -ArgumentLine ($ArgumentLine + (" -OutputRoot '{0}' -Quiet" -f $OutRoot))
+    $rows = @()
+    if (Test-Path -LiteralPath $OutRoot) {
+        $folder = @(Get-ChildItem -LiteralPath $OutRoot -Directory | Sort-Object Name)
+        if ($folder.Count -ge 1) {
+            $csv = Join-Path $folder[-1].FullName 'SUMMARY.csv'
+            if (Test-Path -LiteralPath $csv) { $rows = @(Import-Csv -LiteralPath $csv -Encoding UTF8) }
+        }
+    }
+    return [pscustomobject]@{ ExitCode = $run.ExitCode; Output = $run.Output; Rows = $rows }
+}
+
+# --- 8c-1. Butce KOSUM ORTASINDA dolarsa: kosanlar kalir, kosmayanlar ADIYLA yazilir ---
+$midRun = Get-EDBudgetRun -ArgumentLine '-Module M02,M03,M05' -OutRoot (Join-Path $script:Root 'budget-mid')
+
+Assert-True 'Butceye takilan kosum 0 ile CIKMIYOR' ($midRun.ExitCode -ne 0) ("cikis kodu {0}" -f $midRun.ExitCode)
+Assert-True 'Rapor yine de uretildi (kod 3 degil)' ($midRun.ExitCode -in @(1, 2)) ("cikis kodu {0}" -f $midRun.ExitCode)
+Assert-True 'SUMMARY.csv yazildi' ($midRun.Rows.Count -gt 0) ("{0} satir" -f $midRun.Rows.Count)
+
+$ranRow = @($midRun.Rows | Where-Object { $_.Modul -eq 'M02' })
+Assert-Equal 'Butce dolmadan KOSAN modulun sonucu duruyor' 'OK' (Get-EDTestField $ranRow 'Durum')
+
+foreach ($unrun in @('M03', 'M05')) {
+    $row = @($midRun.Rows | Where-Object { $_.Modul -eq $unrun })
+    Assert-Equal ("$unrun satiri uretildi") 1 $row.Count
+    # HUKUM N/A OLAMAZ: N/A satirlari bulgu tablosuna girmez (Core\Report.ps1),
+    # yani hic kosmamis kontrol raporun en gorunmez satiri olurdu.
+    Assert-Equal ("$unrun hukmu N/A DEGIL TIMEOUT") 'TIMEOUT' (Get-EDTestField $row 'Durum')
+    Assert-True ("$unrun notu 'YAPILMADI' diyor") `
+        ((Get-EDTestField $row 'Not') -like '*BUTCE BITTI*YAPILMADI*') (Get-EDTestField $row 'Not')
+}
+
+$budgetCore = @($midRun.Rows | Where-Object { $_.Modul -eq 'CORE' -and $_.Kontrol -eq 'Kosum butcesi' })
+Assert-Equal 'CORE / Kosum butcesi satiri dustu' 1 $budgetCore.Count
+Assert-Equal 'Kosum butcesi satiri WARN' 'WARN' (Get-EDTestField $budgetCore 'Durum')
+# ASIL SART: kosmayan moduller ADIYLA sayilir. 'bazi moduller kosmadi' demek,
+# operatore hangi sorunun ARANMADIGINI soylemez.
+$budgetNote = [string](Get-EDTestField $budgetCore 'Not')
+Assert-True 'Kosmayan moduller ADIYLA sayiliyor' `
+    ($budgetNote -like '*M03*' -and $budgetNote -like '*M05*') $budgetNote
+Assert-True 'Kosan modul butce satirinda SUCLANMIYOR' ($budgetNote -notlike '*M02*') $budgetNote
+Assert-True 'Not, raporun EKSIK oldugunu acikca soyluyor' ($budgetNote -like '*EKSIK*') $budgetNote
+
+# Butce yuzunden hic kosmamis modul 'Eksik kapsam' satirina KARISMAZ: o
+# satirin cumlesi "EKSIK KAPSAMLA OLCULDU"dur, oysa burada hicbir sey
+# olculmemistir. Iki kusuru tek cumlede toplamak ikisini de bulaniklastirir.
+$scopeGap = @($midRun.Rows | Where-Object { $_.Modul -eq 'CORE' -and $_.Kontrol -eq 'Eksik kapsam' })
+Assert-Equal 'Butce satirlari Eksik kapsam uretmiyor' 0 $scopeGap.Count
+
+# --- 8c-2. Butce DAHA BASLARKEN dolmussa: hicbir modul kosmaz ---
+# Bu kosum, butcenin gercekten DUVAR SAATINDEN hesaplandigini denetler:
+# -BudgetMinutes komut satirindan gelir, son tarih kosumun basindan itibaren
+# isler ve dongu ilk modulde kapanir.
+$zeroRun = Get-EDBudgetRun -ArgumentLine '-Module M02,M03,M05 -BudgetMinutes 0.0001' `
+    -OutRoot (Join-Path $script:Root 'budget-zero')
+Assert-True 'Basta dolmus butce: cikis kodu 0 DEGIL' ($zeroRun.ExitCode -ne 0) ("cikis kodu {0}" -f $zeroRun.ExitCode)
+$zeroUnrun = @($zeroRun.Rows | Where-Object { $_.Modul -in @('M02', 'M03', 'M05') -and $_.Durum -eq 'TIMEOUT' })
+Assert-Equal 'Secili modullerin HEPSI kosmadi olarak isaretlendi' 3 $zeroUnrun.Count
+# M01 ISTISNADIR VE BILINCLIDIR: topoloji olmadan hicbir modul calisamaz,
+# bu yuzden kapidan once kosar. Raporun "sunucu" sutunlari da ondan gelir.
+$zeroTopology = @($zeroRun.Rows | Where-Object { $_.Modul -eq 'M01' })
+Assert-True 'M01 butce kapisindan once kosuyor' ($zeroTopology.Count -ge 1) 'topoloji olmadan rapor kurulamaz'
+
+# --- 8c-3. YANLIS ALARM YOK: butce kapaliysa (0) hicbir sey degismez ---
+# Sinirsiz kosum eski davranistir ve tertemiz bir ortamda 0 ile cikmalidir;
+# aksi halde her kosum her gun yanlis alarm uretirdi.
+$offRun = Get-EDBudgetRun -ArgumentLine '-Module M03,M05 -BudgetMinutes 0' `
+    -OutRoot (Join-Path $script:Root 'budget-off')
+Assert-Equal 'Butce kapaliyken temiz kosum 0 ile cikar' 0 $offRun.ExitCode
+Assert-Equal 'Butce kapaliyken Kosum butcesi satiri URETILMEZ' 0 `
+    @($offRun.Rows | Where-Object { $_.Kontrol -eq 'Kosum butcesi' }).Count
+Assert-Equal 'Butce kapaliyken hicbir modul TIMEOUT olmuyor' 0 `
+    @($offRun.Rows | Where-Object { $_.Durum -eq 'TIMEOUT' }).Count
+
+# --- 8c-4. Negatif butce bir NIYET DEGIL yazim hatasidir ---
+# -WindowHours ile ayni kural: sessizce config degeriyle degistirilmez.
+# (0 burada mesru oldugu icin kural '-lt 0'dir; -WindowHours'ta '-le 0'.)
+$negativeBudget = Invoke-EDEntryCommand -Script $budgetEntry `
+    -ArgumentLine ("-Module M03 -BudgetMinutes -5 -OutputRoot '{0}' -Quiet" -f (Join-Path $script:Root 'budget-neg'))
+Assert-Equal 'Negatif butce: arac calisamadi kodu' 3 $negativeBudget.ExitCode
+Assert-True 'Gerekce BudgetMinutes olarak yazildi' ($negativeBudget.Output -like '*BudgetMinutes*') $negativeBudget.Output
+
+# --- 8c-5. CIKIS KODU KILIDI kaynakta DURUYOR mu ---
+#
+# "0 ile CIKMIYOR" iddiasi bugun UC ayri sinyalle karsilaniyor: TIMEOUT
+# satirlari, CORE / Kosum butcesi satiri ve acik cikis kodu kilidi. Ilk ikisi
+# yukarida davranissal olarak sinaniyor; ucuncusu ancak ilk ikisi de
+# bozuldugunda gorunur hale gelir (olculdu: butce satirlari 'OK' yapilip CORE
+# satiri kaldirildiginda kod YINE 1 kalir, cunku kilit devreye girer). Bir
+# YEDEGI davranisla sinamak mumkun degildir - varligi kaynaktan denetlenir,
+# yoksa sessizce silinir ve kimse fark etmez.
+$budgetEntryText = Get-Content -LiteralPath $entryScript -Raw -Encoding UTF8
+Assert-True 'Butce icin acik cikis kodu kilidi duruyor' `
+    ($budgetEntryText -match '\$budgetExhausted\s+-and\s+\$exitCode\s+-eq\s+0') `
+    'hukum siralamasindan bagimsiz son kilit'
+
+# ===========================================================================
 Write-Host "`n=== 9. Orgu etiketi operatorun GORDUGU yere ulasiyor ===" -ForegroundColor Cyan
 
 # Satirlar P1-P8 etiketini tasiyordu ama rapor bu alani HIC okumuyordu:
