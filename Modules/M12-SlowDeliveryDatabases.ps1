@@ -202,7 +202,28 @@ Register-EDModule @{
         # teslimlerin %51'i tek bir veritabaninda toplaniyor" FAIL'i uretir
         # ve operatoru M22/M23/M24'e yollar. Beklenen pay 1/N'dir; iddia
         # ancak bunun belirgin uzerindeyse anlamlidir.
-        $databaseCount = @($byDatabase.Values).Count
+        # PAYDA ORTAMDAKI DB SAYISIDIR, YAVAS TESLIM ALMIS DB SAYISI DEGIL.
+        #
+        # Eski kod paydayi gozlenen kumeden aliyordu. Ama yavas teslimlerin
+        # yalnizca birkac veritabanina dusmus olmasi ZATEN YOGUNLASMANIN
+        # KENDISIDIR; onu paydaya koymak iddiayi kendi kaniti ile
+        # zayiflatir. On veritabanli bir ortamda yavas teslimler iki DB'ye
+        # dustuyse beklenen pay %50 hesaplaniyor, esik %80'e cikiyor ve
+        # %70/%30 gibi cok belirgin bir yogunlasma IDDIA EDILMEDEN geciyordu.
+        # Yanlis pozitif degil, YANLIS NEGATIF uretiyordu - ve bu daha
+        # tehlikelidir, cunku sessizdir.
+        #
+        # Topoloji okunamadiysa payda UYDURULMAZ: gozlenen kumeye geri
+        # dusulur (eski, daha muhafazakar davranis) ve bu notta SOYLENIR.
+        $observedCount = @($byDatabase.Values).Count
+        $topologyCount = 0
+        if ([bool](Get-EDProperty $Context.Topology 'DatabasesReadable' $false)) {
+            $topologyCount = @($Context.Topology.Databases).Count
+        }
+        # Gozlenen kume paydanin ALT SINIRIDIR: topoloji eksik listelemis
+        # olsa bile en az bu kadar veritabani vardir.
+        $databaseCount = [math]::Max($topologyCount, $observedCount)
+        $paydaBelirsiz = ($topologyCount -le 0)
         $expectedShare = 100 / [math]::Max($databaseCount, 1)
         # Esik: beklenenin 2 kati, ama hicbir zaman %50'nin altina inmez
         # (iki DB'de beklenen %50, iki kati %100 olurdu - o yuzden tavan da
@@ -239,6 +260,16 @@ Register-EDModule @{
         if ($lookupErrors -gt 0) { $coverageNote += " $lookupErrors sorgu HATA/TIMEOUT dondu (throttling olasi); bu aliciler kapsam disinda kaldi." }
 
         $rows = @()
+        # BELIRSIZ PAYDA HER DALDA SOYLENIR - OZELLIKLE IDDIA KURULMADIGINDA.
+        #
+        # Bu uyari bir sure yalnizca FAIL dalinda yaziliyordu. Oysa payda
+        # belirsizken esik OLDUGUNDAN YUKSEK cikar, yani iddia tam da
+        # KURULMADIGI icin operator hicbir sey gormez. Uyarinin en cok
+        # gerektigi yol, uyarinin hic yazilmadigi yoldu.
+        if ($paydaBelirsiz -and $byDatabase.Count -ge 2) {
+            $note += ' DIKKAT: veritabani listesi okunamadigi icin beklenen pay ORTAMDAKI DB sayisindan degil, yavas teslim ALMIS DB sayisindan hesaplandi; esik oldugundan yuksek olabilir ve gercek bir yogunlasma iddia edilmeden gecmis olabilir.'
+        }
+
         $rows += New-EDRow -Module 'M12' -Check 'Yavas teslim (aktif DB sunucusuna gore)' -Values $serverValues `
             -CellStatus $cellStatus -Unit 'adet' -Status $status -Patterns @('P3') -Note "$note $coverageNote"
 

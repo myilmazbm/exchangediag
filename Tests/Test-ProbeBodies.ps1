@@ -499,6 +499,42 @@ Assert-Equal 'Uyari ayri sayildi' 1 (Get-EDTestRow $rows 'Uyari olayi').Values['
 Assert-Equal 'En sik tekrarlayan gruplanarak bulundu' 'MSExchangeTransport #1000 (3x)' `
     (Get-EDTestRow $rows 'En sik tekrarlayan hata').Values['MBX1']
 Assert-True 'Depolama kaynakli hata ayrica vurgulandi' ($errorRow.Note -like '*DEPOLAMA kaynakli hata*StorPort #153*') $errorRow.Note
+
+# 3d. known-issues.json BASTIRMASI: yalnizca RAPOR tarafinda bir suzgec.
+#
+# Sunucuda hicbir sey degismez, hicbir olay silinmez - olay yalnizca bu
+# raporun sayiminin disinda tutulur. Eskiden eslesme YALNIZCA kanit
+# CSV'sine Bastirildi=True diye etiketleniyor, errorTotal'dan DUSMUYORDU:
+# ayar belgeliydi ama calismiyordu. Gorunmez bastirmanin TERSI - gorunmez
+# BASTIRMAMA - ve ikisi de operatoru yaniltir.
+$suppressCtx = New-ProbeContext -WindowHours 24
+$previousKnown = $suppressCtx.Config.KnownIssues
+# FIXTURE IZOLASYONU: Config paketler arasinda paylasilir; geri alinmazsa
+# sonraki testler sessizce yalanci-yesil olur.
+$suppressCtx.Config.KnownIssues = @(@{ module = 'M41'; match = 'MSExchangeTransport'; reason = 'test'; expires = '2099-01-01' })
+# WinEventFilters de PAYLASILAN bir toplayicidir: ikinci kosum filtreleri
+# ust uste ekler ve asagidaki "iki gunluk de soruldu" iddiasi dort kayit
+# gorur. Ayni disiplin: kirlet, kullan, GERI AL.
+$previousFilters = $script:WinEventFilters
+$suppressedRows = @(& $m41.Run $suppressCtx)
+$script:WinEventFilters = $previousFilters
+$suppressCtx.Config.KnownIssues = $previousKnown
+$suppressedErrorRow = Get-EDTestRow $suppressedRows 'Hata olayi'
+if ($null -eq $suppressedErrorRow) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    # 3 x MSExchangeTransport bastirildi: 8 - 3 = 5.
+    Assert-Equal 'Bastirilan olaylar SAYIMDAN dusuruldu' 5 $suppressedErrorRow.Values['MBX1']
+    Assert-True 'Bastirma NOTTA gorunuyor' `
+        ($suppressedErrorRow.Note -like '*SAYIM DISI*') $suppressedErrorRow.Note
+    Assert-True 'Hangi olay grubu oldugu yazili' `
+        ($suppressedErrorRow.Note -like '*MSExchangeTransport*') $suppressedErrorRow.Note
+    # EN ONEMLI IDDIA: arac sunucuya dokunmadigini SOYLEMELI, yoksa
+    # operator "bastirma" kelimesini olaylarin silindigi sanabilir.
+    Assert-True 'Olaylarin sunucuda DURDUGU soyleniyor' `
+        ($suppressedErrorRow.Note -like '*sunucuda DURUYOR*') $suppressedErrorRow.Note
+}
 Assert-True 'Depolama icin M21/M22 gosterildi' ($errorRow.Note -like '*M21*' -and $errorRow.Note -like '*M22*') $errorRow.Note
 
 # Filtre SUNUCU TARAFINDA uygulandi mi? (Client-side Where-Object tel

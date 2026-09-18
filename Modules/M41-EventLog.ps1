@@ -207,6 +207,27 @@ Register-EDModule @{
                 else { [string](Get-EDProperty $_ 'Level') -match 'Warning|Uyar' }
             })
 
+            # BASTIRMA YALNIZCA RAPOR TARAFINDA BIR SUZGECTIR.
+            # Sunucuda hicbir sey degismez, hicbir olay silinmez; yalnizca
+            # bu raporun sayiminin disinda tutulur ve bu NOTTA yazilir.
+            #
+            # Eskiden eslesme yalnizca kanit CSV'sine Bastirildi=True diye
+            # etiketleniyor, sayimdan DUSMUYORDU. Yani known-issues.json'a
+            # M41 girdisi yazan operator gurultunun susacagini saniyor, ama
+            # susmuyordu - gorunmez bastirmanin TERSI: gorunmez BASTIRMAMA.
+            # Brief 569 bunu belgeliyordu; artik ayar gercekten calisiyor.
+            $suppressedGroups = @()
+            $countedErrorGroups = @()
+            foreach ($group in $errorGroups) {
+                $identity = "$(Get-EDProperty $group 'Provider')\$(Get-EDProperty $group 'EventId')"
+                if (Test-EDKnownIssue -Config $Context.Config -Module 'M41' -Text $identity) {
+                    $suppressedGroups += $identity
+                    continue
+                }
+                $countedErrorGroups += $group
+            }
+            $errorGroups = $countedErrorGroups
+
             $errorTotal = 0
             foreach ($group in $errorGroups) { $errorTotal += [int](Get-EDProperty $group 'Count' 0) }
             $warnTotal = 0
@@ -240,6 +261,15 @@ Register-EDModule @{
                     Bastirildi = [bool]$known
                     Mesaj      = Get-EDProperty $group 'Message'
                 }
+            }
+
+            if ($suppressedGroups.Count -gt 0) {
+                # SAYI DEGIL AD: operator neyin susturuldugunu bilmeden
+                # raporun ne kadarina guvenecegine karar veremez. M40 ve M45
+                # ayni deyimi kullaniyor.
+                $problems += ("{0}: {1} olay grubu known-issues.json ile SAYIM DISI birakildi ({2}) - olaylar sunucuda DURUYOR, yalnizca bu raporun sayiminda yok." -f
+                    $server, $suppressedGroups.Count, (@($suppressedGroups | Select-Object -First 3) -join ', '))
+                $log.Warn("M41/$server : $($suppressedGroups.Count) olay grubu bastirildi: $($suppressedGroups -join ', ')")
             }
 
             $cellStatus[$server] = Get-EDStatus -Value $errorTotal -ThresholdName 'eventErrorCount' -Config $Context.Config

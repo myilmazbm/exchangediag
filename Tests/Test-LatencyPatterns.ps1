@@ -880,9 +880,20 @@ function New-SlowRecipientAnalysis {
 }
 
 function New-P3Context {
-    <# Alici -> veritabani eslemesini sahte Exchange kanalindan dondurur. #>
-    param([hashtable]$DatabaseByRecipient)
+    <#
+        Alici -> veritabani eslemesini sahte Exchange kanalindan dondurur.
+
+        $TopologyDatabases: ORTAMDAKI veritabani sayisi. P3'un beklenen payi
+        (1/N) buradan hesaplanir - yavas teslim ALMIS DB sayisindan degil.
+        Fixture bir sure bu listeyi bos birakiyordu; o yuzden payda hatasi
+        testlerde hic gorunmuyordu.
+    #>
+    param([hashtable]$DatabaseByRecipient, [string[]]$TopologyDatabases)
     $ctx = New-PatternContext -Servers @((New-PatternServer 'SRV1'))
+    if (-not $TopologyDatabases) { $TopologyDatabases = @($DatabaseByRecipient.Values | Sort-Object -Unique) }
+    $ctx.Topology.Databases = @($TopologyDatabases | ForEach-Object {
+        [pscustomobject]@{ Name = $_; Server = 'SRV1'; MountedOnServer = 'SRV1'; Mounted = $true }
+    })
     $map = @{}
     foreach ($key in $DatabaseByRecipient.Keys) { $map[$key.ToLowerInvariant()] = $DatabaseByRecipient[$key] }
     $ctx.Executor = New-EDMockExecutor -ResponsesByCommand @{
@@ -900,8 +911,8 @@ function New-P3Context {
 }
 
 function Get-P3Row {
-    param($DatabaseByRecipient, $RecipientCounts, [long]$TotalSlow = 0)
-    $ctx = New-P3Context -DatabaseByRecipient $DatabaseByRecipient
+    param($DatabaseByRecipient, $RecipientCounts, [long]$TotalSlow = 0, [string[]]$TopologyDatabases)
+    $ctx = New-P3Context -DatabaseByRecipient $DatabaseByRecipient -TopologyDatabases $TopologyDatabases
     Set-AnalysisCache -Context $ctx -Analyses @(
         (New-SlowRecipientAnalysis -Server 'SRV1' -RecipientCounts $RecipientCounts -TotalSlow $TotalSlow)
     )
@@ -922,6 +933,46 @@ else {
     Assert-Equal 'Dengeli dagilim FAIL uretmiyor' 'WARN' $p3Row.Status
     Assert-True 'Beklenen pay notta yaziyor' ($p3Row.Note -like '*beklenen pay %50*') $p3Row.Note
     Assert-True 'Tek DB kok neden gibi gorunmuyor deniyor' ($p3Row.Note -like '*Tek bir DB kok neden gibi gorunmuyor*') $p3Row.Note
+}
+
+# 4a-2. PAYDA ORTAMDAKI DB SAYISIDIR (yanlis negatif testi).
+#
+# On veritabanli bir ortamda yavas teslimler YALNIZCA IKI DB'ye dustu ve
+# %70/%30 dagildi. Eski kod paydayi gozlenen kumeden aliyordu (N=2) ->
+# beklenen pay %50, esik %80 -> iddia KURULMUYORDU. Oysa on DB'li bir
+# ortamda beklenen pay %10'dur ve %70 cok belirgin bir yogunlasmadir.
+# Yavas teslimlerin birkac DB'ye dusmus olmasi ZATEN YOGUNLASMANIN
+# KENDISIDIR; onu paydaya koymak iddiayi kendi kaniti ile zayiflatiyordu.
+$p3Row = Get-P3Row -DatabaseByRecipient @{ 'u1@x.local' = 'DB01'; 'u2@x.local' = 'DB02' } `
+    -RecipientCounts @{ 'u1@x.local' = 70; 'u2@x.local' = 30 } `
+    -TopologyDatabases @('DB01','DB02','DB03','DB04','DB05','DB06','DB07','DB08','DB09','DB10')
+if ($null -eq $p3Row) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    Assert-True '10 DB ortaminda %70 yogunlasma YAKALANIYOR' ($p3Row.Note -like '*ORGU P3*') $p3Row.Note
+    Assert-Equal '10 DB ortaminda %70 FAIL uretiyor' 'FAIL' $p3Row.Status
+    # Payda ortamdan geldigi icin beklenen pay %10 olmali, %50 degil.
+    Assert-True 'Beklenen pay ORTAMDAKI DB sayisindan hesaplandi' `
+        ($p3Row.Note -like '*beklenen pay %10*') $p3Row.Note
+    Assert-True 'Payda belirsizlik uyarisi YOK (liste okundu)' `
+        ($p3Row.Note -notlike '*veritabani listesi okunamadigi icin*') $p3Row.Note
+}
+
+# 4a-3. Veritabani listesi OKUNAMAZSA payda uydurulmaz: gozlenen kumeye
+# geri dusulur (daha muhafazakar) ve bu NOTTA soylenir - cunku o yolda
+# gercek bir yogunlasma iddia edilmeden gecmis OLABILIR.
+$p3Ctx = New-P3Context -DatabaseByRecipient @{ 'u1@x.local' = 'DB01'; 'u2@x.local' = 'DB02' }
+$p3Ctx.Topology.Databases = @()
+Set-AnalysisCache -Context $p3Ctx -Analyses @(
+    (New-SlowRecipientAnalysis -Server 'SRV1' -RecipientCounts @{ 'u1@x.local' = 70; 'u2@x.local' = 30 })
+)
+$p3Row = Get-EDTestRow @(& $m12.Run $p3Ctx) 'Yavas teslim (aktif DB'
+if ($null -ne $p3Row) {
+    Assert-True 'Liste okunamayinca belirsizlik SOYLENIYOR' `
+        ($p3Row.Note -like '*veritabani listesi okunamadigi icin*') $p3Row.Note
+    Assert-True 'Esigin yuksek olabilecegi soyleniyor' `
+        ($p3Row.Note -like '*esik oldugundan yuksek olabilir*') $p3Row.Note
 }
 
 # 4b. IKI DB, %85 / %15: TAVAN (%80) asildi -> P3 kurulur.
