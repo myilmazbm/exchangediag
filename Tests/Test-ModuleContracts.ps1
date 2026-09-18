@@ -128,6 +128,35 @@ Assert-Equal 'Suzgecsiz cagri tum modulleri dondurur' $registered.Count @(Get-ED
 Assert-True 'Faz suzgeci calisiyor' (@(Get-EDModules -Phase 'A').Count -gt 0) 'Faz A'
 Assert-Equal 'Bos faz da hicbiri demektir' 0 @(Get-EDModules -Phase @('')).Count
 
+# SATIR SONUNDA BACKTICK + BOSLUK: SESSIZCE BASKA BIR PROGRAM.
+#
+# PowerShell'de backtick BIR SONRAKI KARAKTERI kacirir. Satir sonundaysa
+# satiri devam ettirir; ama arada bir BOSLUK varsa kacirilan sey bosluktur
+# ve satir DEVAM ETMEZ. Kod gozle dogru gorunur, parse edilir, hicbir
+# sozdizimi hatasi vermez - yalnizca BASKA bir sey yapar:
+#   - ilk satir eksik parametreyle calisir; parametre Mandatory ise
+#     PowerShell OPERATORE SORU SORAR (betik uretimde asili kalir),
+#   - ikinci satir ayri bir komut sayilir ve "-X is not recognized" der.
+#
+# URETIMDE YASANDI: Core/TrackingLog.ps1 icindeki bellek ongorusu cagrisi
+# boyle yazilmisti. Tum paket (3500 iddia) YESILDI, cunku o kod yolu
+# testlerde hic kosmuyor - her test TrackingLogLocation onbellegini hazir
+# dolduruyor. Kusuru bulan sey test degil, gercek bir prod kosumu oldu.
+#
+# Bu iddia sinifi kapatir: kaynak duzeyinde, kosmayan kodda bile gorulur.
+$continuationOffenders = @()
+foreach ($file in $targetingFiles + @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Tests') -Filter '*.ps1' -File)) {
+    $lineNumber = 0
+    foreach ($line in @(Get-Content -LiteralPath $file.FullName)) {
+        $lineNumber++
+        if ($line -match '`[ \t]+$') {
+            $continuationOffenders += ("{0}:{1}" -f $file.Name, $lineNumber)
+        }
+    }
+}
+Assert-True 'Satir sonunda backtick+bosluk yok' ($continuationOffenders.Count -eq 0) `
+    ($continuationOffenders -join ', ')
+
 $duplicateIds = @($registered | Group-Object -Property Id | Where-Object { $_.Count -gt 1 })
 Assert-True 'Modul kimlikleri benzersiz' ($duplicateIds.Count -eq 0) `
     (($duplicateIds | ForEach-Object { $_.Name }) -join ', ')

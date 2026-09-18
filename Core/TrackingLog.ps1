@@ -211,7 +211,7 @@ function Get-EDTrackingLogLocation {
         }
         $parallelism = [int](Get-EDProperty $Context.Executor 'Parallelism' 1)
         if ($parallelism -lt 1) { $parallelism = 1 }
-        $forecast = Get-EDMemoryForecast -Parallelism $parallelism ` 
+        $forecast = Get-EDMemoryForecast -Parallelism $parallelism `
             -WindowHours ([double]$Context.WindowHours) -LogMegabytesPerServer $measured
         $Context.Cache['MemoryForecast'] = $forecast
         if ($forecast.Verdict -ne 'OK') { $log.Warn("Bellek ongorusu: $($forecast.Message)") }
