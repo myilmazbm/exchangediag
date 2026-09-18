@@ -129,12 +129,16 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
   "maxRecipientLookups": 300,     // M12: sorgulanacak en fazla benzersiz alıcı
   "perfSampleCount": 20,          // M20/M21: kaç örnek (persentil için)
   "perfSampleIntervalSeconds": 1, // örnekler arası hedef aralık
-  "maxFolderScans": 50,           // M24: taranacak en fazla posta kutusu
+  "maxFolderScans": 50,           // M24: TUM ORTAMDA taranacak en fazla posta kutusu (sunucu basina DEGIL)
   "storeDiagnosisFloorMs": 1000   // M23: teşhis kapısı - altındaki ölçüm için örüntü iddia edilmez
 }
 ```
 
 > ⚠️ **`storeDiagnosisFloorMs` bir eşik değil, SUSMA EŞİĞİDİR.** M23 satırının `OK`/`WARN`/`FAIL` hükmü `storeTimeInServerMs`'ten gelir; bu değer yalnızca "BEKLİYOR / CPU YAKIYOR" teşhisinin kurulabildiği en küçük büyüklüktür. 3 ms sunucu zamanının 0 ms CPU'ya oranı da sonsuzdur ama kimse beklemiyordur. Yükseltmek gerçek bulguları da susturur. Bu yüzden `warn`/`fail` ikilisine sokulmamıştır: tek yanlı bir kapıyı o şemaya koymak, yön çıkarımına uydurma bir anlam kazandırırdı (karş. `maxRecipientLookups`, `maxFolderScans`).
+
+> ⚠️ **`parallelism` yalnızca oturum sayısını değil BELLEĞİ de çarpar.** Ölçüldü: M11 tepe kullanımı 1/2/4 eş zamanlı işte 313 / 593 / 1.225 MB — tam ×N. Üstüne Bölüm 4'teki terk telafisi havuz tavanını başlangıç değerinin iki katına çıkarabilir. Araç, ham log dizinini zaten gezerken **pencereye düşen log boyutunu ölçer** ve tepe kullanımı öngörür; aşılacaksa uyarır ve `CORE / Bellek öngörüsü` satırı rapora düşer. Tek iş bile sığmıyorsa eşme derecesini kısmak **ÇÖZMEZ** ve araç bunu söyler: tek kaldıraç `-WindowHours`'tur. Bellek okunamazsa hüküm `N/A`'dır — "yeterli bellek var" **denmez**. Öngörü tahmine değil ÖLÇÜME dayanır; varsayılan bir saatlik hız kullanılsaydı küçük ortamlarda her koşumda uyarı çıkar ve sürekli uyaran bir öngörü susturulurdu.
+>
+> Sessizce takasa düşen bir araç, teşhis etmeye çalıştığı ortamı bırakıp kendi makinesini boğar ve başta **süre ölçümleri** olmak üzere bütün sonuçları tartışmalı hâle getirir.
 
 > ⚠️ **`runBudgetMinutes` bir görev timeout'u değil, KOŞUM BÜTÇESİDİR.** Modül başına sert bir zaman sınırı bu mimaride uygulanamaz: modülün `Run` bloğu ana iş parçacığında senkron koşar ve `PowerShell.Stop()` yerel kodu kesemez (Bölüm 4, madde 9). Uygulanabilir olan tek şey **işbirlikçi bir son tarihtir**: karar modüller arasında verilir ve aynı son tarih ham log ayrıştırıcısının `BudgetSeconds` değerini de kırpar. Bu yüzden bütçe bir garanti değil **HEDEFTİR** — en çok bir modüllük aşılır ve aşım rapora yazılır.
 >
@@ -356,7 +360,7 @@ ExchangeDiag\
 │   ├─ Config.ps1 · Connect.ps1 · Framework.ps1 · Report.ps1 · Compare.ps1
 │   ├─ Replication.ps1         ← kopya envanteri (M30-M34 ortak girdisi)
 │   ├─ TrackingLog.ps1         ← SMB/cmdlet erişim katmanı
-│   └─ PerfCounter.ps1         ← sayaç örnekleme + volume envanteri
+│   └─ PerfCounter.ps1         ← sayaç örnekleme + volume envanteri + bellek öngörüsü
 ├─ Modules\
 │   ├─ M01-Topology.ps1
 │   ├─ M10-LatencyPercentile.ps1

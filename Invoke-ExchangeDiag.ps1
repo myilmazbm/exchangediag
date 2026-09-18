@@ -534,6 +534,18 @@ try {
         $allRows += New-EDRow -Module 'CORE' -Check 'Bastirilan bulgu' -Status 'WARN' -Note $suppressNote
     }
 
+    # BELLEK ONGORUSU RAPORA DUSER - yalnizca run.log'a degil.
+    # Sessizce takasa dusen bir arac, teshis etmeye calistigi ortami
+    # birakip kendi makinesini boger ve basta SURE olcumleri olmak uzere
+    # butun sonuclari tartismali hale getirir. 'OK' ongoru satir uretmez:
+    # gurultu, uyarinin kendisini degersizlestirir.
+    $memoryForecast = $context.Cache['MemoryForecast']
+    if ($null -ne $memoryForecast -and $memoryForecast.Verdict -ne 'OK') {
+        $allRows += New-EDRow -Module 'CORE' -Check 'Bellek ongorusu' `
+            -Status $(if ($memoryForecast.Verdict -eq 'WARN') { 'WARN' } else { 'N/A' }) `
+            -Note $memoryForecast.Message
+    }
+
     if ($context.Executor.AbandonedPipelines -gt 0) {
         $abandonNote = "$($context.Executor.AbandonedPipelines) is zaman asimina ugradi ve TERK EDILDI (arka planda suruyor olabilir). "
         $abandonNote += 'PowerShell.Stop() yerel kodda calisan bir isi durduramaz. Sayiya kuyrukta beklerken zaman asan isler de '

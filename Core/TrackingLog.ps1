@@ -109,17 +109,27 @@ function Get-EDTrackingLogLocation {
     $probe = {
         param($UncPath)
         if ([string]::IsNullOrWhiteSpace($UncPath)) {
-            return [pscustomobject]@{ Accessible = $false; FileCount = 0; Error = 'Yol bos' }
+            return [pscustomobject]@{ Accessible = $false; FileCount = 0; MegabytesTotal = 0; Error = 'Yol bos' }
         }
         try {
             if (-not (Test-Path -LiteralPath $UncPath)) {
-                return [pscustomobject]@{ Accessible = $false; FileCount = 0; Error = 'Yol bulunamadi veya erisim yok' }
+                return [pscustomobject]@{ Accessible = $false; FileCount = 0; MegabytesTotal = 0; Error = 'Yol bulunamadi veya erisim yok' }
             }
             $files = @(Get-ChildItem -LiteralPath $UncPath -Filter 'MSGTRK*.LOG' -File -ErrorAction Stop)
-            return [pscustomobject]@{ Accessible = $true; FileCount = $files.Count; Error = $null }
+            # BOYUT BEDAVA: dizin zaten gezildi, FileInfo Length'i tasiyor.
+            # Bu olcum bellek ongorusunu TAHMINDEN OLCUME cevirir - varsayilan
+            # saatlik hiz (musteri olcegi) kucuk ortamlarda surekli yanlis
+            # alarm uretirdi ve surekli uyaran bir ongoru susturulur.
+            $totalBytes = 0
+            foreach ($file in $files) { $totalBytes += [long]$file.Length }
+            return [pscustomobject]@{
+                Accessible = $true; FileCount = $files.Count
+                MegabytesTotal = [math]::Round($totalBytes / 1MB, 1)
+                Error = $null
+            }
         }
         catch {
-            return [pscustomobject]@{ Accessible = $false; FileCount = 0; Error = $_.Exception.Message }
+            return [pscustomobject]@{ Accessible = $false; FileCount = 0; MegabytesTotal = 0; Error = $_.Exception.Message }
         }
     }
 
@@ -146,12 +156,15 @@ function Get-EDTrackingLogLocation {
         $unc = $uncByServer[$server.Name]
         $accessible = $false
         $fileCount = 0
+        # Sonda basarisiz olursa bu degisken atanmaz ve StrictMode patlar.
+        $megabytes = 0
         $probeError = $null
 
         $probeResult = $probeResults[$server.Name]
         if ($probeResult -and $probeResult.Succeeded -and $probeResult.Output.Count -gt 0) {
             $row = $probeResult.Output[0]
             $accessible = [bool](Get-EDProperty $row 'Accessible' $false)
+            $megabytes = [double](Get-EDProperty $row 'MegabytesTotal' 0)
             $fileCount = [int](Get-EDProperty $row 'FileCount' 0)
             $probeError = [string](Get-EDProperty $row 'Error')
         }
@@ -166,6 +179,7 @@ function Get-EDTrackingLogLocation {
             UncPath    = $unc
             Accessible = $accessible
             FileCount  = $fileCount
+            MegabytesTotal = $megabytes
             Error      = $probeError
         }
     }
@@ -178,6 +192,29 @@ function Get-EDTrackingLogLocation {
         elseif (-not $location.Accessible) {
             $log.Info("$($location.Server): ham log okunamiyor ($($location.Error)); cmdlet yoluna dusulecek.")
         }
+    }
+
+    # BELLEK ONGORUSU BURADA KURULUR, CUNKU OLCUM BURADA ELDEDIR.
+    #
+    # Ongoruyu baglanti aninda kurmak cazipti ama orada log hacmi
+    # BILINMIYOR ve varsayilan saatlik hiz (musteri olcegi) kucuk
+    # ortamlarda her kosumda WARN uretirdi. Surekli uyaran bir ongoru
+    # susturulur; susturulan ongoru yoktur. Burada sonda dizini zaten
+    # gezdigi icin boyut OLCULMUSTUR ve uyari ancak gercekten risk
+    # varken cikar. Yer de dogru: ilk buyuk tahsis bundan HEMEN SONRA
+    # baslar (M10/M11 ham log okumasi).
+    if (-not $Context.Cache.ContainsKey('MemoryForecast')) {
+        $measured = 0
+        foreach ($location in $locations) {
+            $mb = [double](Get-EDProperty $location 'MegabytesTotal' 0)
+            if ($mb -gt $measured) { $measured = $mb }
+        }
+        $parallelism = [int](Get-EDProperty $Context.Executor 'Parallelism' 1)
+        if ($parallelism -lt 1) { $parallelism = 1 }
+        $forecast = Get-EDMemoryForecast -Parallelism $parallelism ` 
+            -WindowHours ([double]$Context.WindowHours) -LogMegabytesPerServer $measured
+        $Context.Cache['MemoryForecast'] = $forecast
+        if ($forecast.Verdict -ne 'OK') { $log.Warn("Bellek ongorusu: $($forecast.Message)") }
     }
 
     $Context.Cache['TrackingLogLocation'] = $locations
