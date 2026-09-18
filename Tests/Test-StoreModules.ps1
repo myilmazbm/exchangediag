@@ -588,6 +588,75 @@ Assert-True 'Secilenlerin hepsi en ust sirali adaylardan' `
     ($scaleTargets -join ', ')
 
 # ---------------------------------------------------------------------------
+Write-Host "`n=== M24 adil dagitim: her sunucu temsil edilir ===" -ForegroundColor Cyan
+
+# TEK KURESEL KAPI KIYASLANABILIRLIGI BOZUYORDU.
+#
+# Adaylar Rank'e gore siralanip tek bir kapiya giriyordu: 8 sunuculu bir
+# ortamda EN KOTU sunucu butun slotlari yiyebiliyordu (zaten en yuksek
+# Rank'i o uretir) ve diger yedi sunucunun hucresi N/A kaliyordu. Rapor o
+# sunucular icin "buyuk klasor yok" degil "BAKMADIK" demeliydi ama kapsam
+# notu kureseldi, operator ikisini ayirt edemiyordu.
+#
+# Senaryo: 8 sunucu, SRV1 ezici (Rank 100.000+), digerleri sonuk.
+$fairServers = @(1..8 | ForEach-Object { "MBX$_" })
+# DIKKAT: ForEach-Object BLOGU ALT KAPSAMDIR. Icinde '$x += ...' yazmak
+# ust kapsamdaki diziyi DEGISTIRMEZ - her turda yerel bir kopya uretilip
+# atilir ve liste BOS kalir. Duz 'foreach' ayni kapsamda kosar.
+$fairHeavy = New-Object 'System.Collections.Generic.List[object]'
+foreach ($srv in $fairServers) {
+    $base = $(if ($srv -eq 'MBX1') { 100000 } else { 100 })
+    foreach ($i in 1..20) {
+        [void]$fairHeavy.Add([pscustomobject]@{
+            MailboxGuid = "$srv-kutu$i"; DisplayName = "$srv-kutu$i"; Server = $srv
+            Database = 'DB01'; TimeInServer = ($base + $i); IsSystem = $false
+        })
+    }
+}
+# DIKKAT: bu paketin KENDI New-EDTestContext'i topolojiyi SRV1'e sabitler.
+# Sekiz sunuculu senaryo icin baglam dogrudan kurulur; aksi halde modul
+# tek sunucu gorur ve testin olcmek istedigi dagitim hic olusmaz.
+$fairContext = New-EDTestContext -Config $config -Executor (New-EDMockExecutor -ResponsesByCommand $folderResponses)
+$fairContext.Topology = [pscustomobject]@{
+    Servers = @($fairServers | ForEach-Object { New-EDTestServer $_ })
+    Sites = @(); Dags = @(); Databases = @(); HasDag = $false
+}
+$fairContext.Cache['HeavyMailboxes'] = $fairHeavy.ToArray()
+$fairRows = @(& $m24.Run $fairContext)
+$fairScanned = Get-EDTestRow $fairRows 'Taranan posta kutusu'
+
+if ($null -eq $fairScanned) {
+    Write-Host '  (satir yok; bu bolumun kalan iddialari atlandi)' -ForegroundColor DarkYellow
+}
+else {
+    # TOPLAM DEGISMEMELI: maliyet ayni kalmali, yoksa paylasilan Exchange
+    # oturum havuzunda sure sunucu sayisiyla carpilir.
+    $fairTotal = 0
+    foreach ($srv in $fairServers) { $fairTotal += [int]$fairScanned.Values[$srv] }
+    Assert-Equal 'Toplam tarama maxFolderScans ile sinirli' 50 $fairTotal
+
+    # HER SUNUCU TEMSIL EDILMELI: eski kodda bu sayi 1 olurdu.
+    $fairCovered = @($fairServers | Where-Object { [int]$fairScanned.Values[$_] -gt 0 })
+    Assert-Equal 'Sekiz sunucunun sekizi de taranmis' 8 $fairCovered.Count
+
+    # AGIRLIK YINE DOGRU YERDE: taban 50/8 = 6, SRV1 artan slotlari alir.
+    Assert-True 'Ezici sunucu tabandan FAZLA slot aldi' `
+        ([int]$fairScanned.Values['MBX1'] -gt 6) ("MBX1={0}" -f $fairScanned.Values['MBX1'])
+    Assert-True 'Sonuk sunucular da taban kadar slot aldi' `
+        ([int]$fairScanned.Values['MBX8'] -ge 6) ("MBX8={0}" -f $fairScanned.Values['MBX8'])
+
+    # KAPSAM SUNUCU BASINA GORUNMELI - kuresel yuzde hangi sunucunun ne
+    # kadar tarandigini soylemiyordu.
+    # Kapsam notu 'Esigi asan klasor' satirindadir; 'Taranan posta kutusu'
+    # satiri modulun genel aciklamasini tasir.
+    $fairFolderRow = Get-EDTestRow $fairRows 'Esigi asan klasor'
+    Assert-True 'Kapsam notu sunucu basina yaziyor' `
+        ($fairFolderRow.Note -like '*Sunucu basina taranan/aday*') $fairFolderRow.Note
+    Assert-True 'Sinirin TUM ORTAMDA oldugu soyleniyor' `
+        ($fairFolderRow.Note -like '*TUM ORTAMDA*') $fairFolderRow.Note
+}
+
+# ---------------------------------------------------------------------------
 # Yalnizca KENDI klasorunu siler.
 Remove-Item -LiteralPath $FixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 

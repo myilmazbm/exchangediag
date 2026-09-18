@@ -129,12 +129,16 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
   "maxRecipientLookups": 300,     // M12: sorgulanacak en fazla benzersiz alıcı
   "perfSampleCount": 20,          // M20/M21: kaç örnek (persentil için)
   "perfSampleIntervalSeconds": 1, // örnekler arası hedef aralık
-  "maxFolderScans": 50,           // M24: TUM ORTAMDA taranacak en fazla posta kutusu (sunucu basina DEGIL)
+  "maxFolderScans": 50            // M24: TÜM ORTAMDA taranacak en fazla posta kutusu; slotlar sunuculara ADİL dağıtılır
   "storeDiagnosisFloorMs": 1000   // M23: teşhis kapısı - altındaki ölçüm için örüntü iddia edilmez
 }
 ```
 
 > ⚠️ **`storeDiagnosisFloorMs` bir eşik değil, SUSMA EŞİĞİDİR.** M23 satırının `OK`/`WARN`/`FAIL` hükmü `storeTimeInServerMs`'ten gelir; bu değer yalnızca "BEKLİYOR / CPU YAKIYOR" teşhisinin kurulabildiği en küçük büyüklüktür. 3 ms sunucu zamanının 0 ms CPU'ya oranı da sonsuzdur ama kimse beklemiyordur. Yükseltmek gerçek bulguları da susturur. Bu yüzden `warn`/`fail` ikilisine sokulmamıştır: tek yanlı bir kapıyı o şemaya koymak, yön çıkarımına uydurma bir anlam kazandırırdı (karş. `maxRecipientLookups`, `maxFolderScans`).
+
+> ⚠️ **`maxFolderScans` TÜM ORTAM için bir bütçedir ve slotlar ADİL dağıtılır.** Tek bir küresel sıralama kullanılsaydı en kötü sunucu bütün slotları yerdi — zaten en yüksek sırayı o üretir — ve diğer sunucuların hücreleri `N/A` kalırdı. O zaman rapor onlar için "büyük klasör yok" değil **"bakmadık"** demeliydi, ama kapsam notu küresel olduğu için operatör ikisini ayırt edemezdi. Bu, Bölüm 4'ün "tüm sunucular yan yana, **kıyaslanabilir**" ilkesine aykırıdır.
+>
+> Bunun yerine önce adayı olan her sunucuya eşit bir **taban** verilir (`maxFolderScans / sunucu sayısı`), artan slotlar sıraya göre dağıtılır. Toplam maliyet değişmez — bu önemlidir, çünkü `Get-MailboxFolderStatistics` çağrıları **paylaşılan** Exchange oturum havuzundan geçer ve sunucu başına kota toplam süreyi sunucu sayısıyla çarpardı. Kapsam artık sunucu başına yazılır (`MBX03: 8/412`); slot yetmeyen sunucular varsa adlarıyla sayılır ve onlar için "büyük klasör yok" **denmez**.
 
 > ⚠️ **`parallelism` yalnızca oturum sayısını değil BELLEĞİ de çarpar.** Ölçüldü: M11 tepe kullanımı 1/2/4 eş zamanlı işte 313 / 593 / 1.225 MB — tam ×N. Üstüne Bölüm 4'teki terk telafisi havuz tavanını başlangıç değerinin iki katına çıkarabilir. Araç, ham log dizinini zaten gezerken **pencereye düşen log boyutunu ölçer** ve tepe kullanımı öngörür; aşılacaksa uyarır ve `CORE / Bellek öngörüsü` satırı rapora düşer. Tek iş bile sığmıyorsa eşme derecesini kısmak **ÇÖZMEZ** ve araç bunu söyler: tek kaldıraç `-WindowHours`'tur. Bellek okunamazsa hüküm `N/A`'dır — "yeterli bellek var" **denmez**. Öngörü tahmine değil ÖLÇÜME dayanır; varsayılan bir saatlik hız kullanılsaydı küçük ortamlarda her koşumda uyarı çıkar ve sürekli uyaran bir öngörü susturulurdu.
 >

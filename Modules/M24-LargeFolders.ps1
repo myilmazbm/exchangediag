@@ -82,8 +82,43 @@ Register-EDModule @{
         # Kapi durumu tek bir hashtable'da tutulur: yardimci fonksiyon degeri
         # DEGISTIREBILSIN diye. PowerShell'de alt kapsamdan degisken ATAMASI
         # ust kapsami etkilemez, ama nesne icine yazmak etkiler.
-        $gate = @{
-            Max   = $maxScans
+        # TEK KURESEL KAPI KIYASLANABILIRLIGI BOZUYORDU.
+        #
+        # Adaylar Rank'e gore siralanir ve kapi tekti: 8 sunuculu bir
+        # ortamda 50 slotun TAMAMI tek bir sunucuya gidebiliyordu - zaten
+        # en kotu sunucu en yuksek Rank'i uretir. Diger 7 sunucunun hucresi
+        # N/A kaliyordu ve rapor "orada buyuk klasor yok" degil "BAKMADIK"
+        # diyordu; kapsam notu kuresel oldugu icin operator ikisini ayirt
+        # edemiyordu. Brief md.5: "tum sunucular, yan yana, KIYASLANABILIR".
+        #
+        # Cozum sunucu basina kota DEGIL - o, toplam taramayi sunucu
+        # sayisiyla carpar (8 sunucuda 50 -> 400) ve paylasilan Exchange
+        # oturum havuzu tek bir esme butcesi oldugu icin sureyi de 8'e
+        # katlar, kosum butcesini patlatir.
+        #
+        # Bunun yerine: TOPLAM yine $maxScans, ama once her sunucuya bir
+        # TABAN garanti edilir, artan slotlar liyakate (Rank) gore dagitilir.
+        # Maliyet ayni, her sunucu temsil ediliyor, agirlik yine dogru yerde.
+        #
+        # Sunucu basina kapi $maxScans ile SINIRLI tutulur: bellekte en
+        # fazla sunucuSayisi x maxScans nesne olur (8 x 50 = 400), yani
+        # kare karmasikligi cozen tasarim korunur.
+        $gatesByServer = @{}
+        $candidatesByServer = @{}
+        # KIMLIK POSTA KUTUSUDUR, SUNUCU+POSTA KUTUSU DEGIL.
+        #
+        # Ayni posta kutusu iki kaynaktan (M23/M12) ya da iki sunucudan
+        # gelebilir. Sunucu basina kapilar tek basina birakilsaydi ayni
+        # kutu IKI slot yiyebilirdi - hem bosa tarama hem de kapsam
+        # paydasiyla tutarsizlik. Bu harita "bu anahtar su an hangi
+        # kapida" sorusunu cevaplar; daha yuksek sirali bir kayit gelirse
+        # eskisi kendi kapisindan CIKARILIR.
+        $ownerByKey = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+        function New-EDFolderScanGate {
+            param([int]$Max)
+            return @{
+            Max   = $Max
             Items = (New-Object 'System.Collections.Generic.List[object]')
             # Karsilastirici ACIKCA verilir: bu sozluk "hangi adaylar secildi",
             # $seenKeys ise "kac benzersiz aday vardi" sorusunu cevaplar ve
@@ -101,7 +136,18 @@ Register-EDModule @{
             ByKey = (New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::OrdinalIgnoreCase))
             # maxScans < 1 ise hicbir aday tutulmaz: +sonsuz esigi sicak yolda
             # tek karsilastirmayla bunu saglar, ayrica bir bayrak gerekmez.
-            MinRank = $(if ($maxScans -lt 1) { [double]::PositiveInfinity } else { [double]::NegativeInfinity })
+            MinRank = $(if ($Max -lt 1) { [double]::PositiveInfinity } else { [double]::NegativeInfinity })
+            }
+        }
+
+        function Get-EDFolderScanGate {
+            <# Sunucunun kapisini dondurur, yoksa olusturur. #>
+            param($GatesByServer, [string]$Server, [int]$Max)
+            $key = $(if ($Server) { $Server } else { '(bilinmiyor)' })
+            if (-not $GatesByServer.ContainsKey($key)) {
+                $GatesByServer[$key] = New-EDFolderScanGate -Max $Max
+            }
+            return $GatesByServer[$key]
         }
 
         function Add-EDFolderScanCandidate {
@@ -114,19 +160,27 @@ Register-EDModule @{
                 DEGILDIR. Cagri sayisi da sinirlidir - sicak yolda esigi asmayan
                 aday buraya hic ugramaz.
             #>
-            param($Gate, [string]$Key, $Candidate)
+            param($Gate, [string]$Key, $Candidate, $GatesByServer, $OwnerByKey, [string]$ServerKey)
 
             if ([int]$Gate.Max -lt 1) { return }
 
             $rank = [double]$Candidate.Rank
 
-            # Ayni posta kutusu birden fazla kaynaktan gelebilir; en yuksek
-            # siraya sahip olani kalir.
-            if ($Gate.ByKey.ContainsKey($Key)) {
-                $existing = $Gate.ByKey[$Key]
+            # Ayni posta kutusu birden fazla kaynaktan VE birden fazla
+            # sunucudan gelebilir; en yuksek siraya sahip kayit kalir ve
+            # eskisi kendi kapisindan cikarilir.
+            if ($OwnerByKey.ContainsKey($Key)) {
+                $ownerGate = $GatesByServer[$OwnerByKey[$Key]]
+                $existing = $ownerGate.ByKey[$Key]
                 if ([double]$existing.Rank -ge $rank) { return }
-                [void]$Gate.Items.Remove($existing)
-                [void]$Gate.ByKey.Remove($Key)
+                [void]$ownerGate.Items.Remove($existing)
+                [void]$ownerGate.ByKey.Remove($Key)
+                [void]$OwnerByKey.Remove($Key)
+                # Kapi bosaldi: esik geri cekilmeli, yoksa o sunucu bir daha
+                # hicbir aday kabul etmez.
+                if ($ownerGate.Items.Count -lt [int]$ownerGate.Max) {
+                    $ownerGate.MinRank = [double]::NegativeInfinity
+                }
             }
 
             $position = $Gate.Items.Count
@@ -135,11 +189,13 @@ Register-EDModule @{
             }
             $Gate.Items.Insert($position, $Candidate)
             $Gate.ByKey[$Key] = $Candidate
+            $OwnerByKey[$Key] = $ServerKey
 
             if ($Gate.Items.Count -gt [int]$Gate.Max) {
                 $dropped = $Gate.Items[$Gate.Items.Count - 1]
                 $Gate.Items.RemoveAt($Gate.Items.Count - 1)
                 [void]$Gate.ByKey.Remove([string]$dropped.Key)
+                [void]$OwnerByKey.Remove([string]$dropped.Key)
             }
 
             if ($Gate.Items.Count -ge [int]$Gate.Max) {
@@ -147,9 +203,10 @@ Register-EDModule @{
             }
         }
 
-        # Sicak yoldaki tek karsilastirma icin yerel kopya: hashtable indeksi
-        # yerine duz degisken okunur.
-        $minRank = [double]$gate.MinRank
+        # Sicak yol esigi artik SUNUCU BASINA; her adayda kendi sunucusunun
+        # kapisina bakilir. Kapi sayisi sunucu sayisi kadardir (kucuk), ama
+        # her kapinin BOYUTU yine $maxScans ile sinirli - yani tarama hala
+        # dogrusal ve bellek sunucuSayisi x maxScans ile kapali.
 
         if ($Context.Cache.ContainsKey('HeavyMailboxes')) {
             foreach ($entry in @($Context.Cache['HeavyMailboxes'])) {
@@ -157,12 +214,21 @@ Register-EDModule @{
                 $heavyRaw++
                 $key = [string]$entry.MailboxGuid
                 if (-not $key) { continue }
-                [void]$seenKeys.Add($key)
+                $serverName = [string]$entry.Server
+                if ($seenKeys.Add($key)) {
+                    $bucket = $(if ($serverName) { $serverName } else { '(bilinmiyor)' })
+                    if (-not $candidatesByServer.ContainsKey($bucket)) { $candidatesByServer[$bucket] = 0 }
+                    $candidatesByServer[$bucket]++
+                }
                 $rank = [double]$entry.TimeInServer
+                $serverKey = $(if ($serverName) { $serverName } else { '(bilinmiyor)' })
+                $serverGate = Get-EDFolderScanGate -GatesByServer $gatesByServer -Server $serverName -Max $maxScans
                 # Esigin ALTINDAKI aday icin nesne bile uretilmez. Esit olan da
-                # gecmez: kapi doluyken beraberlik ilk gelene kalir.
-                if ($rank -le $minRank) { continue }
-                Add-EDFolderScanCandidate -Gate $gate -Key $key -Candidate ([pscustomobject]@{
+                # gecmez: kapi doluyken beraberlik ilk gelene kalir. Zaten
+                # secilmis bir anahtar gelirse esik atlanir: daha yuksek
+                # sirali kayit eskisini DEGISTIRMELI.
+                if ($rank -le [double]$serverGate.MinRank -and -not $ownerByKey.ContainsKey($key)) { continue }
+                Add-EDFolderScanCandidate -GatesByServer $gatesByServer -OwnerByKey $ownerByKey -ServerKey $serverKey -Gate $serverGate -Key $key -Candidate ([pscustomobject]@{
                     Key      = $key
                     Identity = $entry.MailboxGuid
                     Display  = $entry.DisplayName
@@ -171,7 +237,6 @@ Register-EDModule @{
                     Source   = 'M23 agir kullanici'
                     Rank     = $rank
                 })
-                $minRank = [double]$gate.MinRank
             }
             if ($heavyRaw -gt 0) { $sources += "M23 ($heavyRaw agir kullanici)" }
         }
@@ -184,10 +249,16 @@ Register-EDModule @{
                     if (-not $key) { continue }
                     # HashSet OrdinalIgnoreCase: ToLowerInvariant() cagrisi
                     # aday basina bir string AYIRIRDI, 200.000 adayda bos yere.
-                    [void]$seenKeys.Add($key)
+                    if ($seenKeys.Add($key)) {
+                        $bucket = $(if ($server) { $server } else { '(bilinmiyor)' })
+                        if (-not $candidatesByServer.ContainsKey($bucket)) { $candidatesByServer[$bucket] = 0 }
+                        $candidatesByServer[$bucket]++
+                    }
                     $rank = [double]$recipient.Count
-                    if ($rank -le $minRank) { continue }
-                    Add-EDFolderScanCandidate -Gate $gate -Key $key -Candidate ([pscustomobject]@{
+                    $serverKey = $(if ($server) { $server } else { '(bilinmiyor)' })
+                    $serverGate = Get-EDFolderScanGate -GatesByServer $gatesByServer -Server $server -Max $maxScans
+                    if ($rank -le [double]$serverGate.MinRank -and -not $ownerByKey.ContainsKey($key)) { continue }
+                    Add-EDFolderScanCandidate -GatesByServer $gatesByServer -OwnerByKey $ownerByKey -ServerKey $serverKey -Gate $serverGate -Key $key -Candidate ([pscustomobject]@{
                         Key      = $key
                         Identity = $recipient.Recipient
                         Display  = $recipient.Recipient
@@ -196,7 +267,6 @@ Register-EDModule @{
                         Source   = 'M12 yavas teslim alicisi'
                         Rank     = $rank
                     })
-                    $minRank = [double]$gate.MinRank
                 }
             }
             if ($slowRaw -gt 0) { $sources += "M12 ($slowRaw yavas teslim alicisi)" }
@@ -209,7 +279,63 @@ Register-EDModule @{
 
         # Kapsam paydasi: BENZERSIZ aday sayisi (eskiden $ranked.Count).
         $candidateCount = $seenKeys.Count
-        $targets = $gate.Items.ToArray()
+
+        # --- ADIL DAGITIM: once TABAN, sonra liyakat ---
+        #
+        # Toplam yine $maxScans. Once adayi olan her sunucuya esit bir taban
+        # verilir; artan slotlar Rank'e gore dagitilir. Boylece hicbir sunucu
+        # sifir taramayla kalmaz (kiyas kurulabilir) ama agirlik yine en kotu
+        # sunucuda olur.
+        #
+        # TABAN SIFIR OLABILIR: $maxScans sunucu sayisindan kucukse herkese
+        # bir slot bile dusmez. O zaman taban 1'e cekilir ve slotlar EN IYI
+        # sirali sunuculara gider - yani yine yayilir, ama kac sunucunun
+        # kapsam disi kaldigi notta SOYLENIR. Sessizce kuresel siralamaya
+        # donmek, duzeltilen kusurun ta kendisi olurdu.
+        $activeGates = @($gatesByServer.GetEnumerator() | Where-Object { $_.Value.Items.Count -gt 0 })
+        $serverCount = $activeGates.Count
+        $selected = New-Object 'System.Collections.Generic.List[object]'
+        $leftovers = New-Object 'System.Collections.Generic.List[object]'
+        $uncoveredServers = @()
+
+        if ($serverCount -gt 0 -and $maxScans -ge 1) {
+            $floor = [math]::Floor($maxScans / $serverCount)
+            if ($floor -lt 1) { $floor = 1 }
+
+            # Sunuculari EN IYI adaylarina gore sirala: taban herkese
+            # yetmiyorsa oncelik en kotu sunucunun olmali.
+            $orderedGates = @($activeGates | Sort-Object -Property @{
+                Expression = { [double]$_.Value.Items[0].Rank }; Descending = $true
+            })
+
+            foreach ($pair in $orderedGates) {
+                $items = $pair.Value.Items
+                $take = [math]::Min($floor, $items.Count)
+                if ($selected.Count -ge $maxScans) {
+                    # Taban bu sunucuya yetmedi: kapsam disi kaldi ve bu
+                    # SOYLENIR.
+                    $uncoveredServers += [string]$pair.Key
+                    foreach ($item in $items) { [void]$leftovers.Add($item) }
+                    continue
+                }
+                if ($selected.Count + $take -gt $maxScans) { $take = $maxScans - $selected.Count }
+                for ($i = 0; $i -lt $items.Count; $i++) {
+                    if ($i -lt $take) { [void]$selected.Add($items[$i]) }
+                    else { [void]$leftovers.Add($items[$i]) }
+                }
+            }
+
+            # Artan slotlar LIYAKATE gore: tabandan artanlarin en yuksek
+            # siralamalilari.
+            if ($selected.Count -lt $maxScans -and $leftovers.Count -gt 0) {
+                $remaining = $maxScans - $selected.Count
+                foreach ($item in @($leftovers | Sort-Object -Property Rank -Descending | Select-Object -First $remaining)) {
+                    [void]$selected.Add($item)
+                }
+            }
+        }
+
+        $targets = $selected.ToArray()
         # Bolme guvenligi: $candidateCount bos olamaz (yukarida kontrol edilir)
         # ama invaryant iki cagiranin garantisine dayaniyordu, yerel koruma yoktu.
         $attemptCoverage = $(if ($candidateCount -gt 0) { [math]::Round(($targets.Count / $candidateCount) * 100, 1) } else { 0 })
@@ -348,7 +474,29 @@ Register-EDModule @{
             $coverageNote += "$failed posta kutusu sorgulanamadi (dis adres veya dagitim grubu olabilir). "
         }
         if ($targets.Count -lt $candidateCount) {
-            $coverageNote += "Sinir maxFolderScans=$maxScans; genisletmek icin environment.json'dan artirin. "
+            $coverageNote += "Sinir maxFolderScans=$maxScans (TUM ORTAMDA, sunucu basina degil); genisletmek icin environment.json'dan artirin. "
+        }
+
+        # KAPSAM SUNUCU BASINA YAZILIR.
+        #
+        # Kuresel bir yuzde ("%0,1 tarandi") dogrudur ama HANGI sunucunun ne
+        # kadar tarandigini soylemez. Tek kureel kapi varken 50 slotun
+        # tamami tek sunucuya gidebiliyordu ve diger sunucular icin rapor
+        # "buyuk klasor yok" degil "BAKMADIK" demeliydi - ama bunu soyleyen
+        # bir sey yoktu. Dagitim artik adil, yine de kimin ne kadar
+        # tarandigi GORUNUR olmak zorunda.
+        $perServer = @()
+        foreach ($bucket in @($candidatesByServer.Keys | Sort-Object)) {
+            $scannedHere = @($targets | Where-Object { [string]$_.Server -eq $bucket }).Count
+            $perServer += ("{0}: {1}/{2}" -f $bucket, $scannedHere, $candidatesByServer[$bucket])
+        }
+        if ($perServer.Count -gt 0) {
+            $coverageNote += ("Sunucu basina taranan/aday: {0}. " -f ($perServer -join ', '))
+        }
+        if ($uncoveredServers.Count -gt 0) {
+            # Bu sunucular icin HICBIR sey taranmadi; hucreleri "sorun yok"
+            # diye okunmamali.
+            $coverageNote += ("DIKKAT: {0} sunucusunda HICBIR posta kutusu taranmadi (slot yetmedi); bu sunucular icin 'buyuk klasor yok' DENEMEZ. " -f ($uncoveredServers -join ', '))
         }
         $coverageNote += 'Bu bir ORNEKLEMDIR: burada bulunmamasi buyuk klasor olmadigi anlamina gelmez.'
 
