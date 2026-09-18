@@ -548,6 +548,87 @@ Assert-Equal 'Satir hukmu TIMEOUT (sessizce OK degil)' 'TIMEOUT' $pressureRow.St
 Assert-True 'Olculemeyen sunucu notta adiyla anildi' ($pressureRow.Note -like '*SRV1*') $pressureRow.Note
 
 # ===========================================================================
+Write-Host "`n=== 16. M15: son olay tek gecisle bulunur, olay sayisi ile patlamaz ===" -ForegroundColor Cyan
+<#
+    NE OLCULUYOR
+    M15 ayni olay listesini BES kez dolasiyordu: uc `Where-Object` suzgeci,
+    "son olay" icin bir `Sort-Object` ve kanit dongusu. Her adim olay basina
+    en az bir `Get-EDProperty` cagiriyordu - o da `[CmdletBinding()]` tasiyan
+    gelismis bir fonksiyondur ve cagri basina parametre baglama maliyeti oder.
+    n sinirsizdir: surekli baski altindaki bir transport sunucusu 24 saatte
+    15004/15005 ciftini binlerce kez yazar ve sayilar TUM SUNUCULAR uzerinden
+    toplanir; yani modul tam da en cok bulgu oldugu anda en yavas kosuyordu.
+
+    OLCULDU (asagidaki 4.195 olayla, ayni makine):
+        bes gecis + Sort-Object : 2,17 sn
+        tek gecis               : 0,34 sn
+    Sinir 1,5 sn: eski kalip bunun ustunde, yenisi besde biri.
+
+    DURUST NOT: buradaki asil maliyet '+=' DEGILDIR. $evidence de diziden
+    List'e cevrildi (ayni kare kopyalama kalibi, bkz. M24) ama bu olcekte
+    olculebilir bir fark uretmiyor - o degisiklik kalibi kapatmak icindir,
+    olculmus bir kazanc olarak SUNULMAZ.
+
+    Iddia iki bacaklidir: sonuc (EN GEC olay) AYNI kalmali ve sure sinirin
+    altinda kalmali.
+#>
+
+# 16a. Son olay, listedeki SIRADAN bagimsiz olarak EN GEC olandir.
+# Olaylar bilerek karisik sirada verilir; en gec olan 15005, ortada duruyor.
+$newest = New-M15Event -Id 15005 -MinutesAgo 5
+$shuffled = @(
+    (New-M15Event -Id 15004 -MinutesAgo 600)
+    (New-M15Event -Id 15006 -MinutesAgo 1200)
+    $newest
+    (New-M15Event -Id 15004 -MinutesAgo 300)
+)
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{ Events = $shuffled } }
+$lastRow = Get-EDTestRowSafe $rows 'Son olay'
+$pressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+# Beklenen deger olayin KENDI zamanindan uretilir; yeniden Get-Date cagirmak
+# dakika sinirinda testi kirilgan yapardi.
+Assert-Equal 'Karisik siradaki en gec olay bulundu' `
+    ($newest.TimeCreated.ToString('MM-dd HH:mm')) $lastRow.Values['SRV1']
+Assert-True 'Son olay TOPARLANMA (15005) olarak okundu' `
+    ($pressureRow.Note -like '*son olay TOPARLANMA (15005)*') $pressureRow.Note
+
+# 16b. Cok sayida olayda hem sonuc dogru hem sure sinirli.
+$manyEvents = New-Object 'System.Collections.Generic.List[object]'
+$rounds = 1398
+for ($i = ($rounds + 2); $i -ge 3; $i--) {
+    $manyEvents.Add((New-M15Event -Id 15004 -MinutesAgo $i))
+    $manyEvents.Add((New-M15Event -Id 15005 -MinutesAgo $i))
+    $manyEvents.Add((New-M15Event -Id 15006 -MinutesAgo $i))
+}
+# EN GEC olay listenin SONUNDA degil, BASINA eklenir: girdi sirasina guvenen
+# bir uygulama burada yanlis cevap verir.
+$manyNewest = New-M15Event -Id 15007 -MinutesAgo 1
+$manyEvents.Insert(0, $manyNewest)
+
+$manyWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$rows = Invoke-M15 @{ 'SRV1' = [pscustomobject]@{ Events = $manyEvents.ToArray() } }
+$manyWatch.Stop()
+
+$lastRow = Get-EDTestRowSafe $rows 'Son olay'
+$rejectRow = Get-EDTestRowSafe $rows 'Reddetme (15006/15007)'
+$manyPressureRow = Get-EDTestRowSafe $rows 'Kaynak baskisi (15004)'
+Write-Host ("  {0} olay, {1:N2} sn" -f $manyEvents.Count, $manyWatch.Elapsed.TotalSeconds) -ForegroundColor Gray
+
+Assert-True ('{0} olay 1,5 sn altinda islendi' -f $manyEvents.Count) ($manyWatch.Elapsed.TotalSeconds -lt 1.5) `
+    ("olculen: {0:N2} sn (bes gecisli kalipta 2,17 sn)" -f $manyWatch.Elapsed.TotalSeconds)
+Assert-Equal 'Kalabalikta da en gec olay dogru' `
+    ($manyNewest.TimeCreated.ToString('MM-dd HH:mm')) $lastRow.Values['SRV1']
+Assert-Equal 'Reddetme sayimi bozulmadi' ($rounds + 1) $rejectRow.Values['SRV1']
+Assert-Equal 'Reddetme bulundugu icin hukum FAIL' 'FAIL' $manyPressureRow.Status
+
+# 16c. Kanit dosyasinin TAMAMI yazildi - hizlandirma kanit kaybettirmez.
+$m15Path = Join-Path $script:OutputDir 'M15-backpressure.csv'
+Assert-True 'M15 kanit dosyasi yazildi' (Test-Path -LiteralPath $m15Path)
+if (Test-Path -LiteralPath $m15Path) {
+    Assert-Equal 'Her olay kanitta' $manyEvents.Count (@(Import-Csv $m15Path)).Count
+}
+
+# ===========================================================================
 Write-EDTestSummary
 Remove-Item -Path $script:OutputDir -Recurse -Force -ErrorAction SilentlyContinue
 if ((Get-EDTestFailed) -gt 0) { exit 1 }
