@@ -11,7 +11,17 @@
 function Get-EDDefaultEnvironment {
     return [ordered]@{
         profile             = 'production'   # 'production' | 'lab'
-        discovery           = 'auto'         # 'auto' | 'manual'
+        # NOT: 'discovery' ANAHTARI KALDIRILDI. Bir sure config'de ve brief'te
+        # "auto | manual" diye belgeliydi ama kod tarafinda HIC OKUNMUYORDU:
+        # M01 her kosumda Get-ExchangeServer'i cagirir ve sonucu yalnizca
+        # asagidaki servers/excludeServers listeleriyle SUZER. Yani 'manual'
+        # yazan operator "arac AD'ye hic sormayacak" saniyor, arac yine
+        # soruyordu. Ayari gercek yapmak da mumkun degil: site, surum, rol ve
+        # DAG uyeligi yalnizca o cagridan gelir ve aracin geri kalani onlarsiz
+        # calisamaz. Niyeti zaten servers listesi tastamam anlatiyor
+        # (bos = otomatik kesif, dolu = yalnizca bunlar), bu yuzden anahtar
+        # kaldirildi. Kullanicinin dosyasinda kalirsa Merge-EDDefaults onu
+        # sessizce tasir; hicbir sey bozulmaz, yine hicbir sey de yapmaz.
         servers             = @()            # bos = otomatik kesif
         excludeServers      = @()
         passiveSites        = @()            # bos = otomatik tespit
@@ -20,7 +30,31 @@ function Get-EDDefaultEnvironment {
         logAccess           = 'auto'         # 'auto' | 'smb' | 'cmdlet'
         exchangeUri         = ''             # bos = otomatik kesif
         authentication      = 'Kerberos'
-        moduleTimeoutSeconds = 120
+
+        # KOSUM GENELINDE ZAMAN BUTCESI (dakika). 0 = SINIRSIZ.
+        #
+        # NEDEN VAR: modul basina olculen sure yalnizca RAPORLANIYOR, hicbir
+        # seyi kesmiyordu; kosum genelinde ise hicbir sinir yoktu. Kodca izin
+        # verilen en kotu -Heavy kosumu ~3 saat 39 dakika surebilir ve onu
+        # kesecek hicbir sey yoktu. "Yogun saatte olc" diye 09:00'da baslayan
+        # bir kosum 12:40'ta biter; olcmesi istenen yogun saat coktan gecmistir
+        # ve rapor onu yogun saat SANIR.
+        #
+        # NEDEN 60: aracin varsayilan olcum penceresi bir saattir
+        # (trackingWindowHours). Anlattigi saatten uzun suren bir kosum artik
+        # o saati anlatmiyordur.
+        #
+        # NEDEN BU ANAHTAR 'moduleTimeoutSeconds'IN YERINI ALDI: eski anahtar
+        # config'de, profillerde ve brief'te belgeliydi ama SIFIR yerde
+        # okunuyordu - gercek 120 sn uc ayri sabit koddan geliyordu. Gercek
+        # yapilamazdi da: (1) her is kendi TimeoutSeconds'ini ISE GORE verir
+        # (Get-Recipient 60 sn, ham log ayristirmasi 900 sn) ve hicbir cagri
+        # yeri varsayilana dusmez, yani ayari varsayilana baglamak yine hicbir
+        # sey yapmazdi; (2) MODUL basina sert bir timeout zaten uygulanamaz -
+        # modulun Run blogu ana is parcaciginda senkron kosar ve
+        # PowerShell.Stop() yerel kodu kesemez (brief Bolum 4/14). Uygulanabilir
+        # olan tek sinir, ISBIRLIKCI bir son tarihtir; bu anahtar odur.
+        runBudgetMinutes    = 60
         maxRecipientLookups = 300   # M12: her benzersiz alici bir Get-Recipient cagrisidir
         maxFolderScans      = 50    # M24: her posta kutusu pahali bir klasor taramasidir
         perfSampleCount     = 20    # M20/M21: persentil icin ornek sayisi
@@ -330,6 +364,23 @@ function Get-EDConfig {
     }
     if ([double]$environment.trackingWindowHours -le 0) {
         throw "environment.trackingWindowHours pozitif olmali."
+    }
+
+    # KOSUM BUTCESI: 0 SINIRSIZ demektir, NEGATIF hicbir sey demez.
+    #
+    # Sessiz bir varsayilan konmaz. Negatif bir butce "her sey zaten gecmiste
+    # bitti" anlamina gelir; arac ilk modulden sonra durur ve operatore hicbir
+    # sey soylemeyen yarim bir rapor birakirdi - hem de bir yazim hatasi
+    # yuzunden. Sayisal olmayan deger de ayni kapiya cikar: [double] cast'i
+    # basarisiz olunca 0 uretip "sinirsiz" demek, kullanicinin yazdigi siniri
+    # sessizce KALDIRMAK olurdu. Ayni gerekce -BudgetMinutes icin de gecerli
+    # (Invoke-ExchangeDiag.ps1).
+    $budgetValue = ConvertTo-EDNumber $environment.runBudgetMinutes
+    if ($null -eq $budgetValue -or [double]::IsNaN($budgetValue) -or [double]::IsInfinity($budgetValue)) {
+        throw "environment.runBudgetMinutes sayisal olmali, verilen: '$($environment.runBudgetMinutes)' (0 = sinirsiz)."
+    }
+    if ($budgetValue -lt 0) {
+        throw "environment.runBudgetMinutes negatif olamaz, verilen: $budgetValue. Sinirsiz kosum icin 0 yazin."
     }
 
     # Suresi dolmus bastirmalar sessizce gecerli sayilmamali (brief Bolum 5).

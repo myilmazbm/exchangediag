@@ -2,8 +2,13 @@
   // Ortam tipi. "lab" secilirse profiles.json'daki skipModules/ignoreFindings uygulanir.
   "profile": "production",
 
-  // "auto" = sunucular AD'den kesfedilir. "manual" = yalnizca asagidaki servers listesi.
-  "discovery": "auto",
+  // "discovery" ANAHTARI KALDIRILDI (auto | manual). Kod tarafinda hic
+  // okunmuyordu: M01 her kosumda Get-ExchangeServer'i cagirir ve sonucu
+  // yalnizca asagidaki servers/excludeServers ile suzer, yani "manual"
+  // yazmak AD sorgusunu ENGELLEMIYORDU. Gercek yapilamaz da: site, surum,
+  // rol ve DAG uyeligi yalnizca o cagridan gelir. Ayni niyet icin asagidaki
+  // servers listesini kullanin - bos birakmak "otomatik", doldurmak
+  // "yalnizca bunlar" demektir.
 
   // Bos = otomatik kesif. Doluysa SADECE bu sunucular taranir.
   "servers": [],
@@ -64,6 +69,27 @@
   // Yukseltmek gercek bulgulari da susturabilir - taban olarak dusunun.
   "storeDiagnosisFloorMs": 1000,
 
-  // Yanit vermeyen sunucu araci kilitlemez; hucre TIMEOUT yazar.
-  "moduleTimeoutSeconds": 120
+  // KOSUM GENELINDE ZAMAN BUTCESI (dakika). 0 = SINIRSIZ.
+  //
+  // Butce dolunca kalan moduller HIC BASLATILMAZ; her biri rapora ADIYLA ve
+  // "BUTCE BITTI - bu kontrol YAPILMADI" notuyla TIMEOUT satiri olarak duser,
+  // kosumun sonuna CORE / Kosum butcesi satiri eklenir ve cikis kodu 0
+  // OLAMAZ. Yani kesilen kosum kendini tam kosum gibi SUNMAZ.
+  //
+  // Neden gerekli: kodca izin verilen en kotu -Heavy kosumu ~3 saat 39 dakika
+  // surebiliyor ve onu kesecek hicbir sey yoktu. "Yogun saatte olc" diye
+  // 09:00'da baslatilan kosum 12:40'ta bitiyor, rapor ise onu hala yogun saat
+  // saniyordu. Varsayilan 60, trackingWindowHours ile ayni buyukluktedir:
+  // anlattigi saatten uzun suren bir kosum artik o saati anlatmiyordur.
+  //
+  // Bu anahtar eski "moduleTimeoutSeconds" ayarinin yerini aldi; o ayar
+  // belgeliydi ama kodda HIC OKUNMUYORDU (gercek 120 sn sabit koddan
+  // geliyordu) ve modul basina sert bir timeout zaten uygulanamiyor -
+  // PowerShell.Stop() yerel kodu kesemez. Uygulanabilir tek sinir bu
+  // ISBIRLIKCI son tarihtir; ayni son tarih ham log ayristiricisina da
+  // gecirilir.
+  //
+  // Genis kapsamli bir -Heavy taramasi icin yukseltin (orn. 180) ya da
+  // -BudgetMinutes ile tek seferlik ezin.
+  "runBudgetMinutes": 60
 }

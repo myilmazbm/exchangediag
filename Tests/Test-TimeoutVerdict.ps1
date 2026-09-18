@@ -288,6 +288,194 @@ Assert-Equal 'kalabalik kumede tek WARN kaybolmuyor' 'WARN' (Get-EDWorstStatus $
 $kalabalikNA = @(1..39 | ForEach-Object { 'N/A' }) + @('OK')
 Assert-Equal 'tek OK, 39 N/A arasinda kayboluyor mu' 'OK' (Get-EDWorstStatus $kalabalikNA)
 
+# ===========================================================================
+Write-Host "`n=== 8. Kosum zaman butcesi: isbirlikci son tarih ===" -ForegroundColor Cyan
+
+# NEDEN BU BOLUM BURADA: butceye takilan bir kontrol 'N/A' degil TIMEOUT
+# uretir ve bu, Bolum 2-7'de sabitlenen siralamaya dogrudan yaslanir. Butce
+# satirlarinin hukmu degistirilirse (orn. N/A yapilirsa) satir bulgu
+# tablosuna hic girmez ve cikis kodu 0'a duser - yani "hic kosmamis kontrol"
+# temiz sinyali verir.
+
+# --- 8a. 0 SINIRSIZDIR, "sifir dakika" DEGILDIR ---
+# En tehlikeli hata bicimi: sifiri gecmiste bir son tarihe cevirmek. O zaman
+# ilk modulden sonra HER SEY "butce bitti" olur ve arac hicbir sey olcmeden
+# yarim bir rapor birakir. Ayni tuzak ayristiricinin BudgetSeconds
+# parametresinde de belgelidir (Core\TrackingLog.ps1).
+Assert-True '0 dakika = SINIRSIZ (son tarih yok)' ($null -eq (Get-EDRunDeadlineUtc -BudgetMinutes 0))
+Assert-True "'0' metni de sinirsiz" ($null -eq (Get-EDRunDeadlineUtc -BudgetMinutes '0'))
+
+$anchor = [datetime]::new(2026, 9, 18, 9, 0, 0, [System.DateTimeKind]::Utc)
+$deadline60 = Get-EDRunDeadlineUtc -BudgetMinutes 60 -StartUtc $anchor
+Assert-Equal '60 dk butce son tarihi' '2026-09-18 10:00:00' $deadline60.ToString('yyyy-MM-dd HH:mm:ss')
+# Kesirli dakika kulture RAGMEN ayni: tr-TR'de "1.5" 15 okunursa butce 10 kat
+# uzar ve kosum butcesi fiilen kalkar.
+$deadlineFraction = Get-EDRunDeadlineUtc -BudgetMinutes 1.5 -StartUtc $anchor
+Assert-Equal 'Kesirli butce kulturden bagimsiz' '2026-09-18 09:01:30' $deadlineFraction.ToString('yyyy-MM-dd HH:mm:ss')
+
+# Negatif bir niyet degil yazim hatasidir; sessizce sinirsiza cevrilmez.
+$threw = $false
+try { Get-EDRunDeadlineUtc -BudgetMinutes -5 | Out-Null } catch { $threw = $true }
+Assert-True 'Negatif butce acik hata veriyor' $threw 'sessizce sinirsiz olmuyor'
+$threw = $false
+try { Get-EDRunDeadlineUtc -BudgetMinutes 'bes dakika' | Out-Null } catch { $threw = $true }
+Assert-True 'Sayisal olmayan butce acik hata veriyor' $threw
+
+# --- 8b. Kalan butce: $null ile 0 AYNI SEY DEGILDIR ---
+# $null "sinir yok", 0 "sinir doldu" demektir. Ikisini ayni kovaya koymak ya
+# sinirsiz bir kosumu hemen keser ya da dolmus butceyi hic gormez.
+$noBudgetContext = [pscustomobject]@{ RunId = 'test' }
+Assert-True 'Butce alani olmayan baglam sinirsiz sayiliyor' `
+    ($null -eq (Get-EDRemainingBudgetSeconds -Context $noBudgetContext)) 'eski/test baglamlari bozulmaz'
+Assert-True 'Butcesiz baglamda butce ASLA dolmus sayilmaz' (-not (Test-EDBudgetExhausted -Context $noBudgetContext))
+
+$liveContext = [pscustomobject]@{ DeadlineUtc = [datetime]::UtcNow.AddMinutes(10) }
+Assert-True 'Acik butcede kalan sure pozitif' ((Get-EDRemainingBudgetSeconds -Context $liveContext) -gt 500)
+Assert-True 'Acik butce dolmus sayilmiyor' (-not (Test-EDBudgetExhausted -Context $liveContext))
+
+$deadContext = [pscustomobject]@{ DeadlineUtc = [datetime]::UtcNow.AddMinutes(-1) }
+Assert-True 'Gecmis son tarihte kalan sure negatif' ((Get-EDRemainingBudgetSeconds -Context $deadContext) -lt 0)
+Assert-True 'Gecmis son tarihte butce DOLMUS' (Test-EDBudgetExhausted -Context $deadContext)
+
+# --- 8c. Is sureleri kalan butceyle kirpilir ama SIFIRA inmez ---
+# Kirpma 0 uretirse ayristirici tarafinda 0 "SINIRSIZ" demektir: butceyi
+# korumak icin yapilan sey butceyi tamamen kaldirirdi.
+Assert-Equal 'Butcesiz kosumda istenen sure aynen gecerli' 840 (Get-EDBudgetedSeconds -Context $noBudgetContext -Requested 840)
+# DIKKAT: "bol" olcutu istenen suredir, insan sezgisi degil. 10 dakikalik bir
+# butce 840 saniyelik bir is icin BOL DEGILDIR (600 < 840) ve kirpilir; bu
+# testin ilk hali tam da oradan kirmizi dondu. Ayrim onemli cunku kirpmanin
+# amaci "cok uzun isleri kis" degil, "butceyi asma"dir.
+$roomyContext = [pscustomobject]@{ DeadlineUtc = [datetime]::UtcNow.AddMinutes(30) }
+Assert-Equal 'Bol butcede istenen sure aynen gecerli' 840 (Get-EDBudgetedSeconds -Context $roomyContext -Requested 840)
+Assert-True 'Istenen sureden kisa butce kirpar (600 sn butce, 840 sn istek)' `
+    ((Get-EDBudgetedSeconds -Context $liveContext -Requested 840) -lt 840)
+
+$tightContext = [pscustomobject]@{ DeadlineUtc = [datetime]::UtcNow.AddSeconds(120) }
+$tight = Get-EDBudgetedSeconds -Context $tightContext -Requested 840 -Floor 30
+Assert-True 'Dar butcede is suresi kirpiliyor' ($tight -lt 840 -and $tight -ge 30) "kirpilan deger: $tight"
+
+$expiredBudget = Get-EDBudgetedSeconds -Context $deadContext -Requested 840 -Floor 30
+Assert-Equal 'Dolmus butcede bile alt sinir korunuyor (0 = sinirsiz tuzagi)' 30 $expiredBudget
+Assert-True 'Kirpilmis butce ASLA 0 olmuyor' ($expiredBudget -gt 0)
+
+# --- 8d. OLU AYAR AVI: config'de yazan her anahtarin bir OKUYANI olmali ---
+#
+# Bu paketin en genel iddiasi. 'ignoreFindings' bir sure config'de,
+# profillerde ve brief'te belgeli oldugu halde kodda HIC OKUNMUYORDU;
+# 'moduleTimeoutSeconds' ayni kusuru AYNEN tekrarladi (gercek 120 sn uc ayri
+# sabit koddan geliyordu) ve 'discovery' ucuncusuydu. Uc kez tekrarlanan bir
+# kusur sinifi tek tek satirlarla degil, SINIFI KAPATAN bir iddiayla
+# kapatilir: Config.sample\environment.json ve thresholds.json'daki her
+# anahtar, Core\Config.ps1 ve Config.sample\ DISINDA en az bir dosyada
+# gecmelidir. Gecmiyorsa o ayar belgeli ama OLUDUR ve kullanicinin
+# degistirdigi sey hicbir sey yapmiyordur.
+$searchRoots = @(
+    (Join-Path $projectRoot 'Core')
+    (Join-Path $projectRoot 'Modules')
+)
+$readerText = New-Object System.Text.StringBuilder
+foreach ($root in $searchRoots) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Recurse | Where-Object { $_.Extension -in @('.ps1', '.cs') })) {
+        # Config.ps1 ayarlarin TANIMLANDIGI yerdir; orada gecmek "okunuyor"
+        # demek degildir. Olcut tam olarak budur.
+        if ($file.FullName -eq (Join-Path $projectRoot 'Core\Config.ps1')) { continue }
+        [void]$readerText.AppendLine((Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8))
+    }
+}
+[void]$readerText.AppendLine((Get-Content -LiteralPath (Join-Path $projectRoot 'Invoke-ExchangeDiag.ps1') -Raw -Encoding UTF8))
+$readers = $readerText.ToString()
+
+$sampleEnv = Read-EDJsonFile (Join-Path $projectRoot 'Config.sample\environment.json')
+$deadEnvKeys = @(@($sampleEnv.Keys) | Where-Object { $readers -notmatch [regex]::Escape([string]$_) })
+Assert-Equal 'environment.json: okunmayan (OLU) ayar yok' '' ($deadEnvKeys -join ', ')
+
+$sampleThresholds = Read-EDJsonFile (Join-Path $projectRoot 'Config.sample\thresholds.json')
+$deadThresholdKeys = @(@($sampleThresholds.Keys) | Where-Object { $readers -notmatch [regex]::Escape([string]$_) })
+Assert-Equal 'thresholds.json: okunmayan (OLU) esik yok' '' ($deadThresholdKeys -join ', ')
+
+# Varsayilan tablo ile ornek dosya AYRISMAMALI: birinde olup digerinde
+# olmayan bir anahtar, kullanicinin hic gormedigi bir ayar demektir.
+$defaultEnvKeys = @((Get-EDDefaultEnvironment).Keys | Sort-Object)
+$sampleEnvKeys = @(@($sampleEnv.Keys) | Sort-Object)
+Assert-Equal 'Varsayilan environment anahtarlari ornek dosyayla ayni' `
+    ($defaultEnvKeys -join ',') ($sampleEnvKeys -join ',')
+
+# Kaldirilan iki ayar GERI SIZMAMALI: yeniden eklenirse yukaridaki olu-ayar
+# suzgeci onlari yakalar, ama adlarini acikca anmak gerekcelerini de tasir.
+Assert-True "'moduleTimeoutSeconds' geri gelmedi" ($defaultEnvKeys -notcontains 'moduleTimeoutSeconds') `
+    'gercek 120 sn sabit koddan geliyordu; modul basina sert timeout uygulanamaz'
+Assert-True "'discovery' geri gelmedi" ($defaultEnvKeys -notcontains 'discovery') `
+    "M01 her kosumda Get-ExchangeServer cagirir; 'manual' AD sorgusunu engellemiyordu"
+Assert-True "Yerine gecen ayar GERCEKTEN okunuyor" ($defaultEnvKeys -contains 'runBudgetMinutes')
+
+# ===========================================================================
+Write-Host "`n=== 9. Kosum butcesi SICAK YOLA kadar iniyor mu ===" -ForegroundColor Cyan
+
+# BUTCE YALNIZCA MODULLER ARASINDA ISLERSE YARIM KALIR.
+#
+# Ham log ayristirmasi tek basina 900 saniyelik bir is olarak kurulur ve
+# yerel koda girdikten sonra disaridan durdurulamaz (PowerShell.Stop()
+# senkrondur - brief Bolum 4/14). Gercek sinir ayristiriciya verilen
+# KOOPERATIF butcedir; kosum butcesinden geriye 2 dakika kalmisken o ise 14
+# dakika vermek, kosum butcesini bastan anlamsiz kilardi. Bu bolum, kirpmanin
+# gercekten GOREVE islendigini gorev nesnesi uzerinden dogrular - kaynak
+# metnine bakarak degil.
+. (Join-Path $projectRoot 'Core\TrackingLog.ps1')
+
+function New-EDBudgetTrackingContext {
+    param($DeadlineUtc)
+    $executor = New-EDLocalMockExecutor -Plan @{}
+    $context = New-EDTestContext -Config $config -Executor $executor -Servers @((New-EDTestServer -Name 'EXC01')) `
+        -Sites @([pscustomobject]@{ Name = 'Site1' }) -OutputDir $script:OutputDir
+    $context | Add-Member -MemberType NoteProperty -Name DeadlineUtc -Value $DeadlineUtc
+    # Kesif adimi atlanir: bu bolumun konusu log YERI degil, ise verilen SURE.
+    $context.Cache['TrackingLogLocation'] = @([pscustomobject]@{
+        Server = 'EXC01'; Enabled = $true; LocalPath = 'D:\Logs'; UncPath = '\\EXC01\D$\Logs'
+        Accessible = $true; FileCount = 3; Error = $null
+    })
+    return $context
+}
+
+function Get-EDBudgetParserTask {
+    param($DeadlineUtc)
+    $context = New-EDBudgetTrackingContext -DeadlineUtc $DeadlineUtc
+    # Sahte yurutucu veri uretmez; onemli olan GOREVIN nasil kuruldugudur.
+    try { Get-EDDeliveryAnalysis -Context $context | Out-Null } catch { }
+    $tasks = @($context.Executor.LocalTasks | Where-Object { $_.Parameters.ContainsKey('BudgetSeconds') })
+    if ($tasks.Count -eq 0) { return $null }
+    return $tasks[0]
+}
+
+$roomyTask = Get-EDBudgetParserTask -DeadlineUtc ([datetime]::UtcNow.AddHours(1))
+Assert-True 'Ham log ayristirma isi kuruldu' ($null -ne $roomyTask)
+if ($null -ne $roomyTask) {
+    Assert-Equal 'Bol butcede kooperatif butce 840 sn' 840 ([int]$roomyTask.Parameters['BudgetSeconds'])
+    # 840 < 900 iliskisi brief Bolum 4 madde 9'un ta kendisi: kooperatif butce
+    # yurutucu timeout'unun ALTINDA kalmali, yoksa is once terk edilir ve
+    # kismi sonuc hic geri donmez.
+    Assert-Equal 'Bol butcede gorev timeout 900 sn' 900 ([int]$roomyTask.TimeoutSeconds)
+}
+
+$tightTask = Get-EDBudgetParserTask -DeadlineUtc ([datetime]::UtcNow.AddSeconds(200))
+Assert-True 'Dar butcede is kuruldu' ($null -ne $tightTask)
+if ($null -ne $tightTask) {
+    $tightBudget = [int]$tightTask.Parameters['BudgetSeconds']
+    Assert-True 'Dar butcede kooperatif butce KIRPILDI' ($tightBudget -lt 840) "butce: $tightBudget sn"
+    # SIFIR GECILEMEZ: ayristiricida 0 "SINIRSIZ" demektir, yani kirpma
+    # butceyi korumak yerine TAMAMEN KALDIRIRDI.
+    Assert-True 'Kirpilmis kooperatif butce 0 DEGIL' ($tightBudget -gt 0) "butce: $tightBudget sn"
+    Assert-True 'Kirpildiktan sonra da butce < timeout' ($tightBudget -lt [int]$tightTask.TimeoutSeconds) `
+        ("$tightBudget < $([int]$tightTask.TimeoutSeconds)")
+}
+
+# Butcesiz (0 = sinirsiz) kosumda ESKI DAVRANIS aynen korunur.
+$unlimitedTask = Get-EDBudgetParserTask -DeadlineUtc $null
+Assert-True 'Butcesiz kosumda is kuruldu' ($null -ne $unlimitedTask)
+if ($null -ne $unlimitedTask) {
+    Assert-Equal 'Butcesiz kosumda kooperatif butce degismiyor' 840 ([int]$unlimitedTask.Parameters['BudgetSeconds'])
+    Assert-Equal 'Butcesiz kosumda gorev timeout degismiyor' 900 ([int]$unlimitedTask.TimeoutSeconds)
+}
+
 # ---------------------------------------------------------------------------
 if (Test-Path -LiteralPath $script:OutputDir) { Remove-Item -LiteralPath $script:OutputDir -Recurse -Force }
 
