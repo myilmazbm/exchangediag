@@ -117,7 +117,6 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
 ```jsonc
 {
   "profile": "production",        // "production" | "lab"
-  "discovery": "auto",            // "auto" | "manual"
   "servers": [],                  // boş = otomatik keşif; doluysa sadece bunlar
   "excludeServers": [],           // taranmayacaklar (ör. Edge)
   "passiveSites": [],             // boş = otomatik tespit
@@ -126,7 +125,7 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
   "logAccess": "auto",            // "auto" | "smb" | "cmdlet" — bkz. Bölüm 14
   "exchangeUri": "",              // boş = otomatik keşif; "http://<sunucu>/PowerShell/"
   "authentication": "Kerberos",
-  "moduleTimeoutSeconds": 120,    // modül başına varsayılan yürütücü timeout'u
+  "runBudgetMinutes": 60,         // KOŞUM GENELİNDE zaman bütçesi (dakika). 0 = sınırsız
   "maxRecipientLookups": 300,     // M12: sorgulanacak en fazla benzersiz alıcı
   "perfSampleCount": 20,          // M20/M21: kaç örnek (persentil için)
   "perfSampleIntervalSeconds": 1, // örnekler arası hedef aralık
@@ -136,6 +135,12 @@ Tüm ortama özgü bilgi **config dosyalarında** tutulur; script'te değil.
 ```
 
 > ⚠️ **`storeDiagnosisFloorMs` bir eşik değil, SUSMA EŞİĞİDİR.** M23 satırının `OK`/`WARN`/`FAIL` hükmü `storeTimeInServerMs`'ten gelir; bu değer yalnızca "BEKLİYOR / CPU YAKIYOR" teşhisinin kurulabildiği en küçük büyüklüktür. 3 ms sunucu zamanının 0 ms CPU'ya oranı da sonsuzdur ama kimse beklemiyordur. Yükseltmek gerçek bulguları da susturur. Bu yüzden `warn`/`fail` ikilisine sokulmamıştır: tek yanlı bir kapıyı o şemaya koymak, yön çıkarımına uydurma bir anlam kazandırırdı (karş. `maxRecipientLookups`, `maxFolderScans`).
+
+> ⚠️ **`runBudgetMinutes` bir görev timeout'u değil, KOŞUM BÜTÇESİDİR.** Modül başına sert bir zaman sınırı bu mimaride uygulanamaz: modülün `Run` bloğu ana iş parçacığında senkron koşar ve `PowerShell.Stop()` yerel kodu kesemez (Bölüm 4, madde 9). Uygulanabilir olan tek şey **işbirlikçi bir son tarihtir**: karar modüller arasında verilir ve aynı son tarih ham log ayrıştırıcısının `BudgetSeconds` değerini de kırpar. Bu yüzden bütçe bir garanti değil **HEDEFTİR** — en çok bir modüllük aşılır ve aşım rapora yazılır.
+>
+> Bütçe dolduğunda kalan modüller **hiç başlatılmaz**; her biri rapora **adıyla** ve "BUTCE BITTI - bu kontrol YAPILMADI" notuyla `TIMEOUT` satırı olarak düşer, koşumun sonuna `CORE / Koşum bütçesi` satırı eklenir ve **çıkış kodu 0 olamaz**. Kesilen koşum kendini tam koşum gibi sunmaz. `N/A` kullanılmaz: `N/A` "ölçülemedi" der ve bulgu tablosuna hiç girmez — hiç koşmamış bir kontrol raporun en görünmez satırı olurdu.
+>
+> Bu ayar, bir süre config'de ve bu brief'te belgeli olduğu hâlde **hiç okunmayan** `moduleTimeoutSeconds`'ın yerini aldı; gerçek 120 sn üç ayrı sabit koddan geliyordu. Aynı avda `discovery` de ölü çıktı ve kaldırıldı. Bu kusur sınıfı artık `Tests\Test-TimeoutVerdict.ps1` ile kapalı: `Config.sample`'daki her anahtarın `Core\Config.ps1` dışında bir okuyanı olmak zorundadır.
 
 > ⚠️ **`parallelism` keyfi büyütülemez.** Exchange throttling policy'sindeki `PowerShellMaxConcurrency` (varsayılan 18) kullanıcı başına eşzamanlı oturum sayısını sınırlar. Araç bu değeri okuyup kendi tavanını ona göre kısar: **Global kapsamlı policy'lerin en düşüğünün yarısı** (diğer yöneticilere yer bırakmak için), değer sınırsızsa 8, policy hiç okunamazsa 4. Buraya yazılan daha büyük bir sayı bu tavanla kırpılır; aksi halde araç kendi kendini boğar ve diğer yöneticilerin oturum açmasını engeller.
 
@@ -408,6 +413,7 @@ M21    Disk sec/Write        0.003   0.002   0.004    0.003   OK
 | Tam tarama | `.\Invoke-ExchangeDiag.ps1 -All -Heavy` | Periyodik |
 | **Yoğun saat** | Zamanlanmış görev, iş saatleri içinde birkaç kez | ⚠️ Sakin saat ölçümü yanıltır |
 | Karşılaştırma | `-CompareWith .\output\<önceki>` | Sakin vs yoğun delta |
+| Zaman bütçesi | `-BudgetMinutes 180` | Varsayılan 60 dk'lık bütçeyi ezer; `0` = sınırsız. Bütçeye takılan koşum, koşmayan modülleri **adıyla** raporlar ve 0 ile çıkmaz |
 | Tek sunucu | `-Server <ad>` | Derin inceleme |
 | Kuru çalıştırma | `-ListModules` | Hangi modüller bu ortamda geçerli |
 | Log erişim modu | `-LogAccess Auto\|Smb\|Cmdlet` | Ham dosya okuma vs cmdlet (Bölüm 14) |

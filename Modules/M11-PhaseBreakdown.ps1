@@ -75,15 +75,29 @@ Register-EDModule @{
         # soruldugunda sabiti tekrar etmek yerine ayni degeri yazmalidir.
         $maxMessages = 2000000
 
+        # M11 KOSUM BUTCESINDEN HABERSIZ OLAMAZ.
+        #
+        # Sabit 840/900 veren bir modul, butcenin son iki dakikasinda
+        # baslarsa TEK BASINA on bes dakika yiyebilir - yani butce
+        # "en cok bir modulluk asilir" sozunu tutamaz. Ayni kirpma
+        # Core/TrackingLog.ps1'de zaten var; desen oradan alindi.
+        #
+        # Alt sinir (30 sn) kasitli: kalan butce 1 sn iken isi 1 sn'lik
+        # timeout'la baslatmak onu TERK ETTIRIR, terk edilen her is
+        # havuzdan bir runspace goturur ve butceyi korumak icin yapilan
+        # sey kosumun geri kalanini bogar.
+        $parserBudget = Get-EDBudgetedSeconds -Context $Context -Requested 840 -Floor 30
+        $parserTimeout = $parserBudget + 60
+
         $tasks = foreach ($location in $targets) {
-            New-EDLocalTask -Key $location.Server -Script $analyze -TimeoutSeconds 900 -Parameters @{
+            New-EDLocalTask -Key $location.Server -Script $analyze -TimeoutSeconds $parserTimeout -Parameters @{
                 Server           = $location.Server
                 UncPath          = $location.UncPath
                 StartUtc         = $startUtc
                 EndUtc           = $endUtc
                 MaxMessages      = $maxMessages
                 InnerParallelism = 2
-                BudgetSeconds    = 840
+                BudgetSeconds    = $parserBudget
             }
         }
 
