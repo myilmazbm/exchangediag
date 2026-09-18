@@ -305,11 +305,15 @@ Get-MailboxDatabaseCopyStatus   Get-MailboxFolderStatistics   Test-ServiceHealth
 | `Test-HealthModules` | 79 | M40-M45 |
 | `Test-CompareEngine` | 145 | Delta motoru ve kapsam koruması |
 | `Test-ReportLayer` | 110 | Rapor katmanı: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
-| `Test-ReadOnlyLint` | 38 | Salt okunurluk denetiminin kendi testi |
+| `Test-ReadOnlyLint` | 43 | Salt okunurluk denetiminin kendi testi |
 | `Test-ModuleContracts` | 33 | Yapısal sözleşme: makine verisi isteyen modül ve Core toplayıcısı hedef sunucuya gidiyor mu |
-| `Test-TimeoutVerdict` | 28 | `TIMEOUT` sıralaması ve etrafındaki kararlar |
+| `Test-TimeoutVerdict` | 64 | `TIMEOUT` sıralaması ve etrafındaki kararlar |
+| `Test-VerdictCore` | 145 | Hüküm çekirdeği: eşik sınırı, bastırma, durum sıralaması |
+| `Test-InventoryModules` | 56 | M02 ve M03 modül mantığı |
+| `Test-PerfSampler` | 59 | Ham perf sayacı matematiği ve volume envanteri |
+| `Test-ProbeBodies` | 93 | Sonda gövdeleri (M02/M05/M41/M42/M44) |
 
-**15 paket × 2 kültür = 2486 doğrulama.** `Test-LatencyModules` dışındaki paketler gerçek sunucuya hiç sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır — hiçbir paket depo içine yazmaz.
+**19 paket × 2 kültür = 3274 doğrulama.** `Test-LatencyModules` dışındaki paketler gerçek sunucuya hiç sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır — hiçbir paket depo içine yazmaz.
 
 Örgülerin **karar** mantığı `Test-LatencyModules`'te değil `Test-LatencyPatterns`'ta sınanır: iki sunuculu, pasif siteli, tek örneklemli, düşük hacimli tepe saatli senaryolar canlı bir ortamda üretilemez.
 

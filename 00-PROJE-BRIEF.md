@@ -585,7 +585,7 @@ Paketler geliştiricinin makinesinde (çoğunlukla en-US) koşuyordu ve **tek bi
 
 **Geçmek yetmez, iki kültürde de geçmek gerekir.** Bir iddia yalnızca tek kültürde geçiyorsa ya ürün kültüre bağımlıdır (hata) ya da iddianın kendisi geliştiricinin ondalık ayracını varsayıyordur (test hatası); ikisi de düzeltilir. Sonuç satırı üretmeyen bir paket "0 hata" sayılmaz, `COKTU` olarak raporlanır.
 
-Bugünkü durum — **15 paket × 2 kültür = 2486 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
+Bugünkü durum — **19 paket × 2 kültür = 3274 doğrulama, 0 hata** (paket başına en-US/tr-TR aynı):
 
 | Paket | Doğrulama | Kapsam |
 |---|---|---|
@@ -601,9 +601,13 @@ Bugünkü durum — **15 paket × 2 kültür = 2486 doğrulama, 0 hata** (paket 
 | `Test-HealthModules` | 79 | M40-M45 |
 | `Test-CompareEngine` | 145 | Delta motoru ve kapsam koruması |
 | `Test-ReportLayer` | 110 | Rapor katmanı + giriş noktası: CSV kaçırma, `N/A` sınıfı, çıkış kodları |
-| `Test-ReadOnlyLint` | 38 | Salt okunurluk denetiminin **kendi** testi |
+| `Test-ReadOnlyLint` | 43 | Salt okunurluk denetiminin **kendi** testi |
 | `Test-ModuleContracts` | 33 | Yapısal sözleşme: `RunLocal` kullanan modül ve Core toplayıcısı hedefe gidiyor mu |
-| `Test-TimeoutVerdict` | 28 | `TIMEOUT` sıralaması: `N/A` < `TIMEOUT` < `WARN` < `ERROR` < `FAIL` |
+| `Test-TimeoutVerdict` | 64 | `TIMEOUT` sıralaması: `N/A` < `TIMEOUT` < `WARN` < `ERROR` < `FAIL` |
+| `Test-VerdictCore` | 145 | Hüküm çekirdeği: `Get-EDStatus` sınır semantiği, `Test-EDIgnoredFinding` bastırması, `Get-EDWorstStatus` |
+| `Test-InventoryModules` | 56 | M02 (gerçek build) ve M03 (servis durumu) modül mantığı |
+| `Test-PerfSampler` | 59 | Ham `PERF_AVERAGE_TIMER` matematiği ve volume envanteri |
+| `Test-ProbeBodies` | 93 | M02/M05/M41/M42/M44 sonda gövdeleri — uzak makinede koşan gerçek kod |
 
 > `Test-LatencyModules` dışındaki paketler gerçek sunucuya sorgu göndermez: sahte yürütücü gerçek `ExchangeDiag.ExecResult` nesneleri üretir, sentetik tracking log'lar `%TEMP%` altına yazılır. `Test-LatencyModules` ise bağlanır ve M01'i koşturur; bu yüzden örgülerin **karar** mantığı orada değil `Test-LatencyPatterns`'ta sınanır — iki sunuculu, pasif siteli, tek örneklemli senaryolar canlı ortamda üretilemez.
 
